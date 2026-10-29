@@ -1,0 +1,3 @@
+# Example config for review-run. Location: ~/.config/review-run/config.yaml (drop-ins: config.d/*.yaml). Keys are defined in docs/interface.md once designed.
+hooks: {}
+# token_env: ...
