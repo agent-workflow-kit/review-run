@@ -1,6 +1,6 @@
 [project]
 name = "review-run"
-version = "0.0.0"
+version = "0.0.1"
 description = "Run a review skill on a pull request and store the resulting review draft."
 readme = "README.md"
 requires-python = ">=3.12"
