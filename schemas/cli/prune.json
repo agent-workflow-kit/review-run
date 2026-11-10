@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "review-run/cli/prune.json",
+  "title": "review-run prune --json",
+  "description": "Deleted (or, with --dry-run, would-be-deleted) terminal runs. A running or escalated run is never touched.",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "dry_run": {
+      "type": "boolean"
+    },
+    "older_than": {
+      "$ref": "../defs.json#/$defs/duration"
+    },
+    "deleted_runs": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "run_ids": {
+      "type": "array",
+      "items": {
+        "$ref": "../defs.json#/$defs/run_id"
+      }
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "dry_run",
+    "older_than",
+    "deleted_runs",
+    "run_ids"
+  ]
+}

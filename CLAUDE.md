@@ -28,9 +28,9 @@ It must work fully standalone at a terminal: it never depends on the harness (`a
 
 ## Workflow
 
-1. Start with a design session that resolves the open topics in `docs/design.md` and records decisions there.
-2. Write `docs/interface.md` and `schemas/`.
-3. Implement test-first.
+1. The design is done: `docs/interface.md` (the single normative source), `docs/design.md` (decisions), `docs/plan.md` (staged plan) and `schemas/`. Keep `docs/interface.md` and `schemas/` current when behavior changes, and update the interface registry in `awkit-docs`.
+2. Implement test-first, in the stage order of `docs/plan.md`, one GitHub issue at a time.
+3. Review sessions' untrusted output (artifact, summary, reason, `lower_error`) is never put in argv, env, hook payloads, audit records or error messages; the code-run command runs only in the sandbox unless the user's own config says otherwise.
 
 ## Repository workflow
 

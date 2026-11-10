@@ -1,0 +1,183 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "review-run/cli/run-dry-run.json",
+  "title": "review-run run --dry-run --json",
+  "description": "Plan only: allocates nothing, runs no hook and no code run, launches nothing. Paths in the manifest are untrusted.",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "dry_run": {
+      "const": true
+    },
+    "pr": {
+      "$ref": "../defs.json#/$defs/pr"
+    },
+    "repo": {
+      "$ref": "../defs.json#/$defs/repo_id"
+    },
+    "skill": {
+      "$ref": "../defs.json#/$defs/skill"
+    },
+    "mode": {
+      "$ref": "../defs.json#/$defs/mode"
+    },
+    "previous_run": {
+      "oneOf": [
+        {
+          "$ref": "../defs.json#/$defs/run_id"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "head_sha": {
+      "oneOf": [
+        {
+          "$ref": "../defs.json#/$defs/sha"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "settings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "key": {
+            "type": "string",
+            "pattern": "^[a-z_]+(?:\\.[a-z_]+)*$"
+          },
+          "value": {
+            "description": "The resolved value (a config value; never a secret, there are none)."
+          },
+          "origin": {
+            "enum": [
+              "flag",
+              "repo",
+              "env",
+              "config",
+              "default"
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "key",
+          "value",
+          "origin"
+        ]
+      },
+      "description": "Resolved settings with their origin."
+    },
+    "launch_args": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "The agent-spawn launch argv review-run would use; no untrusted text."
+    },
+    "manifest": {
+      "type": "array",
+      "items": {
+        "$ref": "../defs.json#/$defs/manifest_entry"
+      }
+    },
+    "coverage_preview": {
+      "$ref": "../defs.json#/$defs/coverage"
+    },
+    "sizes": {
+      "type": "object",
+      "properties": {
+        "files": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "diff_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "provided_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "provided_files": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "files",
+        "diff_bytes",
+        "provided_bytes",
+        "provided_files"
+      ]
+    },
+    "would_fail": {
+      "oneOf": [
+        {
+          "enum": [
+            "prefetch_failed",
+            "stale_head",
+            "too_large",
+            "launch_failed",
+            "canceled",
+            "session_failed",
+            "unreported",
+            "killed",
+            "timeout",
+            "lost",
+            "implicit_done",
+            "artifact_missing",
+            "artifact_mismatch",
+            "skill_missing",
+            "artifact_invalid",
+            "internal",
+            "not_open",
+            "unknown_host",
+            "live",
+            "not_escalated",
+            "retention"
+          ]
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "The reason the run would refuse or fail with, else null."
+    },
+    "would_exit": {
+      "$ref": "../defs.json#/$defs/exit_code"
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "$ref": "../defs.json#/$defs/run_warning"
+      }
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "dry_run",
+    "pr",
+    "repo",
+    "skill",
+    "mode",
+    "previous_run",
+    "head_sha",
+    "settings",
+    "launch_args",
+    "manifest",
+    "coverage_preview",
+    "sizes",
+    "would_fail",
+    "would_exit",
+    "warnings"
+  ]
+}

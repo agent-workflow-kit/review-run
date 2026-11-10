@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "review-run/cli/reconcile.json",
+  "title": "review-run reconcile --json",
+  "description": "What reconcile changed (or, with --dry-run, would change). It never signals a process.",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "dry_run": {
+      "type": "boolean"
+    },
+    "already_running": {
+      "type": "boolean",
+      "description": "true when another reconcile holds the lease; nothing was done (exit 0)."
+    },
+    "finalized": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "run_id": {
+            "$ref": "../defs.json#/$defs/run_id"
+          },
+          "state": {
+            "$ref": "../defs.json#/$defs/state"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "run_id",
+          "state"
+        ]
+      },
+      "description": "Running or escalated runs whose agent ended."
+    },
+    "lost": {
+      "type": "array",
+      "items": {
+        "$ref": "../defs.json#/$defs/run_id"
+      },
+      "description": "Running runs whose runner process is gone and whose agent was never launched, ended failed (lost)."
+    },
+    "teardowns": {
+      "type": "object",
+      "properties": {
+        "retried": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "done": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "failed": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "retried",
+        "done",
+        "failed"
+      ]
+    },
+    "cleaned": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Terminal runs whose leftovers (prompt and input files) were removed."
+    },
+    "leaked_throwaways": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128
+      },
+      "description": "wtctl throwaway ids recorded as leaked."
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "dry_run",
+    "already_running",
+    "finalized",
+    "lost",
+    "teardowns",
+    "cleaned",
+    "leaked_throwaways"
+  ]
+}

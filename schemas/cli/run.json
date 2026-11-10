@@ -1,0 +1,7 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "review-run/cli/run.json",
+  "title": "review-run run --json",
+  "description": "The run object for run (without --dry-run; also run --no-wait with state running). show --draft prints the stored review.json, not this. Printed for exits 0, 12 (a failed run), 13 (an escalated run), 14 to 18 and 22; other exits print the error envelope (cli/error.json).",
+  "$ref": "../defs.json#/$defs/run"
+}

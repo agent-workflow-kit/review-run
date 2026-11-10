@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "review-run/hooks/post-escalate.json",
+  "title": "post-escalate hook payload (stdin)",
+  "description": "On the transition to escalated, each time. Cannot veto.",
+  "type": "object",
+  "properties": {
+    "tool": {
+      "const": "review-run"
+    },
+    "hook": {
+      "const": "post-escalate"
+    },
+    "object_type": {
+      "const": "run"
+    },
+    "object_id": {
+      "$ref": "../defs.json#/$defs/run_id"
+    },
+    "repo": {
+      "$ref": "../defs.json#/$defs/repo_id"
+    },
+    "labels": {
+      "$ref": "../defs.json#/$defs/labels"
+    },
+    "reason": {
+      "enum": [
+        "needs_input",
+        "blocked"
+      ]
+    },
+    "pr": {
+      "$ref": "../defs.json#/$defs/pr"
+    },
+    "agent_id": {
+      "$ref": "../defs.json#/$defs/agent_id"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "tool",
+    "hook",
+    "object_type",
+    "object_id",
+    "repo",
+    "labels",
+    "reason",
+    "pr",
+    "agent_id"
+  ]
+}

@@ -1,15 +1,14 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "review-run/log",
+  "$id": "review-run/log.json",
   "title": "review-run log.jsonl record",
+  "description": "One line of log.jsonl (export --log prints these): phase and state changes, warnings, normalization counts and sibling-tool error codes.",
   "type": "object",
   "properties": {
     "ts": {
-      "type": "string",
-      "format": "date-time"
+      "$ref": "defs.json#/$defs/ts"
     },
     "level": {
-      "type": "string",
       "enum": [
         "debug",
         "info",
@@ -18,16 +17,100 @@
       ]
     },
     "event": {
-      "type": "string"
+      "enum": [
+        "phase_change",
+        "state_change",
+        "warning",
+        "normalization",
+        "sibling_error",
+        "hook_failed",
+        "hook_skipped",
+        "teardown_retry",
+        "reconcile",
+        "throwaway_leaked"
+      ]
     },
     "message": {
-      "type": "string"
+      "type": "string",
+      "maxLength": 512,
+      "description": "A short line of closed codes, ids and counts; never untrusted text."
+    },
+    "run_id": {
+      "oneOf": [
+        {
+          "$ref": "defs.json#/$defs/run_id"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "pr": {
+      "oneOf": [
+        {
+          "$ref": "defs.json#/$defs/pr"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "phase": {
+      "oneOf": [
+        {
+          "$ref": "defs.json#/$defs/phase"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "state": {
+      "oneOf": [
+        {
+          "$ref": "defs.json#/$defs/state"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "tool": {
+      "enum": [
+        "forgectl",
+        "pr-comment",
+        "agent-spawn",
+        "claude-session",
+        "wtctl",
+        null
+      ],
+      "description": "The sibling tool for sibling_error."
+    },
+    "code": {
+      "oneOf": [
+        {
+          "$ref": "defs.json#/$defs/code_word"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "A closed code: a reason, a warning code or a sibling's error code."
+    },
+    "count": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0,
+      "description": "A count (normalization fixes, reconciled runs)."
     }
   },
+  "additionalProperties": false,
   "required": [
     "ts",
     "level",
-    "event"
-  ],
-  "additionalProperties": true
+    "event",
+    "message"
+  ]
 }

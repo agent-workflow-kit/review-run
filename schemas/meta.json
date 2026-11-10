@@ -1,0 +1,129 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "review-run/meta.json",
+  "title": "review-run meta.review_run object",
+  "description": "The value of the draft's meta.review_run key (the draft's meta object holds exactly that one key). Every text field is untrusted, and meta is untrusted text downstream. A consumer treats coverage.status partial, code_run.status skipped (when it expected output) and head_moved true as reasons not to act automatically.",
+  "type": "object",
+  "properties": {
+    "version": {
+      "const": 1
+    },
+    "run_id": {
+      "$ref": "defs.json#/$defs/run_id"
+    },
+    "skill": {
+      "$ref": "defs.json#/$defs/skill"
+    },
+    "skill_version": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "maxLength": 64,
+      "description": "The bundled plugin's version for the default skill, else null."
+    },
+    "mode": {
+      "$ref": "defs.json#/$defs/mode"
+    },
+    "verdict": {
+      "$ref": "defs.json#/$defs/verdict",
+      "x-untrusted": true
+    },
+    "risk": {
+      "$ref": "defs.json#/$defs/risk",
+      "x-untrusted": true
+    },
+    "risk_reasons": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "x-untrusted": true,
+        "description": "Untrusted: a short reason, one line.",
+        "maxLength": 200,
+        "pattern": "^[^\\n\\r\\u000b\\u000c\\u001c-\\u001e\\u0085  ]*$"
+      },
+      "maxItems": 10,
+      "x-untrusted": true,
+      "description": "Untrusted: the session's reasons, at most 10 one-line strings of at most 200 characters."
+    },
+    "summary": {
+      "type": "string",
+      "x-untrusted": true,
+      "description": "Untrusted: the session's summary, one paragraph, at most 2000 characters.",
+      "maxLength": 2000
+    },
+    "severity_counts": {
+      "$ref": "defs.json#/$defs/severity_counts"
+    },
+    "coverage": {
+      "$ref": "defs.json#/$defs/coverage"
+    },
+    "pr": {
+      "$ref": "defs.json#/$defs/pr_facts"
+    },
+    "code_run": {
+      "$ref": "defs.json#/$defs/code_run"
+    },
+    "head_at_end": {
+      "oneOf": [
+        {
+          "$ref": "defs.json#/$defs/sha"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "null when the end-of-run read failed."
+    },
+    "head_moved": {
+      "type": [
+        "boolean",
+        "null"
+      ],
+      "description": "null when the end-of-run read failed."
+    },
+    "normalized": {
+      "type": "array",
+      "items": {
+        "$ref": "defs.json#/$defs/normalized_entry"
+      }
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "$ref": "defs.json#/$defs/meta_warning"
+      }
+    },
+    "previous_run": {
+      "oneOf": [
+        {
+          "$ref": "defs.json#/$defs/run_id"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "run_id",
+    "skill",
+    "skill_version",
+    "mode",
+    "verdict",
+    "risk",
+    "risk_reasons",
+    "summary",
+    "severity_counts",
+    "coverage",
+    "pr",
+    "code_run",
+    "head_at_end",
+    "head_moved",
+    "normalized",
+    "warnings",
+    "previous_run"
+  ]
+}

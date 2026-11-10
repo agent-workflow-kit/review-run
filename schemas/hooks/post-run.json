@@ -1,0 +1,161 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "review-run/hooks/post-run.json",
+  "title": "post-run hook payload (stdin)",
+  "description": "On the transition to done or failed, once. Cannot veto. Never carries PR text, the session's summary or reason, meta.summary or risk_reasons.",
+  "type": "object",
+  "properties": {
+    "tool": {
+      "const": "review-run"
+    },
+    "hook": {
+      "const": "post-run"
+    },
+    "object_type": {
+      "const": "run"
+    },
+    "object_id": {
+      "$ref": "../defs.json#/$defs/run_id"
+    },
+    "repo": {
+      "$ref": "../defs.json#/$defs/repo_id"
+    },
+    "labels": {
+      "$ref": "../defs.json#/$defs/labels"
+    },
+    "state": {
+      "enum": [
+        "done",
+        "failed"
+      ]
+    },
+    "reason": {
+      "enum": [
+        "prefetch_failed",
+        "stale_head",
+        "too_large",
+        "launch_failed",
+        "canceled",
+        "session_failed",
+        "unreported",
+        "killed",
+        "timeout",
+        "lost",
+        "implicit_done",
+        "artifact_missing",
+        "artifact_mismatch",
+        "skill_missing",
+        "artifact_invalid",
+        "internal",
+        null
+      ]
+    },
+    "exit_code": {
+      "enum": [
+        0,
+        12,
+        14,
+        15,
+        16,
+        17,
+        18,
+        22,
+        130,
+        143
+      ]
+    },
+    "pr": {
+      "$ref": "../defs.json#/$defs/pr"
+    },
+    "agent_id": {
+      "oneOf": [
+        {
+          "$ref": "../defs.json#/$defs/agent_id"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "verdict": {
+      "$ref": "../defs.json#/$defs/verdict"
+    },
+    "severity_counts": {
+      "$ref": "../defs.json#/$defs/severity_counts"
+    },
+    "risk": {
+      "$ref": "../defs.json#/$defs/risk"
+    },
+    "coverage_status": {
+      "$ref": "../defs.json#/$defs/coverage_status"
+    },
+    "code_run_status": {
+      "$ref": "../defs.json#/$defs/code_run_status"
+    },
+    "head_moved": {
+      "type": [
+        "boolean",
+        "null"
+      ]
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "tool",
+    "hook",
+    "object_type",
+    "object_id",
+    "repo",
+    "labels",
+    "state",
+    "reason",
+    "exit_code",
+    "pr",
+    "agent_id"
+  ],
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "state": {
+            "const": "done"
+          }
+        },
+        "required": [
+          "state"
+        ]
+      },
+      "then": {
+        "required": [
+          "verdict",
+          "severity_counts",
+          "risk",
+          "coverage_status",
+          "code_run_status",
+          "head_moved"
+        ],
+        "properties": {
+          "reason": {
+            "type": "null"
+          },
+          "exit_code": {
+            "const": 0
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "verdict": false,
+          "severity_counts": false,
+          "risk": false,
+          "coverage_status": false,
+          "code_run_status": false,
+          "head_moved": false,
+          "reason": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  ]
+}

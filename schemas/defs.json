@@ -1,0 +1,1834 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "review-run/defs.json",
+  "title": "review-run shared definitions",
+  "description": "Not an output on its own. Shared definitions referenced by the CLI, hook, meta, audit and log schemas. config.json embeds its own copies.",
+  "$defs": {
+    "run_id": {
+      "type": "string",
+      "pattern": "^rr-[a-z2-7]{8}$",
+      "description": "rr- plus 8 lowercase base32 characters (a-z2-7); never reused."
+    },
+    "run_ref": {
+      "type": "string",
+      "pattern": "^(?:rr-)?[a-z2-7]{4,8}$",
+      "description": "Input form only: a unique prefix of at least 4 characters after rr-, the rr- optional. Not used in output."
+    },
+    "repo_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*(?::[0-9]{1,5})?(?:/(?!\\.\\.?(?:/|$))[A-Za-z0-9._-]+)+$",
+      "maxLength": 255,
+      "description": "host/<full project path>."
+    },
+    "pr": {
+      "type": "string",
+      "pattern": "^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*(?::[0-9]{1,5})?(?:/(?!\\.\\.?(?:/|#))[A-Za-z0-9._-]+)+#[1-9][0-9]{0,9}$",
+      "description": "host/<full project path>#N (GitLab MR numbers without !)."
+    },
+    "agent_id": {
+      "type": "string",
+      "pattern": "^ag-[a-z2-7]{8}$",
+      "description": "agent-spawn's agent id."
+    },
+    "csession_id": {
+      "type": "string",
+      "pattern": "^cs-[a-z2-7]{8}$",
+      "description": "claude-session's session id."
+    },
+    "draft_id": {
+      "type": "string",
+      "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+      "description": "pr-comment's draft id (26 characters of Crockford base32), supplied by pr-comment draft new."
+    },
+    "sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$",
+      "description": "Full 40-hex commit sha, lowercase."
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "ts": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]+)?Z$",
+      "description": "UTC RFC 3339 with a Z suffix, optional fractional seconds."
+    },
+    "actor": {
+      "type": "string",
+      "pattern": "^(?:human|auto):[A-Za-z0-9._@-]{1,64}$",
+      "description": "human:<name> or auto:<name>. A claim, advisory against same-user processes."
+    },
+    "decision_ids": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9._:@/-]{1,128}$"
+      },
+      "maxItems": 32,
+      "description": "Decision ids (the --decision-id grammar), possibly empty."
+    },
+    "duration": {
+      "type": "string",
+      "pattern": "^(?:0|[0-9]+(?:ms|s|m|h|d))$",
+      "description": "0, or an integer and a unit: ms, s, m, h, d."
+    },
+    "label": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_.-]{0,63}=[A-Za-z0-9._:/#@+=,-]{0,256}$",
+      "description": "key=value, split at the first '='; the label grammar of architecture section 8.1."
+    },
+    "labels": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/label"
+      },
+      "maxItems": 64,
+      "description": "Multiset of key=value pairs in stored order, verbatim."
+    },
+    "file_id": {
+      "type": "string",
+      "pattern": "^f[0-9]{4}$",
+      "description": "A manifest file id, f plus four digits in forgectl's file order."
+    },
+    "code_word": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*$",
+      "description": "A closed lowercase code word."
+    },
+    "skill": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+      "description": "A name Claude Code accepts as a slash command (plugin:skill or a bare name)."
+    },
+    "mode": {
+      "enum": [
+        "headless",
+        "interactive"
+      ]
+    },
+    "state": {
+      "enum": [
+        "running",
+        "done",
+        "escalated",
+        "failed"
+      ],
+      "description": "running: in a phase or its session is live. done and failed are terminal. escalated: the session reported needs-input or blocked and its agent is kept."
+    },
+    "phase": {
+      "enum": [
+        "prefetch",
+        "code_run",
+        "session",
+        "finalize"
+      ],
+      "description": "Only while state is running."
+    },
+    "failed_reason": {
+      "enum": [
+        "prefetch_failed",
+        "stale_head",
+        "too_large",
+        "launch_failed",
+        "canceled",
+        "session_failed",
+        "unreported",
+        "killed",
+        "timeout",
+        "lost",
+        "implicit_done",
+        "artifact_missing",
+        "artifact_mismatch",
+        "skill_missing",
+        "artifact_invalid",
+        "internal"
+      ]
+    },
+    "escalated_reason": {
+      "enum": [
+        "needs_input",
+        "blocked"
+      ]
+    },
+    "refusal_reason": {
+      "enum": [
+        "not_open",
+        "unknown_host",
+        "live",
+        "not_escalated",
+        "retention"
+      ],
+      "description": "Exit 20 reasons; found before any run record exists or on a run in the wrong state."
+    },
+    "error_reason": {
+      "enum": [
+        "not_open",
+        "unknown_host",
+        "live",
+        "not_escalated",
+        "retention",
+        "tool_missing",
+        "no_tmux",
+        "wait_timeout",
+        "schema_newer",
+        "previous_mismatch"
+      ]
+    },
+    "error_code": {
+      "enum": [
+        "usage",
+        "config_invalid",
+        "not_found",
+        "ambiguous",
+        "vetoed",
+        "escalated",
+        "refused",
+        "failed",
+        "internal"
+      ]
+    },
+    "exit_code": {
+      "enum": [
+        0,
+        1,
+        2,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        20,
+        21,
+        22,
+        130,
+        143
+      ]
+    },
+    "run_exit_code": {
+      "enum": [
+        0,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        22,
+        130,
+        143
+      ],
+      "description": "The exit code a run ended with (a failed run: its failure; escalated: 13; done: 0)."
+    },
+    "verdict": {
+      "enum": [
+        "approve",
+        "comment",
+        "request_changes"
+      ],
+      "description": "The session's claim, stored as given; never used by review-run to act."
+    },
+    "risk": {
+      "enum": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "description": "The session's claim."
+    },
+    "severity_counts": {
+      "type": "object",
+      "properties": {
+        "blocker": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "major": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "minor": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "nit": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "info": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "unspecified": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Findings with no severity."
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "blocker",
+        "major",
+        "minor",
+        "nit",
+        "info",
+        "unspecified"
+      ],
+      "description": "Counted by review-run from the findings."
+    },
+    "coverage": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "enum": [
+            "full",
+            "partial"
+          ]
+        },
+        "reviewed": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/file_id"
+          },
+          "uniqueItems": true,
+          "description": "File ids the session reported, intersected with the provided ones."
+        },
+        "skipped": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "file": {
+                "$ref": "#/$defs/file_id"
+              },
+              "reason": {
+                "enum": [
+                  "size_cap",
+                  "file_cap",
+                  "truncated",
+                  "not_reviewed"
+                ]
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "file",
+              "reason"
+            ]
+          },
+          "description": "Every manifest entry not reviewed; binary and empty entries are neither."
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "reviewed",
+        "skipped"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "full"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "skipped": {
+                "maxItems": 0
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "skipped": {
+                "minItems": 1
+              }
+            }
+          }
+        }
+      ],
+      "description": "Accounting, not proof."
+    },
+    "coverage_status": {
+      "enum": [
+        "full",
+        "partial"
+      ]
+    },
+    "code_run_status": {
+      "enum": [
+        "ok",
+        "failed",
+        "timed_out",
+        "truncated",
+        "skipped",
+        "not_configured"
+      ]
+    },
+    "sandbox_level": {
+      "enum": [
+        "required",
+        "preferred",
+        "off"
+      ]
+    },
+    "code_run": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "$ref": "#/$defs/code_run_status"
+        },
+        "reason": {
+          "enum": [
+            "throwaway_failed",
+            "sandbox_unavailable",
+            "sandbox_unsupported",
+            null
+          ],
+          "description": "Set exactly when status is skipped."
+        },
+        "exit_code": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "null with a signal, when skipped and when not configured."
+        },
+        "signal": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^SIG[A-Z0-9]+$",
+          "description": "The terminating signal name, else null."
+        },
+        "timed_out": {
+          "type": "boolean"
+        },
+        "truncated": {
+          "type": "boolean"
+        },
+        "bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "duration_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "sandbox": {
+          "enum": [
+            "required",
+            "preferred",
+            "off",
+            null
+          ],
+          "description": "The mode the command ran in; null when it did not run."
+        },
+        "output_sha256": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/sha256"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "SHA-256 of the sanitized output; null when it did not run."
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "reason",
+        "exit_code",
+        "signal",
+        "timed_out",
+        "truncated",
+        "bytes",
+        "duration_ms",
+        "sandbox",
+        "output_sha256"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "skipped"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "reason": {
+                "type": "string"
+              },
+              "exit_code": {
+                "type": "null"
+              },
+              "signal": {
+                "type": "null"
+              },
+              "timed_out": {
+                "const": false
+              },
+              "truncated": {
+                "const": false
+              },
+              "bytes": {
+                "type": "null"
+              },
+              "duration_ms": {
+                "type": "null"
+              },
+              "sandbox": {
+                "type": "null"
+              },
+              "output_sha256": {
+                "type": "null"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "reason": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "not_configured"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "exit_code": {
+                "type": "null"
+              },
+              "signal": {
+                "type": "null"
+              },
+              "timed_out": {
+                "const": false
+              },
+              "truncated": {
+                "const": false
+              },
+              "bytes": {
+                "type": "null"
+              },
+              "duration_ms": {
+                "type": "null"
+              },
+              "sandbox": {
+                "type": "null"
+              },
+              "output_sha256": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "enum": [
+                  "ok",
+                  "failed",
+                  "timed_out",
+                  "truncated"
+                ]
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "bytes": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "duration_ms": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "sandbox": {
+                "type": "string"
+              },
+              "output_sha256": {
+                "$ref": "#/$defs/sha256"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "timed_out"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "timed_out": {
+                "const": true
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "truncated"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "truncated": {
+                "const": true
+              }
+            }
+          }
+        }
+      ],
+      "description": "The code-run step's summary. The output itself is stored in the run directory, not here."
+    },
+    "pr_facts": {
+      "type": "object",
+      "properties": {
+        "draft": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "is_bot": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "is_fork": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "base_is_default": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "draft",
+        "is_bot",
+        "is_fork",
+        "base_is_default"
+      ],
+      "description": "From forgectl; each possibly null."
+    },
+    "normalized_entry": {
+      "type": "object",
+      "properties": {
+        "rule": {
+          "enum": [
+            "drop_unknown",
+            "drop_null",
+            "trim_title",
+            "drop_unanchored",
+            "replace_meta",
+            "event_downgrade"
+          ]
+        },
+        "pointer": {
+          "type": "string",
+          "x-untrusted": true,
+          "description": "Untrusted: a JSON pointer into the artifact; it can contain an unknown property name the session wrote.",
+          "maxLength": 1024
+        },
+        "count": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "rule",
+        "pointer",
+        "count"
+      ]
+    },
+    "meta_warning": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "enum": [
+            "path_unknown",
+            "line_not_in_diff"
+          ]
+        },
+        "finding_id": {
+          "type": "string",
+          "x-untrusted": true,
+          "description": "Untrusted: the session's finding id.",
+          "maxLength": 64
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "finding_id"
+      ],
+      "description": "A position violation; not an error (pr-comment moves such a finding to the body at post time)."
+    },
+    "run_warning": {
+      "enum": [
+        "teardown_failed",
+        "teardown_refused",
+        "throwaway_leaked",
+        "sandbox_lowered",
+        "head_unreadable",
+        "hook_failed"
+      ],
+      "description": "Closed list of run-level warning codes."
+    },
+    "teardown": {
+      "enum": [
+        "done",
+        "pending",
+        "failed"
+      ]
+    },
+    "anchor": {
+      "type": "object",
+      "properties": {
+        "head_sha": {
+          "$ref": "#/$defs/sha"
+        },
+        "base_ref": {
+          "type": "string",
+          "x-untrusted": true,
+          "description": "Untrusted: the base branch name.",
+          "maxLength": 255
+        },
+        "base_sha": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/sha"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "merge_base_sha": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/sha"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "head_sha",
+        "base_ref",
+        "base_sha",
+        "merge_base_sha"
+      ],
+      "description": "From pr-comment draft new; the session copies it, never invents it."
+    },
+    "artifact_ref": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "pattern": "^/",
+          "description": "Absolute path of the stored review.json."
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "original_sha256": {
+          "$ref": "#/$defs/sha256",
+          "description": "SHA-256 of original.json, the byte-exact frozen copy."
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "sha256",
+        "size",
+        "original_sha256"
+      ],
+      "description": "The stored review.json (immutable once the run is done). Its content is untrusted text."
+    },
+    "run_summary": {
+      "type": "object",
+      "properties": {
+        "verdict": {
+          "$ref": "#/$defs/verdict",
+          "x-untrusted": true
+        },
+        "severity_counts": {
+          "$ref": "#/$defs/severity_counts"
+        },
+        "risk": {
+          "$ref": "#/$defs/risk",
+          "x-untrusted": true
+        },
+        "coverage_status": {
+          "$ref": "#/$defs/coverage_status"
+        },
+        "code_run_status": {
+          "$ref": "#/$defs/code_run_status"
+        },
+        "head_moved": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "verdict",
+        "severity_counts",
+        "risk",
+        "coverage_status",
+        "code_run_status",
+        "head_moved"
+      ],
+      "description": "The meta.review_run fields of the same names (coverage.status and code_run.status flattened). The verdict and risk are the session's claims."
+    },
+    "manifest_entry": {
+      "type": "object",
+      "properties": {
+        "file": {
+          "$ref": "#/$defs/file_id"
+        },
+        "path": {
+          "type": "string",
+          "x-untrusted": true,
+          "description": "Untrusted: a path from the PR.",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "status": {
+          "enum": [
+            "added",
+            "modified",
+            "removed",
+            "renamed",
+            "copied",
+            "changed",
+            "unchanged"
+          ]
+        },
+        "additions": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "deletions": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "inputs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^f[0-9]{4}(?:-[0-9]+)?\\.patch$"
+          },
+          "description": "Input file names; empty for binary and empty entries."
+        },
+        "disposition": {
+          "enum": [
+            "provided",
+            "truncated",
+            "skipped_size_cap",
+            "skipped_file_cap",
+            "binary",
+            "empty"
+          ],
+          "description": "skipped_size_cap and skipped_file_cap are the manifest's skipped(size_cap) and skipped(file_cap)."
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "file",
+        "path",
+        "status",
+        "additions",
+        "deletions",
+        "bytes",
+        "inputs",
+        "disposition"
+      ]
+    },
+    "hook_entry_pre": {
+      "type": "object",
+      "properties": {
+        "cmd": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Run through sh -c in its own process group."
+        },
+        "timeout": {
+          "$ref": "#/$defs/duration",
+          "default": "30s"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "cmd"
+      ],
+      "description": "Exit 0 continues; 13 escalates; any other non-zero exit or a timeout vetoes (exit 11)."
+    },
+    "hook_entry_post": {
+      "type": "object",
+      "properties": {
+        "cmd": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Run through sh -c in its own process group."
+        },
+        "timeout": {
+          "$ref": "#/$defs/duration",
+          "default": "30s"
+        },
+        "async": {
+          "type": "boolean",
+          "default": false,
+          "description": "Run detached under a watchdog that enforces the timeout."
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "cmd"
+      ],
+      "description": "Cannot undo; failures are logged and warned, never fatal."
+    },
+    "run": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "run_id": {
+          "$ref": "#/$defs/run_id"
+        },
+        "pr": {
+          "$ref": "#/$defs/pr"
+        },
+        "repo": {
+          "$ref": "#/$defs/repo_id"
+        },
+        "state": {
+          "$ref": "#/$defs/state"
+        },
+        "phase": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/phase"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Non-null exactly while state is running."
+        },
+        "reason": {
+          "enum": [
+            "prefetch_failed",
+            "stale_head",
+            "too_large",
+            "launch_failed",
+            "canceled",
+            "session_failed",
+            "unreported",
+            "killed",
+            "timeout",
+            "lost",
+            "implicit_done",
+            "artifact_missing",
+            "artifact_mismatch",
+            "skill_missing",
+            "artifact_invalid",
+            "internal",
+            "needs_input",
+            "blocked",
+            null
+          ],
+          "description": "A failed run: one of the failure reasons; escalated: needs_input or blocked; otherwise null."
+        },
+        "exit_code": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/run_exit_code"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The exit code the run ended with; null while running."
+        },
+        "mode": {
+          "$ref": "#/$defs/mode"
+        },
+        "skill": {
+          "$ref": "#/$defs/skill"
+        },
+        "labels": {
+          "$ref": "#/$defs/labels"
+        },
+        "previous_run": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/run_id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "agent_id": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/agent_id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "csession_id": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/csession_id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "draft_id": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/draft_id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "anchor": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/anchor"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "created_at": {
+          "$ref": "#/$defs/ts"
+        },
+        "finished_at": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ts"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Set exactly for done and failed."
+        },
+        "artifact": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/artifact_ref"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "summary": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/run_summary"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/run_warning"
+          }
+        },
+        "teardown": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/teardown"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "null when no agent was ever launched."
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "run_id",
+        "pr",
+        "repo",
+        "state",
+        "phase",
+        "reason",
+        "exit_code",
+        "mode",
+        "skill",
+        "labels",
+        "previous_run",
+        "agent_id",
+        "csession_id",
+        "draft_id",
+        "anchor",
+        "created_at",
+        "finished_at",
+        "artifact",
+        "summary",
+        "warnings",
+        "teardown"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "running"
+              }
+            },
+            "required": [
+              "state"
+            ]
+          },
+          "then": {
+            "properties": {
+              "phase": {
+                "$ref": "#/$defs/phase"
+              },
+              "reason": {
+                "type": "null"
+              },
+              "exit_code": {
+                "type": "null"
+              },
+              "finished_at": {
+                "type": "null"
+              },
+              "artifact": {
+                "type": "null"
+              },
+              "summary": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "escalated"
+              }
+            },
+            "required": [
+              "state"
+            ]
+          },
+          "then": {
+            "properties": {
+              "phase": {
+                "type": "null"
+              },
+              "reason": {
+                "enum": [
+                  "needs_input",
+                  "blocked"
+                ]
+              },
+              "exit_code": {
+                "const": 13
+              },
+              "finished_at": {
+                "type": "null"
+              },
+              "artifact": {
+                "type": "null"
+              },
+              "summary": {
+                "type": "null"
+              },
+              "agent_id": {
+                "$ref": "#/$defs/agent_id"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "done"
+              }
+            },
+            "required": [
+              "state"
+            ]
+          },
+          "then": {
+            "properties": {
+              "phase": {
+                "type": "null"
+              },
+              "reason": {
+                "type": "null"
+              },
+              "exit_code": {
+                "const": 0
+              },
+              "finished_at": {
+                "$ref": "#/$defs/ts"
+              },
+              "artifact": {
+                "$ref": "#/$defs/artifact_ref"
+              },
+              "summary": {
+                "$ref": "#/$defs/run_summary"
+              },
+              "draft_id": {
+                "$ref": "#/$defs/draft_id"
+              },
+              "anchor": {
+                "$ref": "#/$defs/anchor"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "failed"
+              }
+            },
+            "required": [
+              "state"
+            ]
+          },
+          "then": {
+            "properties": {
+              "phase": {
+                "type": "null"
+              },
+              "reason": {
+                "enum": [
+                  "prefetch_failed",
+                  "stale_head",
+                  "too_large",
+                  "launch_failed",
+                  "canceled",
+                  "session_failed",
+                  "unreported",
+                  "killed",
+                  "timeout",
+                  "lost",
+                  "implicit_done",
+                  "artifact_missing",
+                  "artifact_mismatch",
+                  "skill_missing",
+                  "artifact_invalid",
+                  "internal"
+                ]
+              },
+              "exit_code": {
+                "enum": [
+                  12,
+                  14,
+                  15,
+                  16,
+                  17,
+                  18,
+                  22,
+                  130,
+                  143
+                ]
+              },
+              "finished_at": {
+                "$ref": "#/$defs/ts"
+              },
+              "artifact": {
+                "type": "null"
+              },
+              "summary": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "reason": {
+                "const": "prefetch_failed"
+              }
+            },
+            "required": [
+              "reason"
+            ]
+          },
+          "then": {
+            "properties": {
+              "exit_code": {
+                "enum": [
+                  12
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "reason": {
+                "const": "stale_head"
+              }
+            },
+            "required": [
+              "reason"
+            ]
+          },
+          "then": {
+            "properties": {
+              "exit_code": {
+                "enum": [
+                  12
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "reason": {
+                "const": "too_large"
+              }
+            },
+            "required": [
+              "reason"
+            ]
+          },
+          "then": {
+            "properties": {
+              "exit_code": {
+                "enum": [
+                  12
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "reason": {
+                "const": "launch_failed"
+              }
+            },
+            "required": [
+              "reason"
+            ]
+          },
+          "then": {
+            "properties": {
+              "exit_code": {
+                "enum": [
+                  12
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "reason": {
+                "const": "internal"
+              }
+            },
+            "required": [
+              "reason"
+            ]
+          },
+          "then": {
+            "properties": {
+              "exit_code": {
+                "enum": [
+                  12
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "reason": {
+                "const": "session_failed"
+              }
+            },
+            "required": [
+              "reason"
+            ]
+          },
+          "then": {
+            "properties": {
+              "exit_code": {
+                "enum": [
+                  18
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "reason": {
+                "const": "unreported"
+              }
+            },
+            "required": [
+              "reason"
+            ]
+          },
+          "then": {
+            "properties": {
+              "exit_code": {
+                "enum": [
+                  14
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "reason": {
+                "const": "killed"
+              }
+            },
+            "required": [
+              "reason"
+            ]
+          },
+          "then": {
+            "properties": {
+              "exit_code": {
+                "enum": [
+                  15
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "reason": {
+                "const": "timeout"
+              }
+            },
+            "required": [
+              "reason"
+            ]
+          },
+          "then": {
+            "properties": {
+              "exit_code": {
+                "enum": [
+                  16
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "reason": {
+                "const": "lost"
+              }
+            },
+            "required": [
+              "reason"
+            ]
+          },
+          "then": {
+            "properties": {
+              "exit_code": {
+                "enum": [
+                  17
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "reason": {
+                "const": "canceled"
+              }
+            },
+            "required": [
+              "reason"
+            ]
+          },
+          "then": {
+            "properties": {
+              "exit_code": {
+                "enum": [
+                  130,
+                  143
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "reason": {
+                "const": "implicit_done"
+              }
+            },
+            "required": [
+              "reason"
+            ]
+          },
+          "then": {
+            "properties": {
+              "exit_code": {
+                "enum": [
+                  22
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "reason": {
+                "const": "artifact_missing"
+              }
+            },
+            "required": [
+              "reason"
+            ]
+          },
+          "then": {
+            "properties": {
+              "exit_code": {
+                "enum": [
+                  22
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "reason": {
+                "const": "artifact_mismatch"
+              }
+            },
+            "required": [
+              "reason"
+            ]
+          },
+          "then": {
+            "properties": {
+              "exit_code": {
+                "enum": [
+                  22
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "reason": {
+                "const": "skill_missing"
+              }
+            },
+            "required": [
+              "reason"
+            ]
+          },
+          "then": {
+            "properties": {
+              "exit_code": {
+                "enum": [
+                  22
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "reason": {
+                "const": "artifact_invalid"
+              }
+            },
+            "required": [
+              "reason"
+            ]
+          },
+          "then": {
+            "properties": {
+              "exit_code": {
+                "enum": [
+                  22
+                ]
+              }
+            }
+          }
+        }
+      ],
+      "description": "The run object: printed by run, resume, wait and show (--json) and listed by list. Text inside the stored artifact is untrusted; the marked fields are the ones in this object."
+    },
+    "error": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/error_code"
+        },
+        "message": {
+          "type": "string",
+          "maxLength": 512,
+          "description": "Closed codes, ids and counts only; never untrusted text."
+        },
+        "reason": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/error_reason"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Required with code refused (a refusal reason); also tool_missing, no_tmux, schema_newer and wait_timeout (code failed) and previous_mismatch (code usage)."
+        },
+        "details": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "description": "Closed codes, ids and counts only (for example the tool name and its install command, the matching run ids of an ambiguous prefix)."
+        },
+        "lower_code": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[a-z][a-z0-9_]*$",
+          "description": "A sibling tool's closed error code; never its message."
+        },
+        "hook": {
+          "enum": [
+            "pre-run",
+            null
+          ],
+          "description": "The hook that vetoed or escalated (code vetoed or escalated); null otherwise."
+        },
+        "decision_ids": {
+          "$ref": "#/$defs/decision_ids",
+          "description": "Decision ids a pre-run hook printed; present with hook."
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "message"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "refused"
+              }
+            },
+            "required": [
+              "code"
+            ]
+          },
+          "then": {
+            "required": [
+              "reason"
+            ],
+            "properties": {
+              "reason": {
+                "$ref": "#/$defs/refusal_reason"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "enum": [
+                  "vetoed",
+                  "escalated"
+                ]
+              }
+            },
+            "required": [
+              "code"
+            ]
+          },
+          "then": {
+            "required": [
+              "hook"
+            ],
+            "properties": {
+              "hook": {
+                "const": "pre-run"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "failed"
+              }
+            },
+            "required": [
+              "code"
+            ]
+          },
+          "then": {
+            "properties": {
+              "reason": {
+                "enum": [
+                  "tool_missing",
+                  "no_tmux",
+                  "wait_timeout",
+                  "schema_newer",
+                  null
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "usage"
+              }
+            },
+            "required": [
+              "code"
+            ]
+          },
+          "then": {
+            "properties": {
+              "reason": {
+                "enum": [
+                  "previous_mismatch",
+                  null
+                ]
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}
