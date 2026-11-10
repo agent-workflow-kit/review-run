@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "review-run/hooks/post-escalate.json",
   "title": "post-escalate hook payload (stdin)",
-  "description": "On the transition to escalated, each time. Cannot veto.",
+  "description": "On the transition to escalated, once per escalation (per run number). Delivered at least once, deduplicated by event_id. Cannot veto.",
   "type": "object",
   "properties": {
     "tool": {
@@ -23,6 +23,9 @@
     "labels": {
       "$ref": "../defs.json#/$defs/labels"
     },
+    "event_id": {
+      "$ref": "../defs.json#/$defs/event_id"
+    },
     "reason": {
       "enum": [
         "needs_input",
@@ -34,6 +37,12 @@
     },
     "agent_id": {
       "$ref": "../defs.json#/$defs/agent_id"
+    },
+    "actor": {
+      "$ref": "../defs.json#/$defs/actor"
+    },
+    "decision_ids": {
+      "$ref": "../defs.json#/$defs/decision_ids"
     }
   },
   "additionalProperties": false,
@@ -44,8 +53,11 @@
     "object_id",
     "repo",
     "labels",
+    "event_id",
     "reason",
     "pr",
-    "agent_id"
+    "agent_id",
+    "actor",
+    "decision_ids"
   ]
 }

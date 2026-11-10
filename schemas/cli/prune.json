@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "review-run/cli/prune.json",
   "title": "review-run prune --json",
-  "description": "Deleted (or, with --dry-run, would-be-deleted) terminal runs. A running or escalated run is never touched.",
+  "description": "Terminal runs older than the duration, by finished_at (deleted or, with --dry-run, would_delete). A running or escalated run is never touched. Exit 0 whatever the per-run results.",
   "type": "object",
   "properties": {
     "schema_version": {
@@ -14,14 +14,45 @@
     "older_than": {
       "$ref": "../defs.json#/$defs/duration"
     },
-    "deleted_runs": {
-      "type": "integer",
-      "minimum": 0
-    },
-    "run_ids": {
+    "results": {
       "type": "array",
       "items": {
-        "$ref": "../defs.json#/$defs/run_id"
+        "type": "object",
+        "properties": {
+          "run_id": {
+            "$ref": "../defs.json#/$defs/run_id"
+          },
+          "result": {
+            "enum": [
+              "deleted",
+              "would_delete",
+              "failed"
+            ]
+          },
+          "reason": {
+            "oneOf": [
+              {
+                "$ref": "../defs.json#/$defs/code_word"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "A closed code for a failed deletion, else null."
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "run_id",
+          "result",
+          "reason"
+        ]
+      }
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "$ref": "../defs.json#/$defs/run_warning"
       }
     }
   },
@@ -30,7 +61,7 @@
     "schema_version",
     "dry_run",
     "older_than",
-    "deleted_runs",
-    "run_ids"
+    "results",
+    "warnings"
   ]
 }

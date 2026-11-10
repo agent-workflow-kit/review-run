@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "review-run/cli/run-dry-run.json",
   "title": "review-run run --dry-run --json",
-  "description": "Plan only: allocates nothing, runs no hook and no code run, launches nothing. Paths in the manifest are untrusted.",
+  "description": "Plan only: allocates no run id, writes no audit record, runs no hook and no code run, launches nothing; the prompt and inputs are written to a temporary directory that is deleted. It exits 0 and prints would_exit. Paths in the manifest are untrusted.",
   "type": "object",
   "properties": {
     "schema_version": {
@@ -74,12 +74,60 @@
       },
       "description": "Resolved settings with their origin."
     },
-    "launch_args": {
+    "launch_argv": {
       "type": "array",
       "items": {
         "type": "string"
       },
       "description": "The agent-spawn launch argv review-run would use; no untrusted text."
+    },
+    "plugin_dirs": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^/"
+      },
+      "description": "The plugin directories that would be passed."
+    },
+    "tools": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "enum": [
+              "forgectl",
+              "pr-comment",
+              "agent-spawn",
+              "claude-session",
+              "wtctl",
+              "bwrap",
+              "socat"
+            ]
+          },
+          "path": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^/"
+          },
+          "version": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 64
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "path",
+          "version"
+        ]
+      },
+      "description": "Sibling tools and helpers resolved on PATH, with their versions (null when missing)."
     },
     "manifest": {
       "type": "array",
@@ -118,38 +166,98 @@
         "provided_files"
       ]
     },
-    "would_fail": {
-      "oneOf": [
-        {
-          "enum": [
-            "prefetch_failed",
-            "stale_head",
-            "too_large",
-            "launch_failed",
-            "canceled",
-            "session_failed",
-            "unreported",
-            "killed",
-            "timeout",
-            "lost",
-            "implicit_done",
-            "artifact_missing",
-            "artifact_mismatch",
-            "skill_missing",
-            "artifact_invalid",
-            "internal",
-            "not_open",
-            "unknown_host",
-            "live",
-            "not_escalated",
-            "retention"
-          ]
+    "code_run_plan": {
+      "type": "object",
+      "properties": {
+        "configured": {
+          "type": "boolean"
         },
-        {
-          "type": "null"
+        "sandbox": {
+          "enum": [
+            "required",
+            "preferred",
+            "off",
+            null
+          ],
+          "description": "The configured sandbox mode; null when not configured."
+        },
+        "sandbox_probe": {
+          "enum": [
+            "ok",
+            "unavailable",
+            "unsupported",
+            "not_applicable"
+          ],
+          "description": "The bubblewrap probe result; not_applicable when no code run is configured."
+        },
+        "would_skip": {
+          "enum": [
+            "wtctl_missing",
+            "throwaway_refused",
+            "ref_unavailable",
+            "throwaway_failed",
+            "sandbox_unavailable",
+            "sandbox_unsupported",
+            "sandbox_failed",
+            "throwaway_leaks",
+            null
+          ],
+          "description": "The skip reason the step would have, else null."
         }
+      },
+      "additionalProperties": false,
+      "required": [
+        "configured",
+        "sandbox",
+        "sandbox_probe",
+        "would_skip"
       ],
-      "description": "The reason the run would refuse or fail with, else null."
+      "description": "What the code-run step would do, including the sandbox probe result."
+    },
+    "would_fail": {
+      "type": "array",
+      "items": {
+        "enum": [
+          "prefetch_failed",
+          "stale_head",
+          "too_large",
+          "launch_failed",
+          "canceled",
+          "session_failed",
+          "unreported",
+          "killed",
+          "timeout",
+          "lost",
+          "runner_lost",
+          "agent_gone",
+          "expired",
+          "implicit_done",
+          "artifact_missing",
+          "artifact_mismatch",
+          "skill_missing",
+          "artifact_invalid",
+          "internal",
+          "needs_input",
+          "blocked",
+          "not_open",
+          "unknown_host",
+          "live",
+          "not_escalated",
+          "tool_missing",
+          "tool_too_old",
+          "no_tmux",
+          "wait_timeout",
+          "schema_newer",
+          "state_unsafe",
+          "previous_mismatch",
+          "previous_not_done",
+          "skill_not_found",
+          "label_reserved",
+          "pr_too_long"
+        ]
+      },
+      "uniqueItems": true,
+      "description": "Every reason the run would refuse or fail with; empty when none."
     },
     "would_exit": {
       "$ref": "../defs.json#/$defs/exit_code"
@@ -172,10 +280,13 @@
     "previous_run",
     "head_sha",
     "settings",
-    "launch_args",
+    "launch_argv",
+    "plugin_dirs",
+    "tools",
     "manifest",
     "coverage_preview",
     "sizes",
+    "code_run_plan",
     "would_fail",
     "would_exit",
     "warnings"

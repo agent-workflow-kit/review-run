@@ -22,6 +22,10 @@
       "maxLength": 64,
       "description": "The bundled plugin's version for the default skill, else null."
     },
+    "skill_checked": {
+      "type": "boolean",
+      "description": "true when the skill check ran (headless); false when it did not (interactive, with the run warning skill_unchecked)."
+    },
     "mode": {
       "$ref": "defs.json#/$defs/mode"
     },
@@ -39,18 +43,21 @@
         "type": "string",
         "x-untrusted": true,
         "description": "Untrusted: a short reason, one line.",
+        "minLength": 1,
         "maxLength": 200,
-        "pattern": "^[^\\n\\r\\u000b\\u000c\\u001c-\\u001e\\u0085  ]*$"
+        "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029\\u200b-\\u200f\\u202a-\\u202e\\u2060-\\u206f\\ufeff]*$"
       },
       "maxItems": 10,
       "x-untrusted": true,
-      "description": "Untrusted: the session's reasons, at most 10 one-line strings of at most 200 characters."
+      "description": "Untrusted: the session's reasons, at most 10 one-line strings of 1 to 200 characters."
     },
     "summary": {
       "type": "string",
       "x-untrusted": true,
-      "description": "Untrusted: the session's summary, one paragraph, at most 2000 characters.",
-      "maxLength": 2000
+      "description": "Untrusted: the session's summary, 1 to 2000 characters.",
+      "minLength": 1,
+      "maxLength": 2000,
+      "pattern": "^[^\\u0000-\\u0008\\u000b-\\u001f\\u007f-\\u009f\\u2028\\u2029\\u200b-\\u200f\\u202a-\\u202e\\u2060-\\u206f\\ufeff]*$"
     },
     "severity_counts": {
       "$ref": "defs.json#/$defs/severity_counts"
@@ -86,13 +93,8 @@
       "type": "array",
       "items": {
         "$ref": "defs.json#/$defs/normalized_entry"
-      }
-    },
-    "warnings": {
-      "type": "array",
-      "items": {
-        "$ref": "defs.json#/$defs/meta_warning"
-      }
+      },
+      "maxItems": 201
     },
     "previous_run": {
       "oneOf": [
@@ -111,6 +113,7 @@
     "run_id",
     "skill",
     "skill_version",
+    "skill_checked",
     "mode",
     "verdict",
     "risk",
@@ -123,7 +126,6 @@
     "head_at_end",
     "head_moved",
     "normalized",
-    "warnings",
     "previous_run"
   ]
 }

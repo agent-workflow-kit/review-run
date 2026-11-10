@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "review-run/cli/cron.json",
   "title": "review-run cron --json",
-  "description": "The tagged crontab block # review-run managed: reconcile every 15 minutes and prune daily.",
+  "description": "The tagged crontab block # review-run managed: reconcile every 15 minutes and prune daily (accepts --json).",
   "type": "object",
   "properties": {
     "schema_version": {

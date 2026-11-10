@@ -4,9 +4,13 @@
 # Precedence: flags, then repos.<id>, then environment (REVIEW_RUN_<KEY>, top-level scalars only),
 # then this file, then the defaults. Invalid config fails fast naming the key.
 
-# The skill run on every pull request: the bundled default, or any name Claude Code accepts
-# as a slash command.
+# The skill run on every pull request, as <plugin>:<skill>: the bundled default, or a skill of a
+# plugin listed in plugin_dirs.
 skill: "review-run:review-pr"
+
+# Absolute directories of plugins holding other review skills. Each needs the placeholder
+# entries .claude/, .mcp.json, CLAUDE.md and CLAUDE.local.md.
+plugin_dirs: []
 
 # Default mode: headless or interactive (interactive needs tmux). Not overridable per repo.
 mode: headless
@@ -30,6 +34,9 @@ model: null
 # --timeout for the session. null: the kind's default (120 minutes).
 timeout: null
 
+# --max-turns for the session (launch and resume). null: the kind's default.
+max_turns: null
+
 # true drops the Agent and Task denies from the permission profile.
 subagents: false
 
@@ -39,19 +46,25 @@ max_subagent_depth: 1
 # Ask the skill for nit-severity findings.
 nits: false
 
-# A file you own, placed in the prompt as trusted instructions (never read from the repository).
+# An absolute path (~ is expanded) to a file you own, at most 64 KiB, placed in the prompt as
+# trusted instructions (never read from the repository).
 guidelines_file: null
 
 # Size limits for what the session is given and what it may report back.
 limits:
   max_file_bytes: 200000       # per input file
   max_total_bytes: 1048576     # total of provided patches before files are skipped
-  max_files: 300               # number of input files
+  max_files: 300               # number of input files (at most 9999)
   hard_ceiling_bytes: 8388608  # a whole diff above this fails the run (too_large)
   max_artifact_bytes: 8388608  # an artifact above this is artifact_invalid
+  max_answer_bytes: 65536      # a resume answer above this is refused (exit 2)
 
 # Age at which `review-run prune` deletes terminal runs.
 retention: 30d
+
+# Age at which `review-run reconcile` ends an escalated run as failed (expired) and tears its
+# agent down. null disables the expiry.
+escalation_ttl: 7d
 
 # Used only for the default actor. null: the OS username.
 me:
@@ -65,8 +78,9 @@ hooks:
   post-escalate: []
 
 # Per-repo overrides, keyed by repo id (host/<full project path>). A repo may override skill,
-# model, timeout, nits, guidelines_file, subagents, max_subagent_depth, limits,
-# permission_profile, sandbox, setting_sources, env_allowlist and run_pr_code.
+# plugin_dirs, model, timeout, max_turns, nits, guidelines_file, subagents, max_subagent_depth,
+# limits (merged key by key), permission_profile, sandbox, setting_sources, env_allowlist and
+# run_pr_code. mode, retention, escalation_ttl, me and hooks are global only.
 repos: {}
 
 # --- example:begin
@@ -93,6 +107,7 @@ repos: {}
 #       sandbox: required                      # required, preferred or off
 #       timeout: 300s                          # wall-clock limit
 #       max_output_bytes: 1048576              # output captured before the command is stopped
+#       max_workspace_bytes: 2147483648        # stop the command when the workspace grows by more
 #       env_allow: []                          # extra non-secret environment names
 #       ro_binds:                              # extra absolute paths bound read-only
 #         - /usr/lib/node_modules

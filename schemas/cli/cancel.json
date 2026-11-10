@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "review-run/cli/cancel.json",
+  "title": "review-run cancel --json",
+  "description": "The run after cancel (state failed, reason canceled, exit_code 143), or unchanged for a terminal run or a dry run.",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "run": {
+      "$ref": "../defs.json#/$defs/run"
+    },
+    "changed": {
+      "type": "boolean",
+      "description": "false for a run that was already terminal."
+    },
+    "action": {
+      "enum": [
+        "none",
+        "stop",
+        "signal_runner",
+        "teardown"
+      ],
+      "description": "none (already terminal), stop (agent-spawn stop), signal_runner (SIGTERM to the verified runner before an agent exists) or teardown (an escalated run's agent)."
+    },
+    "dry_run": {
+      "type": "boolean"
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "$ref": "../defs.json#/$defs/run_warning"
+      }
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "run",
+    "changed",
+    "action",
+    "dry_run",
+    "warnings"
+  ]
+}

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "review-run/cli/reconcile.json",
   "title": "review-run reconcile --json",
-  "description": "What reconcile changed (or, with --dry-run, would change). It never signals a process.",
+  "description": "What reconcile changed (or, with --dry-run, would change). Exit 0 whatever the per-run results. It never signals a process.",
   "type": "object",
   "properties": {
     "schema_version": {
@@ -15,69 +15,53 @@
       "type": "boolean",
       "description": "true when another reconcile holds the lease; nothing was done (exit 0)."
     },
-    "finalized": {
+    "changes": {
       "type": "array",
       "items": {
         "type": "object",
         "properties": {
           "run_id": {
-            "$ref": "../defs.json#/$defs/run_id"
+            "oneOf": [
+              {
+                "$ref": "../defs.json#/$defs/run_id"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
-          "state": {
-            "$ref": "../defs.json#/$defs/state"
+          "kind": {
+            "enum": [
+              "finalized",
+              "agent_adopted",
+              "runner_lost",
+              "agent_gone",
+              "expired",
+              "teardown_retried",
+              "throwaway_removed",
+              "throwaway_leaked",
+              "cleaned"
+            ]
+          },
+          "details": {
+            "type": "object",
+            "description": "Closed codes, ids and counts only (for example the resulting state or a throwaway id)."
           }
         },
         "additionalProperties": false,
         "required": [
           "run_id",
-          "state"
+          "kind",
+          "details"
         ]
       },
-      "description": "Running or escalated runs whose agent ended."
+      "description": "What reconcile changed (or, with --dry-run, would change)."
     },
-    "lost": {
+    "warnings": {
       "type": "array",
       "items": {
-        "$ref": "../defs.json#/$defs/run_id"
-      },
-      "description": "Running runs whose runner process is gone and whose agent was never launched, ended failed (lost)."
-    },
-    "teardowns": {
-      "type": "object",
-      "properties": {
-        "retried": {
-          "type": "integer",
-          "minimum": 0
-        },
-        "done": {
-          "type": "integer",
-          "minimum": 0
-        },
-        "failed": {
-          "type": "integer",
-          "minimum": 0
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "retried",
-        "done",
-        "failed"
-      ]
-    },
-    "cleaned": {
-      "type": "integer",
-      "minimum": 0,
-      "description": "Terminal runs whose leftovers (prompt and input files) were removed."
-    },
-    "leaked_throwaways": {
-      "type": "array",
-      "items": {
-        "type": "string",
-        "minLength": 1,
-        "maxLength": 128
-      },
-      "description": "wtctl throwaway ids recorded as leaked."
+        "$ref": "../defs.json#/$defs/run_warning"
+      }
     }
   },
   "additionalProperties": false,
@@ -85,10 +69,7 @@
     "schema_version",
     "dry_run",
     "already_running",
-    "finalized",
-    "lost",
-    "teardowns",
-    "cleaned",
-    "leaked_throwaways"
+    "changes",
+    "warnings"
   ]
 }

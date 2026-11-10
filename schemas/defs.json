@@ -137,6 +137,9 @@
         "killed",
         "timeout",
         "lost",
+        "runner_lost",
+        "agent_gone",
+        "expired",
         "implicit_done",
         "artifact_missing",
         "artifact_mismatch",
@@ -156,8 +159,7 @@
         "not_open",
         "unknown_host",
         "live",
-        "not_escalated",
-        "retention"
+        "not_escalated"
       ],
       "description": "Exit 20 reasons; found before any run record exists or on a run in the wrong state."
     },
@@ -167,12 +169,17 @@
         "unknown_host",
         "live",
         "not_escalated",
-        "retention",
         "tool_missing",
+        "tool_too_old",
         "no_tmux",
         "wait_timeout",
         "schema_newer",
-        "previous_mismatch"
+        "state_unsafe",
+        "previous_mismatch",
+        "previous_not_done",
+        "skill_not_found",
+        "label_reserved",
+        "pr_too_long"
       ]
     },
     "error_code": {
@@ -296,7 +303,8 @@
             "$ref": "#/$defs/file_id"
           },
           "uniqueItems": true,
-          "description": "File ids the session reported, intersected with the provided ones."
+          "maxItems": 9999,
+          "description": "The session's file ids intersected with the provided entries."
         },
         "skipped": {
           "type": "array",
@@ -321,14 +329,20 @@
               "reason"
             ]
           },
-          "description": "Every manifest entry not reviewed; binary and empty entries are neither."
+          "description": "Every provided, truncated or skipped manifest entry not reviewed; binary and empty entries are in neither list. A truncated entry is always skipped (truncated), even when the session lists it."
+        },
+        "ignored_ids": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "How many ids the session listed that were not provided entries; they are ignored."
         }
       },
       "additionalProperties": false,
       "required": [
         "status",
         "reviewed",
-        "skipped"
+        "skipped",
+        "ignored_ids"
       ],
       "allOf": [
         {
@@ -370,8 +384,6 @@
       "enum": [
         "ok",
         "failed",
-        "timed_out",
-        "truncated",
         "skipped",
         "not_configured"
       ]
@@ -391,9 +403,14 @@
         },
         "reason": {
           "enum": [
+            "wtctl_missing",
+            "throwaway_refused",
+            "ref_unavailable",
             "throwaway_failed",
             "sandbox_unavailable",
             "sandbox_unsupported",
+            "sandbox_failed",
+            "throwaway_leaks",
             null
           ],
           "description": "Set exactly when status is skipped."
@@ -564,9 +581,7 @@
               "status": {
                 "enum": [
                   "ok",
-                  "failed",
-                  "timed_out",
-                  "truncated"
+                  "failed"
                 ]
               }
             },
@@ -597,7 +612,7 @@
           "if": {
             "properties": {
               "status": {
-                "const": "timed_out"
+                "const": "ok"
               }
             },
             "required": [
@@ -606,8 +621,14 @@
           },
           "then": {
             "properties": {
+              "exit_code": {
+                "const": 0
+              },
+              "signal": {
+                "type": "null"
+              },
               "timed_out": {
-                "const": true
+                "const": false
               }
             }
           }
@@ -616,7 +637,7 @@
           "if": {
             "properties": {
               "status": {
-                "const": "truncated"
+                "const": "failed"
               }
             },
             "required": [
@@ -624,15 +645,36 @@
             ]
           },
           "then": {
-            "properties": {
-              "truncated": {
-                "const": true
+            "anyOf": [
+              {
+                "properties": {
+                  "exit_code": {
+                    "type": "integer",
+                    "not": {
+                      "const": 0
+                    }
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "signal": {
+                    "type": "string"
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "timed_out": {
+                    "const": true
+                  }
+                }
               }
-            }
+            ]
           }
         }
       ],
-      "description": "The code-run step's summary. The output itself is stored in the run directory, not here."
+      "description": "The code-run step's summary. status failed means a non-zero exit, a signal or a timeout; timed_out and truncated are independent booleans. The output itself is stored in the run directory, not here."
     },
     "pr_facts": {
       "type": "object",
@@ -678,16 +720,15 @@
           "enum": [
             "drop_unknown",
             "drop_null",
-            "trim_title",
             "drop_unanchored",
-            "replace_meta",
-            "event_downgrade"
+            "event_downgrade",
+            "truncated"
           ]
         },
         "pointer": {
           "type": "string",
           "x-untrusted": true,
-          "description": "Untrusted: a JSON pointer into the artifact; it can contain an unknown property name the session wrote.",
+          "description": "Untrusted: the JSON pointer of the parent object the rule applied to; never a dropped key name.",
           "maxLength": 1024
         },
         "count": {
@@ -700,30 +741,91 @@
         "rule",
         "pointer",
         "count"
-      ]
+      ],
+      "description": "At most 200 entries are kept, then one entry with rule truncated and pointer empty (count: the entries omitted)."
     },
-    "meta_warning": {
+    "failure": {
       "type": "object",
       "properties": {
-        "code": {
+        "tool": {
           "enum": [
-            "path_unknown",
-            "line_not_in_diff"
-          ]
+            "forgectl",
+            "pr-comment",
+            "agent-spawn",
+            "claude-session",
+            "wtctl",
+            null
+          ],
+          "description": "The sibling tool that failed, else null."
         },
-        "finding_id": {
-          "type": "string",
-          "x-untrusted": true,
-          "description": "Untrusted: the session's finding id.",
-          "maxLength": 64
+        "lower_code": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[a-z][a-z0-9_]*$",
+          "description": "The sibling's closed error code."
+        },
+        "lower_reason": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[a-z][a-z0-9_]*$",
+          "description": "The sibling's closed reason."
+        },
+        "retryable": {
+          "type": "boolean",
+          "description": "Whether a retry can help; set per reason in the Reasons table."
+        },
+        "retry_after_s": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "description": "Seconds, when the sibling gave a retry-after."
+        },
+        "errors": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "pointer": {
+                "type": "string",
+                "x-untrusted": true,
+                "description": "Untrusted: a JSON pointer into the artifact, cut to 200 characters.",
+                "maxLength": 200
+              },
+              "kind": {
+                "$ref": "#/$defs/code_word"
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "pointer",
+              "kind"
+            ]
+          },
+          "maxItems": 20,
+          "description": "Pointers and kinds only, never a message or a value."
         }
       },
       "additionalProperties": false,
       "required": [
-        "code",
-        "finding_id"
+        "tool",
+        "lower_code",
+        "lower_reason",
+        "retryable",
+        "retry_after_s",
+        "errors"
       ],
-      "description": "A position violation; not an error (pr-comment moves such a finding to the body at post time)."
+      "description": "Why a run failed, in closed codes, ids and counts. Always set for a failed run; null otherwise."
+    },
+    "event_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{8,64}$",
+      "description": "Identifies one hook delivery; a hook is delivered at least once and deduplicated by event_id."
     },
     "run_warning": {
       "enum": [
@@ -732,7 +834,9 @@
         "throwaway_leaked",
         "sandbox_lowered",
         "head_unreadable",
-        "hook_failed"
+        "hook_failed",
+        "skill_unchecked",
+        "agent_unknown"
       ],
       "description": "Closed list of run-level warning codes."
     },
@@ -834,6 +938,30 @@
         "code_run_status": {
           "$ref": "#/$defs/code_run_status"
         },
+        "code_run_reason": {
+          "enum": [
+            "wtctl_missing",
+            "throwaway_refused",
+            "ref_unavailable",
+            "throwaway_failed",
+            "sandbox_unavailable",
+            "sandbox_unsupported",
+            "sandbox_failed",
+            "throwaway_leaks",
+            null
+          ],
+          "description": "Set exactly when code_run_status is skipped."
+        },
+        "skipped_files": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "The number of coverage.skipped entries."
+        },
+        "normalized_count": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "The total count of normalization fixes applied."
+        },
         "head_moved": {
           "type": [
             "boolean",
@@ -848,9 +976,12 @@
         "risk",
         "coverage_status",
         "code_run_status",
+        "code_run_reason",
+        "skipped_files",
+        "normalized_count",
         "head_moved"
       ],
-      "description": "The meta.review_run fields of the same names (coverage.status and code_run.status flattened). The verdict and risk are the session's claims."
+      "description": "The meta.review_run fields of the same names (coverage.status and code_run.status flattened) plus counts. The verdict and risk are the session's claims."
     },
     "manifest_entry": {
       "type": "object",
@@ -869,19 +1000,32 @@
           "enum": [
             "added",
             "modified",
-            "removed",
-            "renamed",
-            "copied",
-            "changed",
-            "unchanged"
+            "deleted",
+            "renamed"
           ]
         },
+        "old_path": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-untrusted": true,
+          "description": "Untrusted: the previous path of a renamed file, else null.",
+          "minLength": 1,
+          "maxLength": 4096
+        },
         "additions": {
-          "type": "integer",
+          "type": [
+            "integer",
+            "null"
+          ],
           "minimum": 0
         },
         "deletions": {
-          "type": "integer",
+          "type": [
+            "integer",
+            "null"
+          ],
           "minimum": 0
         },
         "bytes": {
@@ -913,6 +1057,7 @@
         "file",
         "path",
         "status",
+        "old_path",
         "additions",
         "deletions",
         "bytes",
@@ -1004,6 +1149,9 @@
             "killed",
             "timeout",
             "lost",
+            "runner_lost",
+            "agent_gone",
+            "expired",
             "implicit_done",
             "artifact_missing",
             "artifact_mismatch",
@@ -1086,8 +1234,23 @@
             }
           ]
         },
+        "head_sha": {
+          "$ref": "#/$defs/sha",
+          "description": "The head from the resolve step, set at creation (the anchor head can differ)."
+        },
         "created_at": {
           "$ref": "#/$defs/ts"
+        },
+        "escalated_at": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ts"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Set exactly while the state is escalated."
         },
         "finished_at": {
           "oneOf": [
@@ -1114,6 +1277,16 @@
           "oneOf": [
             {
               "$ref": "#/$defs/run_summary"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "failure": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/failure"
             },
             {
               "type": "null"
@@ -1156,10 +1329,13 @@
         "csession_id",
         "draft_id",
         "anchor",
+        "head_sha",
         "created_at",
+        "escalated_at",
         "finished_at",
         "artifact",
         "summary",
+        "failure",
         "warnings",
         "teardown"
       ],
@@ -1186,6 +1362,9 @@
               "exit_code": {
                 "type": "null"
               },
+              "escalated_at": {
+                "type": "null"
+              },
               "finished_at": {
                 "type": "null"
               },
@@ -1193,6 +1372,9 @@
                 "type": "null"
               },
               "summary": {
+                "type": "null"
+              },
+              "failure": {
                 "type": "null"
               }
             }
@@ -1223,6 +1405,9 @@
               "exit_code": {
                 "const": 13
               },
+              "escalated_at": {
+                "$ref": "#/$defs/ts"
+              },
               "finished_at": {
                 "type": "null"
               },
@@ -1230,6 +1415,9 @@
                 "type": "null"
               },
               "summary": {
+                "type": "null"
+              },
+              "failure": {
                 "type": "null"
               },
               "agent_id": {
@@ -1260,6 +1448,9 @@
               "exit_code": {
                 "const": 0
               },
+              "escalated_at": {
+                "type": "null"
+              },
               "finished_at": {
                 "$ref": "#/$defs/ts"
               },
@@ -1268,6 +1459,9 @@
               },
               "summary": {
                 "$ref": "#/$defs/run_summary"
+              },
+              "failure": {
+                "type": "null"
               },
               "draft_id": {
                 "$ref": "#/$defs/draft_id"
@@ -1306,6 +1500,9 @@
                   "killed",
                   "timeout",
                   "lost",
+                  "runner_lost",
+                  "agent_gone",
+                  "expired",
                   "implicit_done",
                   "artifact_missing",
                   "artifact_mismatch",
@@ -1327,6 +1524,9 @@
                   143
                 ]
               },
+              "escalated_at": {
+                "type": "null"
+              },
               "finished_at": {
                 "$ref": "#/$defs/ts"
               },
@@ -1335,6 +1535,9 @@
               },
               "summary": {
                 "type": "null"
+              },
+              "failure": {
+                "$ref": "#/$defs/failure"
               }
             }
           }
@@ -1575,6 +1778,69 @@
           "if": {
             "properties": {
               "reason": {
+                "const": "runner_lost"
+              }
+            },
+            "required": [
+              "reason"
+            ]
+          },
+          "then": {
+            "properties": {
+              "exit_code": {
+                "enum": [
+                  12
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "reason": {
+                "const": "agent_gone"
+              }
+            },
+            "required": [
+              "reason"
+            ]
+          },
+          "then": {
+            "properties": {
+              "exit_code": {
+                "enum": [
+                  12
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "reason": {
+                "const": "expired"
+              }
+            },
+            "required": [
+              "reason"
+            ]
+          },
+          "then": {
+            "properties": {
+              "exit_code": {
+                "enum": [
+                  12
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "reason": {
                 "const": "implicit_done"
               }
             },
@@ -1699,7 +1965,7 @@
               "type": "null"
             }
           ],
-          "description": "Required with code refused (a refusal reason); also tool_missing, no_tmux, schema_newer and wait_timeout (code failed) and previous_mismatch (code usage)."
+          "description": "Required with code refused (a refusal reason). Also the no-run failures (code failed: tool_missing, tool_too_old, no_tmux, wait_timeout, schema_newer, state_unsafe) and the usage reasons (code usage: previous_mismatch, previous_not_done, skill_not_found, label_reserved, pr_too_long)."
         },
         "details": {
           "type": [
@@ -1797,9 +2063,11 @@
               "reason": {
                 "enum": [
                   "tool_missing",
+                  "tool_too_old",
                   "no_tmux",
                   "wait_timeout",
                   "schema_newer",
+                  "state_unsafe",
                   null
                 ]
               }
@@ -1822,6 +2090,10 @@
               "reason": {
                 "enum": [
                   "previous_mismatch",
+                  "previous_not_done",
+                  "skill_not_found",
+                  "label_reserved",
+                  "pr_too_long",
                   null
                 ]
               }

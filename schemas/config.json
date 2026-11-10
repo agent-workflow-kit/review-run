@@ -8,7 +8,17 @@
     "skill": {
       "$ref": "#/$defs/skill",
       "default": "review-run:review-pr",
-      "description": "The skill; bundled default or any other."
+      "description": "The skill, <plugin>:<skill>: the bundled default or one from a plugin_dirs entry."
+    },
+    "plugin_dirs": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^/"
+      },
+      "uniqueItems": true,
+      "default": [],
+      "description": "Absolute directories of extra plugins holding other review skills; each needs the placeholders .claude/, .mcp.json, CLAUDE.md and CLAUDE.local.md."
     },
     "permission_profile": {
       "type": [
@@ -74,6 +84,15 @@
       "default": null,
       "description": "--timeout; null: the kind's default (120 minutes)."
     },
+    "max_turns": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 1,
+      "default": null,
+      "description": "--max-turns on launch and resume; null: the kind's default."
+    },
     "subagents": {
       "type": "boolean",
       "default": false,
@@ -95,9 +114,9 @@
         "string",
         "null"
       ],
-      "minLength": 1,
+      "pattern": "^(?:/|~/).+",
       "default": null,
-      "description": "A user-owned file placed in the prompt as trusted instructions."
+      "description": "An absolute path (~ expanded at load) to a regular file, opened without following links, at most 64 KiB of UTF-8, placed in the prompt as trusted instructions."
     },
     "mode": {
       "$ref": "#/$defs/mode",
@@ -111,7 +130,7 @@
           "type": "integer",
           "minimum": 1,
           "default": 200000,
-          "description": "Per input file (below the Read tool's 256 KB refusal)."
+          "description": "Per input file (below the Read tool's 256 KB refusal; the skill reads in pages)."
         },
         "max_total_bytes": {
           "type": "integer",
@@ -122,8 +141,9 @@
         "max_files": {
           "type": "integer",
           "minimum": 1,
+          "maximum": 9999,
           "default": 300,
-          "description": "Number of input files."
+          "description": "Number of input files; at most 9999 (file ids have four digits)."
         },
         "hard_ceiling_bytes": {
           "type": "integer",
@@ -136,6 +156,12 @@
           "minimum": 1,
           "default": 8388608,
           "description": "Artifact size above this is artifact_invalid."
+        },
+        "max_answer_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 65536,
+          "description": "The resume answer above this exits 2."
         }
       },
       "additionalProperties": false,
@@ -146,6 +172,18 @@
       "$ref": "#/$defs/duration",
       "default": "30d",
       "description": "Age at which prune deletes terminal runs."
+    },
+    "escalation_ttl": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/duration"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": "7d",
+      "description": "Age of an escalated run at which reconcile ends it failed (expired); null disables."
     },
     "me": {
       "type": "object",
@@ -196,14 +234,23 @@
     "repos": {
       "type": "object",
       "default": {},
-      "description": "Per-repo overrides keyed by repo id. Precedence: flags, then repos.<id>, then environment, then global config, then defaults.",
+      "description": "Per-repo overrides keyed by repo id (limits merge key by key; mode, retention, escalation_ttl, me and hooks are global only). Precedence: flags, then repos.<id>, then environment, then global config, then defaults.",
       "patternProperties": {
         "^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*(?::[0-9]{1,5})?(?:/(?!\\.\\.?(?:/|$))[A-Za-z0-9._-]+)+$": {
           "type": "object",
           "properties": {
             "skill": {
               "$ref": "#/$defs/skill",
-              "description": "The skill; bundled default or any other."
+              "description": "The skill, <plugin>:<skill>: the bundled default or one from a plugin_dirs entry."
+            },
+            "plugin_dirs": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^/"
+              },
+              "uniqueItems": true,
+              "description": "Absolute directories of extra plugins holding other review skills; each needs the placeholders .claude/, .mcp.json, CLAUDE.md and CLAUDE.local.md."
             },
             "permission_profile": {
               "type": [
@@ -261,6 +308,14 @@
               ],
               "description": "--timeout; null: the kind's default (120 minutes)."
             },
+            "max_turns": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 1,
+              "description": "--max-turns on launch and resume; null: the kind's default."
+            },
             "subagents": {
               "type": "boolean",
               "description": "true drops the Agent and Task denies from the profile."
@@ -279,8 +334,8 @@
                 "string",
                 "null"
               ],
-              "minLength": 1,
-              "description": "A user-owned file placed in the prompt as trusted instructions."
+              "pattern": "^(?:/|~/).+",
+              "description": "An absolute path (~ expanded at load) to a regular file, opened without following links, at most 64 KiB of UTF-8, placed in the prompt as trusted instructions."
             },
             "limits": {
               "type": "object",
@@ -288,7 +343,7 @@
                 "max_file_bytes": {
                   "type": "integer",
                   "minimum": 1,
-                  "description": "Per input file (below the Read tool's 256 KB refusal)."
+                  "description": "Per input file (below the Read tool's 256 KB refusal; the skill reads in pages)."
                 },
                 "max_total_bytes": {
                   "type": "integer",
@@ -298,7 +353,8 @@
                 "max_files": {
                   "type": "integer",
                   "minimum": 1,
-                  "description": "Number of input files."
+                  "maximum": 9999,
+                  "description": "Number of input files; at most 9999 (file ids have four digits)."
                 },
                 "hard_ceiling_bytes": {
                   "type": "integer",
@@ -309,6 +365,11 @@
                   "type": "integer",
                   "minimum": 1,
                   "description": "Artifact size above this is artifact_invalid."
+                },
+                "max_answer_bytes": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "description": "The resume answer above this exits 2."
                 }
               },
               "additionalProperties": false,
@@ -344,6 +405,12 @@
                   "minimum": 1,
                   "default": 1048576
                 },
+                "max_workspace_bytes": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "default": 2147483648,
+                  "description": "The monitor stops the command when the throwaway's file system has lost more free space than this since the start."
+                },
                 "env_allow": {
                   "type": "array",
                   "items": {
@@ -352,7 +419,7 @@
                   },
                   "uniqueItems": true,
                   "default": [],
-                  "description": "Extra names for the command's environment (non-secret)."
+                  "description": "Extra names for the command's environment (non-secret). Refused at config load (a semantic check) when a name matches *TOKEN*, *SECRET*, *KEY*, *PASSWORD*, *CREDENTIAL* or *AUTH* (case-insensitive) or starts with ANTHROPIC_ or CLAUDE_."
                 },
                 "ro_binds": {
                   "type": "array",
@@ -362,7 +429,7 @@
                   },
                   "uniqueItems": true,
                   "default": [],
-                  "description": "Extra absolute paths bound read-only (language runtimes, pre-populated caches, a node_modules directory)."
+                  "description": "Extra absolute paths bound read-only (language runtimes, pre-populated caches, a node_modules directory). Refused at config load (a semantic check) for /, the home directory, an ancestor of any tool's state directory, paths under /proc, /sys, /dev, /run and /var/run, components .ssh, .gnupg, .aws, .kube, .docker, .config and .claude, and the names .netrc, .npmrc, .pypirc, credentials.toml and .git-credentials."
                 }
               },
               "additionalProperties": false,

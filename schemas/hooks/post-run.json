@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "review-run/hooks/post-run.json",
   "title": "post-run hook payload (stdin)",
-  "description": "On the transition to done or failed, once. Cannot veto. Never carries PR text, the session's summary or reason, meta.summary or risk_reasons.",
+  "description": "On the transition to done or failed, once (also for cancel and expired). Delivered at least once, deduplicated by event_id. Cannot veto. Never carries PR text, the session's summary or reason, meta.summary or risk_reasons.",
   "type": "object",
   "properties": {
     "tool": {
@@ -23,6 +23,9 @@
     "labels": {
       "$ref": "../defs.json#/$defs/labels"
     },
+    "event_id": {
+      "$ref": "../defs.json#/$defs/event_id"
+    },
     "state": {
       "enum": [
         "done",
@@ -41,6 +44,9 @@
         "killed",
         "timeout",
         "lost",
+        "runner_lost",
+        "agent_gone",
+        "expired",
         "implicit_done",
         "artifact_missing",
         "artifact_mismatch",
@@ -75,7 +81,34 @@
         {
           "type": "null"
         }
+      ],
+      "description": "null for a run that never had an agent."
+    },
+    "draft_id": {
+      "oneOf": [
+        {
+          "$ref": "../defs.json#/$defs/draft_id"
+        },
+        {
+          "type": "null"
+        }
       ]
+    },
+    "anchor_head_sha": {
+      "oneOf": [
+        {
+          "$ref": "../defs.json#/$defs/sha"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "actor": {
+      "$ref": "../defs.json#/$defs/actor"
+    },
+    "decision_ids": {
+      "$ref": "../defs.json#/$defs/decision_ids"
     },
     "verdict": {
       "$ref": "../defs.json#/$defs/verdict"
@@ -107,11 +140,16 @@
     "object_id",
     "repo",
     "labels",
+    "event_id",
     "state",
     "reason",
     "exit_code",
     "pr",
-    "agent_id"
+    "agent_id",
+    "draft_id",
+    "anchor_head_sha",
+    "actor",
+    "decision_ids"
   ],
   "allOf": [
     {
@@ -140,6 +178,12 @@
           },
           "exit_code": {
             "const": 0
+          },
+          "draft_id": {
+            "$ref": "../defs.json#/$defs/draft_id"
+          },
+          "anchor_head_sha": {
+            "$ref": "../defs.json#/$defs/sha"
           }
         }
       },
@@ -153,6 +197,406 @@
           "head_moved": false,
           "reason": {
             "type": "string"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "reason": {
+            "const": "prefetch_failed"
+          }
+        },
+        "required": [
+          "reason"
+        ]
+      },
+      "then": {
+        "properties": {
+          "exit_code": {
+            "enum": [
+              12
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "reason": {
+            "const": "stale_head"
+          }
+        },
+        "required": [
+          "reason"
+        ]
+      },
+      "then": {
+        "properties": {
+          "exit_code": {
+            "enum": [
+              12
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "reason": {
+            "const": "too_large"
+          }
+        },
+        "required": [
+          "reason"
+        ]
+      },
+      "then": {
+        "properties": {
+          "exit_code": {
+            "enum": [
+              12
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "reason": {
+            "const": "launch_failed"
+          }
+        },
+        "required": [
+          "reason"
+        ]
+      },
+      "then": {
+        "properties": {
+          "exit_code": {
+            "enum": [
+              12
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "reason": {
+            "const": "internal"
+          }
+        },
+        "required": [
+          "reason"
+        ]
+      },
+      "then": {
+        "properties": {
+          "exit_code": {
+            "enum": [
+              12
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "reason": {
+            "const": "session_failed"
+          }
+        },
+        "required": [
+          "reason"
+        ]
+      },
+      "then": {
+        "properties": {
+          "exit_code": {
+            "enum": [
+              18
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "reason": {
+            "const": "unreported"
+          }
+        },
+        "required": [
+          "reason"
+        ]
+      },
+      "then": {
+        "properties": {
+          "exit_code": {
+            "enum": [
+              14
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "reason": {
+            "const": "killed"
+          }
+        },
+        "required": [
+          "reason"
+        ]
+      },
+      "then": {
+        "properties": {
+          "exit_code": {
+            "enum": [
+              15
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "reason": {
+            "const": "timeout"
+          }
+        },
+        "required": [
+          "reason"
+        ]
+      },
+      "then": {
+        "properties": {
+          "exit_code": {
+            "enum": [
+              16
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "reason": {
+            "const": "lost"
+          }
+        },
+        "required": [
+          "reason"
+        ]
+      },
+      "then": {
+        "properties": {
+          "exit_code": {
+            "enum": [
+              17
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "reason": {
+            "const": "canceled"
+          }
+        },
+        "required": [
+          "reason"
+        ]
+      },
+      "then": {
+        "properties": {
+          "exit_code": {
+            "enum": [
+              130,
+              143
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "reason": {
+            "const": "runner_lost"
+          }
+        },
+        "required": [
+          "reason"
+        ]
+      },
+      "then": {
+        "properties": {
+          "exit_code": {
+            "enum": [
+              12
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "reason": {
+            "const": "agent_gone"
+          }
+        },
+        "required": [
+          "reason"
+        ]
+      },
+      "then": {
+        "properties": {
+          "exit_code": {
+            "enum": [
+              12
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "reason": {
+            "const": "expired"
+          }
+        },
+        "required": [
+          "reason"
+        ]
+      },
+      "then": {
+        "properties": {
+          "exit_code": {
+            "enum": [
+              12
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "reason": {
+            "const": "implicit_done"
+          }
+        },
+        "required": [
+          "reason"
+        ]
+      },
+      "then": {
+        "properties": {
+          "exit_code": {
+            "enum": [
+              22
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "reason": {
+            "const": "artifact_missing"
+          }
+        },
+        "required": [
+          "reason"
+        ]
+      },
+      "then": {
+        "properties": {
+          "exit_code": {
+            "enum": [
+              22
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "reason": {
+            "const": "artifact_mismatch"
+          }
+        },
+        "required": [
+          "reason"
+        ]
+      },
+      "then": {
+        "properties": {
+          "exit_code": {
+            "enum": [
+              22
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "reason": {
+            "const": "skill_missing"
+          }
+        },
+        "required": [
+          "reason"
+        ]
+      },
+      "then": {
+        "properties": {
+          "exit_code": {
+            "enum": [
+              22
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "reason": {
+            "const": "artifact_invalid"
+          }
+        },
+        "required": [
+          "reason"
+        ]
+      },
+      "then": {
+        "properties": {
+          "exit_code": {
+            "enum": [
+              22
+            ]
           }
         }
       }

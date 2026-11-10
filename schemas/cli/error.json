@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "review-run/cli/error.json",
   "title": "review-run error envelope",
-  "description": "Printed instead of a result on exit 1, 2, 10, 11, 12 (outside a run), 13 (a pre-run hook), 20 and 21. export prints audit.jsonl or log.jsonl lines, described by audit.json and log.json; it has no cli schema.",
+  "description": "Printed instead of a result on exit 1, 2, 10, 11, 12 (outside a run), 13 (a pre-run hook), 20 and 21. A resolve-step forgectl failure exits 10 (code not_found) or 12 (code failed, lower_code, details.retry_after when given). export prints audit.jsonl or log.jsonl lines, described by audit.json and log.json; it has no cli schema.",
   "type": "object",
   "properties": {
     "error": {
