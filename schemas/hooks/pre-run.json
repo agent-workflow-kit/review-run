@@ -66,6 +66,66 @@
     "override_escalation": {
       "type": "boolean"
     },
+    "session_sandbox": {
+      "$ref": "../defs.json#/$defs/sandbox_level",
+      "description": "The session sandbox level the run would use."
+    },
+    "subagents": {
+      "type": "boolean"
+    },
+    "permission_profile": {
+      "enum": [
+        "bundled",
+        "variant",
+        "custom"
+      ],
+      "description": "bundled, variant (without the Agent and Task denies) or custom."
+    },
+    "setting_sources": {
+      "type": "array",
+      "items": {
+        "enum": [
+          "user",
+          "project",
+          "local"
+        ]
+      },
+      "uniqueItems": true,
+      "description": "The setting sources the session would load."
+    },
+    "sizes": {
+      "type": "object",
+      "properties": {
+        "additions": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "deletions": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "changed_files": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "additions",
+        "deletions",
+        "changed_files"
+      ],
+      "description": "The PR's size counts from forgectl; null when forgectl gave none."
+    },
     "actor": {
       "$ref": "../defs.json#/$defs/actor"
     },
@@ -90,6 +150,11 @@
     "will_run_code",
     "code_run_sandbox",
     "override_escalation",
+    "session_sandbox",
+    "subagents",
+    "permission_profile",
+    "setting_sources",
+    "sizes",
     "actor",
     "decision_ids"
   ]

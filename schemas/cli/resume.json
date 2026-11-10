@@ -2,6 +2,6 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "review-run/cli/resume.json",
   "title": "review-run resume --json",
-  "description": "The run object for resume (also resume --no-wait). show --draft prints the stored review.json, not this. Printed for exits 0, 12 (a failed run), 13 (an escalated run), 14 to 18 and 22; other exits print the error envelope (cli/error.json).",
+  "description": "The run object for resume (also resume --no-wait). Printed whenever the outcome is a run's state (Output by exit code); a document with a top-level error key is the envelope instead (cli/error.json). show --draft prints the stored review.json, not this.",
   "$ref": "../defs.json#/$defs/run"
 }

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "review-run/cli/run-dry-run.json",
   "title": "review-run run --dry-run --json",
-  "description": "Plan only: allocates no run id, writes no audit record, runs no hook and no code run, launches nothing; the prompt and inputs are written to a temporary directory that is deleted. It exits 0 and prints would_exit. Paths in the manifest are untrusted.",
+  "description": "Run order steps 1 and 2 run as for run, so a failure there prints the error envelope (cli/error.json) with that step's exit code; past them this plan is printed and the exit is 0. settings lists every key settings.json would hold. Plan only: allocates no run id, writes no audit record, runs no hook and no code run, launches nothing; the prompt and inputs are written to a private directory under the state root that is removed afterwards. It exits 0 and prints would_exit. Paths in the manifest are untrusted.",
   "type": "object",
   "properties": {
     "schema_version": {
@@ -72,7 +72,7 @@
           "origin"
         ]
       },
-      "description": "Resolved settings with their origin."
+      "description": "The content settings.json would get: every resolved key with its origin."
     },
     "launch_argv": {
       "type": "array",
@@ -243,16 +243,19 @@
           "unknown_host",
           "live",
           "not_escalated",
+          "lower_refused",
           "tool_missing",
           "tool_too_old",
           "no_tmux",
           "wait_timeout",
           "schema_newer",
           "state_unsafe",
+          "lower_failed",
           "previous_mismatch",
           "previous_not_done",
           "skill_not_found",
           "label_reserved",
+          "too_many_labels",
           "pr_too_long"
         ]
       },

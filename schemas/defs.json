@@ -83,8 +83,8 @@
       "items": {
         "$ref": "#/$defs/label"
       },
-      "maxItems": 64,
-      "description": "Multiset of key=value pairs in stored order, verbatim."
+      "maxItems": 60,
+      "description": "Multiset of caller key=value pairs in stored order, verbatim; at most 60 caller labels are accepted (too_many_labels), so with review-run's four the agent stays within agent-spawn's 64 pairs."
     },
     "file_id": {
       "type": "string",
@@ -159,7 +159,8 @@
         "not_open",
         "unknown_host",
         "live",
-        "not_escalated"
+        "not_escalated",
+        "lower_refused"
       ],
       "description": "Exit 20 reasons; found before any run record exists or on a run in the wrong state."
     },
@@ -169,16 +170,19 @@
         "unknown_host",
         "live",
         "not_escalated",
+        "lower_refused",
         "tool_missing",
         "tool_too_old",
         "no_tmux",
         "wait_timeout",
         "schema_newer",
         "state_unsafe",
+        "lower_failed",
         "previous_mismatch",
         "previous_not_done",
         "skill_not_found",
         "label_reserved",
+        "too_many_labels",
         "pr_too_long"
       ]
     },
@@ -825,7 +829,7 @@
     "event_id": {
       "type": "string",
       "pattern": "^[A-Za-z0-9_-]{8,64}$",
-      "description": "Identifies one hook delivery; a hook is delivered at least once and deduplicated by event_id."
+      "description": "<run id>-<hook>-<n>; identifies one hook delivery (and the audit records of the transition); delivered at least once."
     },
     "run_warning": {
       "enum": [
@@ -836,7 +840,10 @@
         "head_unreadable",
         "hook_failed",
         "skill_unchecked",
-        "agent_unknown"
+        "agent_unknown",
+        "agent_mismatch",
+        "tools_unexpected",
+        "tools_unchecked"
       ],
       "description": "Closed list of run-level warning codes."
     },
@@ -1252,6 +1259,17 @@
           ],
           "description": "Set exactly while the state is escalated."
         },
+        "cancel_requested_at": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ts"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Null unless a cancellation is recorded (Runs, states and phases); always set for a canceled run."
+        },
         "finished_at": {
           "oneOf": [
             {
@@ -1332,6 +1350,7 @@
         "head_sha",
         "created_at",
         "escalated_at",
+        "cancel_requested_at",
         "finished_at",
         "artifact",
         "summary",
@@ -1429,6 +1448,25 @@
         {
           "if": {
             "properties": {
+              "reason": {
+                "const": "canceled"
+              }
+            },
+            "required": [
+              "reason"
+            ]
+          },
+          "then": {
+            "properties": {
+              "cancel_requested_at": {
+                "$ref": "#/$defs/ts"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
               "state": {
                 "const": "done"
               }
@@ -1439,6 +1477,9 @@
           },
           "then": {
             "properties": {
+              "cancel_requested_at": {
+                "type": "null"
+              },
               "phase": {
                 "type": "null"
               },
@@ -1943,7 +1984,7 @@
           }
         }
       ],
-      "description": "The run object: printed by run, resume, wait and show (--json) and listed by list. Text inside the stored artifact is untrusted; the marked fields are the ones in this object."
+      "description": "The run object: printed by run, resume, wait and show (--json) and listed by list; printed whenever the outcome is a run's state (Output by exit code). Text inside the stored artifact is untrusted; the marked fields are the ones in this object."
     },
     "error": {
       "type": "object",
@@ -1965,7 +2006,7 @@
               "type": "null"
             }
           ],
-          "description": "Required with code refused (a refusal reason). Also the no-run failures (code failed: tool_missing, tool_too_old, no_tmux, wait_timeout, schema_newer, state_unsafe) and the usage reasons (code usage: previous_mismatch, previous_not_done, skill_not_found, label_reserved, pr_too_long)."
+          "description": "Required with code refused (a refusal reason; lower_refused for a sibling's refusal). Also the no-run failures (code failed: tool_missing, tool_too_old, no_tmux, wait_timeout, schema_newer, state_unsafe, lower_failed) and the usage reasons (code usage: previous_mismatch, previous_not_done, skill_not_found, label_reserved, too_many_labels, pr_too_long)."
         },
         "details": {
           "type": [
@@ -1973,6 +2014,18 @@
             "null"
           ],
           "description": "Closed codes, ids and counts only (for example the tool name and its install command, the matching run ids of an ambiguous prefix)."
+        },
+        "tool": {
+          "enum": [
+            "forgectl",
+            "pr-comment",
+            "agent-spawn",
+            "claude-session",
+            "wtctl",
+            "termctl",
+            null
+          ],
+          "description": "The lower tool that refused, failed, vetoed or escalated; null otherwise."
         },
         "lower_code": {
           "type": [
@@ -1987,7 +2040,7 @@
             "pre-run",
             null
           ],
-          "description": "The hook that vetoed or escalated (code vetoed or escalated); null otherwise."
+          "description": "The hook that vetoed or escalated (code vetoed or escalated); null when a lower tool did (tool is then set)."
         },
         "decision_ids": {
           "$ref": "#/$defs/decision_ids",
@@ -2040,11 +2093,35 @@
             "required": [
               "hook"
             ],
-            "properties": {
-              "hook": {
-                "const": "pre-run"
+            "anyOf": [
+              {
+                "properties": {
+                  "hook": {
+                    "const": "pre-run"
+                  }
+                }
+              },
+              {
+                "required": [
+                  "tool"
+                ],
+                "properties": {
+                  "hook": {
+                    "type": "null"
+                  },
+                  "tool": {
+                    "enum": [
+                      "forgectl",
+                      "pr-comment",
+                      "agent-spawn",
+                      "claude-session",
+                      "wtctl",
+                      "termctl"
+                    ]
+                  }
+                }
               }
-            }
+            ]
           }
         },
         {
@@ -2068,6 +2145,7 @@
                   "wait_timeout",
                   "schema_newer",
                   "state_unsafe",
+                  "lower_failed",
                   null
                 ]
               }
@@ -2093,6 +2171,7 @@
                   "previous_not_done",
                   "skill_not_found",
                   "label_reserved",
+                  "too_many_labels",
                   "pr_too_long",
                   null
                 ]

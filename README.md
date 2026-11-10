@@ -23,7 +23,7 @@ L3 (workflow)
 
 ```text
 review-run run <pr> [--skill S] [--mode headless|interactive] [--label k=v] [--previous <run>] [--no-wait]
-    [--repo ID] [--model M] [--timeout D] [--hook NAME=CMD] [--actor A] [--override-escalation] [--dry-run] [--json]
+    [--model M] [--timeout D] [--hook NAME=CMD] [--actor A] [--override-escalation] [--dry-run] [--json]
 review-run resume <run> --prompt-file F|- [--no-wait] [--hook NAME=CMD] [--actor A] [--json]
 review-run wait <run> [--timeout D] [--json]
 review-run list [--state S] [--pr P] [--repo ID] [--label k[=v]] [--head SHA] [--since T] [--limit N] [--json]

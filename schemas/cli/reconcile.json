@@ -40,7 +40,8 @@
               "teardown_retried",
               "throwaway_removed",
               "throwaway_leaked",
-              "cleaned"
+              "cleaned",
+              "hook_redelivered"
             ]
           },
           "details": {
@@ -60,8 +61,26 @@
     "warnings": {
       "type": "array",
       "items": {
-        "$ref": "../defs.json#/$defs/run_warning"
+        "enum": [
+          "teardown_failed",
+          "teardown_refused",
+          "throwaway_leaked",
+          "sandbox_lowered",
+          "head_unreadable",
+          "hook_failed",
+          "skill_unchecked",
+          "agent_unknown",
+          "agent_mismatch",
+          "tools_unexpected",
+          "tools_unchecked",
+          "teardown_stuck"
+        ]
       }
+    },
+    "stuck_teardowns": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Runs whose teardown failed 5 times or more; the warning teardown_stuck is present exactly when this is above 0."
     }
   },
   "additionalProperties": false,
@@ -70,6 +89,7 @@
     "dry_run",
     "already_running",
     "changes",
-    "warnings"
+    "warnings",
+    "stuck_teardowns"
   ]
 }

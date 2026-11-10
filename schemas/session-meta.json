@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "review-run/session-meta.json",
   "title": "review-run session-side meta",
-  "description": "The meta object the session writes into review.json, validated by review-run before anything is derived (Finalize, Session claims). review-run applies this schema after ignoring every key it does not list (any other key under meta, and any other key under meta.coverage), so the schema is closed over what review-run reads. A violation ends the run failed (artifact_invalid) with failure.errors entries {pointer, kind}, never the value; kinds: meta_missing, type, enum, length, count, pattern. The two text fields are untrusted and never reach a hook, an audit record or an error message; this schema does not apply the character-category part of the sanitizer beyond the controls it can express.",
+  "description": "The meta object the session writes into review.json, validated by review-run before anything is derived (Finalize, Session claims). review-run applies this schema after ignoring every key it does not list (any other key under meta, and any other key under meta.coverage), so the schema is closed over what review-run reads. A violation ends the run failed (artifact_invalid) with failure.errors entries {pointer, kind}, never the value; kinds: meta_missing, type, enum, length, count, pattern. The two text fields are untrusted and never reach a hook, an audit record or an error message; review-run's code rejects every character of categories Cc (LF allowed in summary), Cf, Cs, Zl and Zp and the extra invisible characters the sanitizer marks (Co and Cn are allowed); this schema expresses only the control and common invisible characters a regular expression can.",
   "type": "object",
   "properties": {
     "verdict": {
@@ -21,7 +21,7 @@
         "description": "Untrusted: a short reason, one line.",
         "minLength": 1,
         "maxLength": 200,
-        "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029\\u200b-\\u200f\\u202a-\\u202e\\u2060-\\u206f\\ufeff]*$"
+        "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f\\u00ad\\u034f\\u115f\\u1160\\u2028\\u2029\\u200b-\\u200f\\u202a-\\u202e\\u2060-\\u206f\\u3164\\ufe00-\\ufe0f\\ufeff\\uffa0]*$"
       },
       "maxItems": 10,
       "x-untrusted": true,
@@ -33,7 +33,7 @@
       "description": "Untrusted: the session's summary, 1 to 2000 characters, no line break other than LF and no other character the sanitizer marks.",
       "minLength": 1,
       "maxLength": 2000,
-      "pattern": "^[^\\u0000-\\u0008\\u000b-\\u001f\\u007f-\\u009f\\u2028\\u2029\\u200b-\\u200f\\u202a-\\u202e\\u2060-\\u206f\\ufeff]*$"
+      "pattern": "^[^\\u0000-\\u0008\\u000b-\\u001f\\u007f-\\u009f\\u00ad\\u034f\\u115f\\u1160\\u2028\\u2029\\u200b-\\u200f\\u202a-\\u202e\\u2060-\\u206f\\u3164\\ufe00-\\ufe0f\\ufeff\\uffa0]*$"
     },
     "coverage": {
       "type": "object",

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "review-run/hooks/post-escalate.json",
   "title": "post-escalate hook payload (stdin)",
-  "description": "On the transition to escalated, once per escalation (per run number). Delivered at least once, deduplicated by event_id. Cannot veto.",
+  "description": "On the transition to escalated, once per escalation (per run number). Delivered at least once; event_id is <run id>-<hook>-<n>, so a hook that must not act twice deduplicates on it. Cannot veto.",
   "type": "object",
   "properties": {
     "tool": {

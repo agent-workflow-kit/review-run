@@ -9,7 +9,9 @@
 skill: "review-run:review-pr"
 
 # Absolute directories of plugins holding other review skills. Each needs the placeholder
-# entries .claude/, .mcp.json, CLAUDE.md and CLAUDE.local.md.
+# entries .claude/, .mcp.json, CLAUDE.md and CLAUDE.local.md, is used by its realpath and must be
+# owned by you and not writable by group or others. Two plugins with the same name, or one named
+# review-run, are a config error.
 plugin_dirs: []
 
 # Default mode: headless or interactive (interactive needs tmux). Not overridable per repo.
@@ -24,7 +26,8 @@ sandbox: required
 # Setting sources passed to every launch (user, project, local). [] loads none.
 setting_sources: []
 
-# Names passed with --env-allowlist-only (the session sees only these variables).
+# Names passed with --env-allowlist-only (the session sees only these variables). The same names
+# are refused as for run_pr_code env_allow.
 env_allowlist:
   - PATH
 
@@ -54,7 +57,7 @@ guidelines_file: null
 limits:
   max_file_bytes: 200000       # per input file
   max_total_bytes: 1048576     # total of provided patches before files are skipped
-  max_files: 300               # number of input files (at most 9999)
+  max_files: 300               # number of input files (at most 2000)
   hard_ceiling_bytes: 8388608  # a whole diff above this fails the run (too_large)
   max_artifact_bytes: 8388608  # an artifact above this is artifact_invalid
   max_answer_bytes: 65536      # a resume answer above this is refused (exit 2)
@@ -107,8 +110,8 @@ repos: {}
 #       sandbox: required                      # required, preferred or off
 #       timeout: 300s                          # wall-clock limit
 #       max_output_bytes: 1048576              # output captured before the command is stopped
-#       max_workspace_bytes: 2147483648        # stop the command when the workspace grows by more
-#       env_allow: []                          # extra non-secret environment names
-#       ro_binds:                              # extra absolute paths bound read-only
+#       max_workspace_bytes: 2147483648        # stop the command when the workspace uses more space (or over a million inodes)
+#       env_allow: []                          # extra non-secret environment names (names with TOKEN, SECRET, KEY, PASS, AUTH, URL and the like are refused)
+#       ro_binds:                              # extra absolute paths bound read-only; realpath-checked, never a directory holding credentials
 #         - /usr/lib/node_modules
 # --- example:end

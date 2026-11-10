@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "review-run/hooks/post-run.json",
   "title": "post-run hook payload (stdin)",
-  "description": "On the transition to done or failed, once (also for cancel and expired). Delivered at least once, deduplicated by event_id. Cannot veto. Never carries PR text, the session's summary or reason, meta.summary or risk_reasons.",
+  "description": "On the transition to done or failed, once (also for cancel and expired). Delivered at least once; event_id is <run id>-<hook>-<n>, so a hook that must not act twice deduplicates on it. Cannot veto. Never carries PR text, the session's summary or reason, meta.summary or risk_reasons.",
   "type": "object",
   "properties": {
     "tool": {

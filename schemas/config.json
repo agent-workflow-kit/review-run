@@ -18,7 +18,7 @@
       },
       "uniqueItems": true,
       "default": [],
-      "description": "Absolute directories of extra plugins holding other review skills; each needs the placeholders .claude/, .mcp.json, CLAUDE.md and CLAUDE.local.md."
+      "description": "Absolute directories of extra plugins holding other review skills; each needs the placeholders .claude/, .mcp.json, CLAUDE.md and CLAUDE.local.md, is used by its realpath and must be owned by the user and not writable by group or others. Two plugins with the same plugin.json name, or one named review-run, are a config error (a semantic check)."
     },
     "permission_profile": {
       "type": [
@@ -61,7 +61,7 @@
       "default": [
         "PATH"
       ],
-      "description": "Names passed with --env-allowlist-only."
+      "description": "Names passed with --env-allowlist-only; the same names are refused as for run_pr_code.env_allow (a semantic check)."
     },
     "model": {
       "type": [
@@ -82,7 +82,7 @@
         }
       ],
       "default": null,
-      "description": "--timeout; null: the kind's default (120 minutes)."
+      "description": "--timeout; null: the kind's default (120 minutes). Must be greater than 0 (a semantic check); passed to agent-spawn as given."
     },
     "max_turns": {
       "type": [
@@ -141,9 +141,9 @@
         "max_files": {
           "type": "integer",
           "minimum": 1,
-          "maximum": 9999,
+          "maximum": 2000,
           "default": 300,
-          "description": "Number of input files; at most 9999 (file ids have four digits)."
+          "description": "Number of input files, at most 2000 (each is one --input-file argument to agent-spawn and claude-session)."
         },
         "hard_ceiling_bytes": {
           "type": "integer",
@@ -250,7 +250,7 @@
                 "pattern": "^/"
               },
               "uniqueItems": true,
-              "description": "Absolute directories of extra plugins holding other review skills; each needs the placeholders .claude/, .mcp.json, CLAUDE.md and CLAUDE.local.md."
+              "description": "Absolute directories of extra plugins holding other review skills; each needs the placeholders .claude/, .mcp.json, CLAUDE.md and CLAUDE.local.md, is used by its realpath and must be owned by the user and not writable by group or others. Two plugins with the same plugin.json name, or one named review-run, are a config error (a semantic check)."
             },
             "permission_profile": {
               "type": [
@@ -287,7 +287,7 @@
                 "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
               },
               "uniqueItems": true,
-              "description": "Names passed with --env-allowlist-only."
+              "description": "Names passed with --env-allowlist-only; the same names are refused as for run_pr_code.env_allow (a semantic check)."
             },
             "model": {
               "type": [
@@ -306,7 +306,7 @@
                   "type": "null"
                 }
               ],
-              "description": "--timeout; null: the kind's default (120 minutes)."
+              "description": "--timeout; null: the kind's default (120 minutes). Must be greater than 0 (a semantic check); passed to agent-spawn as given."
             },
             "max_turns": {
               "type": [
@@ -353,8 +353,8 @@
                 "max_files": {
                   "type": "integer",
                   "minimum": 1,
-                  "maximum": 9999,
-                  "description": "Number of input files; at most 9999 (file ids have four digits)."
+                  "maximum": 2000,
+                  "description": "Number of input files, at most 2000 (each is one --input-file argument to agent-spawn and claude-session)."
                 },
                 "hard_ceiling_bytes": {
                   "type": "integer",
@@ -409,7 +409,7 @@
                   "type": "integer",
                   "minimum": 1,
                   "default": 2147483648,
-                  "description": "The monitor stops the command when the throwaway's file system has lost more free space than this since the start."
+                  "description": "The monitor stops the command when the throwaway's file system has lost more free space than this, or more than 1,000,000 free inodes, since the start."
                 },
                 "env_allow": {
                   "type": "array",
@@ -419,7 +419,7 @@
                   },
                   "uniqueItems": true,
                   "default": [],
-                  "description": "Extra names for the command's environment (non-secret). Refused at config load (a semantic check) when a name matches *TOKEN*, *SECRET*, *KEY*, *PASSWORD*, *CREDENTIAL* or *AUTH* (case-insensitive) or starts with ANTHROPIC_ or CLAUDE_."
+                  "description": "Extra names for the command's environment (non-secret). Refused at config load (a semantic check) when a name matches *TOKEN*, *SECRET*, *KEY*, *PASS*, *CREDENTIAL*, *AUTH*, *COOKIE*, *SESSION*, *DSN*, *_URL, *_PAT, *PROXY* or NETRC (case-insensitive) or starts with ANTHROPIC_ or CLAUDE_."
                 },
                 "ro_binds": {
                   "type": "array",
@@ -429,7 +429,7 @@
                   },
                   "uniqueItems": true,
                   "default": [],
-                  "description": "Extra absolute paths bound read-only (language runtimes, pre-populated caches, a node_modules directory). Refused at config load (a semantic check) for /, the home directory, an ancestor of any tool's state directory, paths under /proc, /sys, /dev, /run and /var/run, components .ssh, .gnupg, .aws, .kube, .docker, .config and .claude, and the names .netrc, .npmrc, .pypirc, credentials.toml and .git-credentials."
+                  "description": "Extra absolute paths bound read-only (language runtimes, pre-populated caches, a node_modules directory). Each entry is resolved with realpath at config load and the realpath is what is bound. Refused at config load (a semantic check) when the realpath is /, the home directory or an ancestor, /mnt, /media, /root, inside a WSL drive mount, under /proc, /sys, /dev, /run or /var/run, an ancestor of any tool's state directory, contains or is inside a credential path of claude-session's list, or has a credential component such as .ssh, .gnupg, .aws, .kube, .docker, .config, .claude, .netrc, .npmrc, .pypirc, credentials.toml or .git-credentials. A toolchain directory holding a credential file must be narrowed."
                 }
               },
               "additionalProperties": false,
