@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "review-run/cli/list.json",
+  "title": "review-run list --json",
+  "description": "Newest by created_at, then run id; does not refresh runs.",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "runs": {
+      "type": "array",
+      "items": {
+        "$ref": "../defs.json#/$defs/run"
+      }
+    },
+    "truncated": {
+      "type": "boolean",
+      "description": "true when more runs matched than --limit (default 100)."
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "runs",
+    "truncated"
+  ]
+}

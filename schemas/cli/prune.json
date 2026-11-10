@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "review-run/cli/prune.json",
+  "title": "review-run prune --json",
+  "description": "Terminal runs older than the duration, by finished_at (deleted or, with --dry-run, would_delete). A running or escalated run is never touched; a terminal run whose teardown is not done is skipped (teardown_pending) so its agent id is not lost, and one with undelivered outbox events is skipped (events_pending) so no hook event or audit record is lost. Exit 0 whatever the per-run results.",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "dry_run": {
+      "type": "boolean"
+    },
+    "older_than": {
+      "$ref": "../defs.json#/$defs/duration"
+    },
+    "results": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "run_id": {
+            "$ref": "../defs.json#/$defs/run_id"
+          },
+          "result": {
+            "enum": [
+              "deleted",
+              "would_delete",
+              "skipped",
+              "failed"
+            ]
+          },
+          "reason": {
+            "oneOf": [
+              {
+                "$ref": "../defs.json#/$defs/code_word"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "A closed code for a failed deletion, teardown_pending for a skipped terminal run whose teardown is not done, or events_pending for a skipped terminal run with undelivered outbox events; else null."
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "run_id",
+          "result",
+          "reason"
+        ]
+      }
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "enum": [
+          "prune_failed"
+        ]
+      },
+      "uniqueItems": true,
+      "description": "prune_failed, present exactly when a result is failed; otherwise empty."
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "dry_run",
+    "older_than",
+    "results",
+    "warnings"
+  ]
+}

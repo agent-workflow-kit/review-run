@@ -1,0 +1,196 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "review-run/meta.json",
+  "title": "review-run meta.review_run object",
+  "description": "The value of the draft's meta.review_run key (the draft's meta object holds exactly that one key). Every text field is untrusted, and meta is untrusted text downstream. A consumer treats coverage.status partial, code_run.status skipped (when it expected output), head_moved true, session.sandbox other than required, session.tools_checked false and a non-zero session.tools_unexpected as reasons not to act automatically.",
+  "type": "object",
+  "properties": {
+    "version": {
+      "const": 1
+    },
+    "run_id": {
+      "$ref": "defs.json#/$defs/run_id"
+    },
+    "skill": {
+      "$ref": "defs.json#/$defs/skill"
+    },
+    "skill_version": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "maxLength": 64,
+      "description": "The bundled plugin's version for the default skill, else null."
+    },
+    "skill_checked": {
+      "type": "boolean",
+      "description": "true when the skill check ran (headless); false when it did not (interactive, with the run warning skill_unchecked)."
+    },
+    "mode": {
+      "$ref": "defs.json#/$defs/mode"
+    },
+    "session": {
+      "type": "object",
+      "properties": {
+        "sandbox": {
+          "enum": [
+            "required",
+            "preferred",
+            "off"
+          ],
+          "description": "The session sandbox level from settings.json."
+        },
+        "profile": {
+          "enum": [
+            "bundled",
+            "variant",
+            "custom"
+          ],
+          "description": "bundled, variant (the bundled profile without the Agent and Task denies) or custom (a configured permission_profile)."
+        },
+        "profile_sha256": {
+          "$ref": "defs.json#/$defs/sha256",
+          "description": "SHA-256 of the run's permission-profile.json."
+        },
+        "tools_checked": {
+          "type": "boolean",
+          "description": "true when the init tools list was compared with the pinned set (headless run, bundled profile or its variant)."
+        },
+        "tools_unexpected": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "How many tools outside the pinned set the init list held; never their names. 0 when the tools were not checked."
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "sandbox",
+        "profile",
+        "profile_sha256",
+        "tools_checked",
+        "tools_unexpected"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "tools_checked": {
+                "const": false
+              }
+            },
+            "required": [
+              "tools_checked"
+            ]
+          },
+          "then": {
+            "properties": {
+              "tools_unexpected": {
+                "const": 0
+              }
+            }
+          }
+        }
+      ],
+      "description": "The session posture, from the run's settings.json and permission-profile.json and finalize step 5."
+    },
+    "verdict": {
+      "$ref": "defs.json#/$defs/verdict",
+      "x-untrusted": true
+    },
+    "risk": {
+      "$ref": "defs.json#/$defs/risk",
+      "x-untrusted": true
+    },
+    "risk_reasons": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "x-untrusted": true,
+        "description": "Untrusted: a short reason, one line.",
+        "minLength": 1,
+        "maxLength": 200,
+        "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f\\u00ad\\u034f\\u115f\\u1160\\u2028\\u2029\\u200b-\\u200f\\u202a-\\u202e\\u2060-\\u206f\\u3164\\ufe00-\\ufe0f\\ufeff\\uffa0\\u00a0\\u1680\\u2000-\\u200a\\u202f\\u205f\\u3000\\u17b4\\u17b5\\u180b-\\u180d\\u180f\\u2800]*$"
+      },
+      "maxItems": 10,
+      "x-untrusted": true,
+      "description": "Untrusted: the session's reasons, at most 10 one-line strings of 1 to 200 characters."
+    },
+    "summary": {
+      "type": "string",
+      "x-untrusted": true,
+      "description": "Untrusted: the session's summary, 1 to 2000 characters.",
+      "minLength": 1,
+      "maxLength": 2000,
+      "pattern": "^[^\\u0000-\\u0008\\u000b-\\u001f\\u007f-\\u009f\\u00ad\\u034f\\u115f\\u1160\\u2028\\u2029\\u200b-\\u200f\\u202a-\\u202e\\u2060-\\u206f\\u3164\\ufe00-\\ufe0f\\ufeff\\uffa0\\u00a0\\u1680\\u2000-\\u200a\\u202f\\u205f\\u3000\\u17b4\\u17b5\\u180b-\\u180d\\u180f\\u2800]*$"
+    },
+    "severity_counts": {
+      "$ref": "defs.json#/$defs/severity_counts"
+    },
+    "coverage": {
+      "$ref": "defs.json#/$defs/coverage"
+    },
+    "pr": {
+      "$ref": "defs.json#/$defs/pr_facts"
+    },
+    "code_run": {
+      "$ref": "defs.json#/$defs/code_run"
+    },
+    "head_at_end": {
+      "oneOf": [
+        {
+          "$ref": "defs.json#/$defs/sha"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "null when the end-of-run read failed."
+    },
+    "head_moved": {
+      "type": [
+        "boolean",
+        "null"
+      ],
+      "description": "null when the end-of-run read failed."
+    },
+    "normalized": {
+      "type": "array",
+      "items": {
+        "$ref": "defs.json#/$defs/normalized_entry"
+      },
+      "maxItems": 201
+    },
+    "previous_run": {
+      "oneOf": [
+        {
+          "$ref": "defs.json#/$defs/run_id"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "run_id",
+    "skill",
+    "skill_version",
+    "skill_checked",
+    "mode",
+    "session",
+    "verdict",
+    "risk",
+    "risk_reasons",
+    "summary",
+    "severity_counts",
+    "coverage",
+    "pr",
+    "code_run",
+    "head_at_end",
+    "head_moved",
+    "normalized",
+    "previous_run"
+  ]
+}

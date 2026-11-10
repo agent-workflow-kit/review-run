@@ -1,3 +1,117 @@
-# Example config for review-run. Location: ~/.config/review-run/config.yaml (drop-ins: config.d/*.yaml). Keys are defined in docs/interface.md once designed.
-hooks: {}
-# token_env: ...
+# Example config for review-run.
+# Location: ~/.config/review-run/config.yaml, plus drop-ins in ~/.config/review-run/config.d/*.yaml.
+# Schema: schemas/config.json. Every key below is shown with its default.
+# Precedence: flags, then repos.<id>, then environment (REVIEW_RUN_<KEY>, top-level scalars only),
+# then this file, then the defaults. Invalid config fails fast naming the key.
+
+# The skill run on every pull request, as <plugin>:<skill>: the bundled default, or a skill of a
+# plugin listed in plugin_dirs.
+skill: "review-run:review-pr"
+
+# Absolute directories of plugins holding other review skills. Each needs the placeholder
+# entries .claude/, .mcp.json, CLAUDE.md and CLAUDE.local.md, is used by its realpath and must be
+# owned by you and not writable by group or others. Two plugins with the same name, or one named
+# review-run, are a config error.
+plugin_dirs: []
+
+# Default mode: headless or interactive (interactive needs tmux). Not overridable per repo.
+mode: headless
+
+# Permission profile file passed to every launch. null: the bundled profile.
+permission_profile: null
+
+# Session sandbox level passed to every launch: required, preferred or off.
+sandbox: required
+
+# Setting sources passed to every launch (user, project, local). [] loads none.
+setting_sources: []
+
+# Names passed with --env-allowlist-only (the session sees only these variables). The same names
+# are refused as for run_pr_code env_allow.
+env_allowlist:
+  - PATH
+
+# --model for the session. null: Claude Code's default.
+model: null
+
+# --timeout for the session. null: the kind's default (120 minutes).
+timeout: null
+
+# --max-turns for the session (launch and resume). null: the kind's default.
+max_turns: null
+
+# true drops the Agent and Task denies from the permission profile.
+subagents: false
+
+# The subagent depth variable value, used only when subagents is true.
+max_subagent_depth: 1
+
+# Ask the skill for nit-severity findings.
+nits: false
+
+# An absolute path (~ is expanded) to a file you own, at most 64 KiB, placed in the prompt as
+# trusted instructions (never read from the repository).
+guidelines_file: null
+
+# Size limits for what the session is given and what it may report back.
+limits:
+  max_file_bytes: 200000       # per input file
+  max_total_bytes: 1048576     # total of provided patches before files are skipped
+  max_files: 300               # number of input files (at most 2000)
+  hard_ceiling_bytes: 8388608  # a whole diff above this fails the run (too_large)
+  max_artifact_bytes: 8388608  # an artifact above this is artifact_invalid
+  max_answer_bytes: 65536      # a resume answer above this is refused (exit 2)
+
+# Age at which `review-run prune` deletes terminal runs.
+retention: 30d
+
+# Age at which `review-run reconcile` ends an escalated run as failed (expired) and tears its
+# agent down. null disables the expiry.
+escalation_ttl: 7d
+
+# Used only for the default actor. null: the OS username.
+me:
+  name: null
+
+# Hooks (sh -c, JSON on stdin, 30 s default timeout). pre-run can veto (exit 11) or
+# escalate (exit 13); post hooks cannot undo anything and may be async.
+hooks:
+  pre-run: []
+  post-run: []
+  post-escalate: []
+
+# Per-repo overrides, keyed by repo id (host/<full project path>). A repo may override skill,
+# plugin_dirs, model, timeout, max_turns, nits, guidelines_file, subagents, max_subagent_depth,
+# limits (merged key by key), permission_profile, sandbox, setting_sources, env_allowlist and
+# run_pr_code. mode, retention, escalation_ttl, me and hooks are global only.
+repos: {}
+
+# --- example:begin
+# hooks:
+#   pre-run:
+#     - cmd: "gatectl check review-run --timeout 540"
+#       timeout: 600s              # longer than gatectl's own --timeout
+#   post-run:
+#     - cmd: "notice-route send --source review-run --stdin-json"
+#       async: true
+#   post-escalate:
+#     - cmd: "notice-route send --source review-run --stdin-json"
+#       async: true
+# repos:
+#   github.com/example-org/example-repo:
+#     skill: "review-run:review-pr"
+#     nits: true
+#     limits:
+#       max_files: 150
+#     # run_pr_code runs a command of yours on the PR's code in a throwaway checkout and hands
+#     # only its sanitized output to the session. Per repo only; absent means no command runs.
+#     run_pr_code:
+#       command: ["npm", "test", "--silent"]   # an argv list, never a shell string
+#       sandbox: required                      # required, preferred or off
+#       timeout: 300s                          # wall-clock limit
+#       max_output_bytes: 1048576              # output captured before the command is stopped
+#       max_workspace_bytes: 2147483648        # stop the command when the workspace uses more space (or over a million inodes)
+#       env_allow: []                          # extra non-secret environment names (names with TOKEN, SECRET, KEY, PASS, AUTH, URL and the like are refused)
+#       ro_binds:                              # extra directories bound read-only, opened once and bound by descriptor; never one that holds or lies in a credential location
+#         - /usr/lib/node_modules
+# --- example:end

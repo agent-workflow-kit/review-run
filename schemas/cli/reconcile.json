@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "review-run/cli/reconcile.json",
+  "title": "review-run reconcile --json",
+  "description": "What reconcile changed (or, with --dry-run, would change). Exit 0 whatever the per-run results. It never signals a process.",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "dry_run": {
+      "type": "boolean"
+    },
+    "already_running": {
+      "type": "boolean",
+      "description": "true when another reconcile holds the lease; nothing was done (exit 0)."
+    },
+    "changes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "run_id": {
+            "oneOf": [
+              {
+                "$ref": "../defs.json#/$defs/run_id"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "kind": {
+            "enum": [
+              "finalized",
+              "agent_adopted",
+              "runner_lost",
+              "agent_gone",
+              "expired",
+              "teardown_retried",
+              "throwaway_removed",
+              "throwaway_leaked",
+              "cleaned",
+              "hook_redelivered"
+            ]
+          },
+          "details": {
+            "type": "object",
+            "description": "Closed codes, ids and counts only (for example the resulting state or a throwaway id)."
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "run_id",
+          "kind",
+          "details"
+        ]
+      },
+      "description": "What reconcile changed (or, with --dry-run, would change)."
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "enum": [
+          "teardown_stuck",
+          "audit_stuck",
+          "throwaway_leaked"
+        ]
+      },
+      "uniqueItems": true,
+      "description": "Closed list: teardown_stuck (exactly when stuck_teardowns is above 0), audit_stuck (exactly when stuck_audit is above 0), throwaway_leaked (a recorded leaked throwaway remains after its retry)."
+    },
+    "stuck_teardowns": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Runs whose teardown failed 5 times or more; the warning teardown_stuck is present exactly when this is above 0."
+    },
+    "stuck_audit": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Events whose audit records are still pending after 5 reconcile passes (audit records retry without bound); the warning audit_stuck is present exactly when this is above 0."
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "dry_run",
+    "already_running",
+    "changes",
+    "warnings",
+    "stuck_teardowns",
+    "stuck_audit"
+  ]
+}

@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "review-run/cli/cron.json",
+  "title": "review-run cron --json",
+  "description": "The tagged crontab block # review-run managed: reconcile every 15 minutes and prune daily (accepts --json).",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "action": {
+      "enum": [
+        "install",
+        "uninstall"
+      ]
+    },
+    "dry_run": {
+      "type": "boolean"
+    },
+    "changed": {
+      "type": "boolean"
+    },
+    "block": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "The lines of the tagged crontab block that were (or would be) installed; empty after uninstall."
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "action",
+    "dry_run",
+    "changed",
+    "block"
+  ]
+}

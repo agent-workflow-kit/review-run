@@ -1,47 +1,890 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "review-run/audit",
+  "$id": "review-run/audit.json",
   "title": "review-run audit.jsonl record",
-  "description": "Audit record for review-run. Whether this tool writes audit records is decided in its design session (architecture §14).",
+  "description": "One line of audit.jsonl (export prints these). run, resume and cancel write one record at the start (result.status attempted) and one at the end with the outcome (a run that ends escalated writes result escalated; each resume writes its own pair); a pair is closed only by the invocation that opened it, and when show, wait or reconcile ends or escalates a run it writes one finalize record (its own attempt_id, actor auto:review-run, inputs cause and finalized_by); code_run writes one record per attempted code run; each teardown attempt and each prune write one. A pre-run veto or escalation writes one run record with result vetoed or escalated (the reserved run id; no run record exists). No record holds PR text, the artifact or meta text. Retention is forever; the records of pruned runs stay.",
   "type": "object",
   "properties": {
     "ts": {
+      "$ref": "defs.json#/$defs/ts"
+    },
+    "attempt_id": {
       "type": "string",
-      "format": "date-time"
+      "pattern": "^[A-Za-z0-9_-]{8,64}$",
+      "description": "Pairs the attempted record with its outcome."
     },
     "actor": {
-      "type": "string"
+      "$ref": "defs.json#/$defs/actor"
+    },
+    "actor_source": {
+      "enum": [
+        "flag",
+        "tty",
+        "default"
+      ],
+      "description": "flag (--actor), tty (the human default from a TTY stdin), default (auto:unknown)."
+    },
+    "stdin_tty": {
+      "type": "boolean"
     },
     "decision_id": {
+      "$ref": "defs.json#/$defs/decision_ids",
+      "description": "The caller's --decision-id values and those a pre-run hook printed; possibly empty."
+    },
+    "labels": {
+      "$ref": "defs.json#/$defs/labels"
+    },
+    "event_id": {
       "oneOf": [
         {
-          "type": "string"
+          "$ref": "defs.json#/$defs/event_id"
         },
         {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
+          "type": "null"
         }
+      ],
+      "description": "Set on records written from the outbox (the transition's records); a duplicate line after a crash carries the same id."
+    },
+    "action": {
+      "enum": [
+        "run",
+        "resume",
+        "cancel",
+        "finalize",
+        "code_run",
+        "teardown",
+        "prune"
       ]
     },
     "target": {
-      "type": "string"
-    },
-    "action": {
-      "type": "string"
+      "type": "object",
+      "properties": {
+        "run_id": {
+          "oneOf": [
+            {
+              "$ref": "defs.json#/$defs/run_id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "pr": {
+          "oneOf": [
+            {
+              "$ref": "defs.json#/$defs/pr"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "run_id",
+        "pr"
+      ],
+      "description": "The run id and PR; both null for prune."
     },
     "inputs": {
       "type": "object"
     },
-    "result": {}
+    "result": {
+      "type": "object"
+    }
   },
+  "additionalProperties": false,
   "required": [
     "ts",
+    "attempt_id",
     "actor",
-    "target",
+    "actor_source",
+    "stdin_tty",
+    "decision_id",
+    "labels",
+    "event_id",
     "action",
+    "target",
+    "inputs",
     "result"
   ],
-  "additionalProperties": true
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "action": {
+            "const": "run"
+          }
+        },
+        "required": [
+          "action"
+        ]
+      },
+      "then": {
+        "properties": {
+          "target": {
+            "type": "object",
+            "properties": {
+              "run_id": {
+                "$ref": "defs.json#/$defs/run_id"
+              },
+              "pr": {
+                "$ref": "defs.json#/$defs/pr"
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "run_id",
+              "pr"
+            ]
+          },
+          "inputs": {
+            "type": "object",
+            "properties": {
+              "head_sha": {
+                "oneOf": [
+                  {
+                    "$ref": "defs.json#/$defs/sha"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The anchor head sha; null in the attempted record and in a pre-run veto or escalation record, before the anchor is known."
+              },
+              "config_sha256": {
+                "$ref": "defs.json#/$defs/sha256"
+              },
+              "skill": {
+                "$ref": "defs.json#/$defs/skill"
+              },
+              "previous_run": {
+                "oneOf": [
+                  {
+                    "$ref": "defs.json#/$defs/run_id"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "permission_profile_sha256": {
+                "$ref": "defs.json#/$defs/sha256"
+              },
+              "session_sandbox": {
+                "$ref": "defs.json#/$defs/sandbox_level"
+              },
+              "setting_sources": {
+                "type": "array",
+                "items": {
+                  "enum": [
+                    "user",
+                    "project",
+                    "local"
+                  ]
+                },
+                "uniqueItems": true
+              },
+              "plugin_dirs_sha256": {
+                "oneOf": [
+                  {
+                    "$ref": "defs.json#/$defs/sha256"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "SHA-256 over the passed plugin directories' file lists and contents; null without extra plugins."
+              },
+              "override_escalation": {
+                "type": "boolean"
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "head_sha",
+              "config_sha256",
+              "skill",
+              "previous_run",
+              "permission_profile_sha256",
+              "session_sandbox",
+              "setting_sources",
+              "plugin_dirs_sha256",
+              "override_escalation"
+            ]
+          },
+          "result": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "enum": [
+                  "attempted",
+                  "done",
+                  "failed",
+                  "escalated",
+                  "vetoed"
+                ]
+              },
+              "reason": {
+                "enum": [
+                  "prefetch_failed",
+                  "stale_head",
+                  "too_large",
+                  "launch_failed",
+                  "canceled",
+                  "session_failed",
+                  "unreported",
+                  "killed",
+                  "timeout",
+                  "lost",
+                  "runner_lost",
+                  "agent_gone",
+                  "expired",
+                  "implicit_done",
+                  "artifact_missing",
+                  "artifact_mismatch",
+                  "skill_missing",
+                  "artifact_invalid",
+                  "internal",
+                  "needs_input",
+                  "blocked",
+                  null
+                ]
+              },
+              "exit_code": {
+                "oneOf": [
+                  {
+                    "$ref": "defs.json#/$defs/exit_code"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "status",
+              "reason",
+              "exit_code"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "action": {
+            "const": "resume"
+          }
+        },
+        "required": [
+          "action"
+        ]
+      },
+      "then": {
+        "properties": {
+          "target": {
+            "type": "object",
+            "properties": {
+              "run_id": {
+                "$ref": "defs.json#/$defs/run_id"
+              },
+              "pr": {
+                "$ref": "defs.json#/$defs/pr"
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "run_id",
+              "pr"
+            ]
+          },
+          "inputs": {
+            "type": "object",
+            "properties": {
+              "head_sha": {
+                "oneOf": [
+                  {
+                    "$ref": "defs.json#/$defs/sha"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The anchor head sha; null in the attempted record and in a pre-run veto or escalation record, before the anchor is known."
+              },
+              "config_sha256": {
+                "$ref": "defs.json#/$defs/sha256"
+              },
+              "skill": {
+                "$ref": "defs.json#/$defs/skill"
+              },
+              "previous_run": {
+                "oneOf": [
+                  {
+                    "$ref": "defs.json#/$defs/run_id"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "permission_profile_sha256": {
+                "$ref": "defs.json#/$defs/sha256"
+              },
+              "session_sandbox": {
+                "$ref": "defs.json#/$defs/sandbox_level"
+              },
+              "setting_sources": {
+                "type": "array",
+                "items": {
+                  "enum": [
+                    "user",
+                    "project",
+                    "local"
+                  ]
+                },
+                "uniqueItems": true
+              },
+              "plugin_dirs_sha256": {
+                "oneOf": [
+                  {
+                    "$ref": "defs.json#/$defs/sha256"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "SHA-256 over the passed plugin directories' file lists and contents; null without extra plugins."
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "head_sha",
+              "config_sha256",
+              "skill",
+              "previous_run",
+              "permission_profile_sha256",
+              "session_sandbox",
+              "setting_sources",
+              "plugin_dirs_sha256"
+            ]
+          },
+          "result": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "enum": [
+                  "attempted",
+                  "done",
+                  "failed",
+                  "escalated",
+                  "vetoed"
+                ]
+              },
+              "reason": {
+                "enum": [
+                  "prefetch_failed",
+                  "stale_head",
+                  "too_large",
+                  "launch_failed",
+                  "canceled",
+                  "session_failed",
+                  "unreported",
+                  "killed",
+                  "timeout",
+                  "lost",
+                  "runner_lost",
+                  "agent_gone",
+                  "expired",
+                  "implicit_done",
+                  "artifact_missing",
+                  "artifact_mismatch",
+                  "skill_missing",
+                  "artifact_invalid",
+                  "internal",
+                  "needs_input",
+                  "blocked",
+                  null
+                ]
+              },
+              "exit_code": {
+                "oneOf": [
+                  {
+                    "$ref": "defs.json#/$defs/exit_code"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "status",
+              "reason",
+              "exit_code"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "action": {
+            "const": "finalize"
+          }
+        },
+        "required": [
+          "action"
+        ]
+      },
+      "then": {
+        "properties": {
+          "target": {
+            "type": "object",
+            "properties": {
+              "run_id": {
+                "$ref": "defs.json#/$defs/run_id"
+              },
+              "pr": {
+                "$ref": "defs.json#/$defs/pr"
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "run_id",
+              "pr"
+            ]
+          },
+          "inputs": {
+            "type": "object",
+            "properties": {
+              "cause": {
+                "enum": [
+                  "runner_lost",
+                  "agent_gone",
+                  "expired",
+                  "canceled",
+                  "external_resume",
+                  "finalized"
+                ]
+              },
+              "finalized_by": {
+                "enum": [
+                  "show",
+                  "wait",
+                  "reconcile"
+                ]
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "cause",
+              "finalized_by"
+            ]
+          },
+          "result": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "enum": [
+                  "done",
+                  "failed",
+                  "escalated"
+                ]
+              },
+              "reason": {
+                "enum": [
+                  "prefetch_failed",
+                  "stale_head",
+                  "too_large",
+                  "launch_failed",
+                  "canceled",
+                  "session_failed",
+                  "unreported",
+                  "killed",
+                  "timeout",
+                  "lost",
+                  "runner_lost",
+                  "agent_gone",
+                  "expired",
+                  "implicit_done",
+                  "artifact_missing",
+                  "artifact_mismatch",
+                  "skill_missing",
+                  "artifact_invalid",
+                  "internal",
+                  "needs_input",
+                  "blocked",
+                  null
+                ]
+              },
+              "exit_code": {
+                "$ref": "defs.json#/$defs/run_exit_code"
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "status",
+              "reason",
+              "exit_code"
+            ]
+          },
+          "actor": {
+            "const": "auto:review-run"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "action": {
+            "const": "cancel"
+          }
+        },
+        "required": [
+          "action"
+        ]
+      },
+      "then": {
+        "properties": {
+          "target": {
+            "type": "object",
+            "properties": {
+              "run_id": {
+                "$ref": "defs.json#/$defs/run_id"
+              },
+              "pr": {
+                "$ref": "defs.json#/$defs/pr"
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "run_id",
+              "pr"
+            ]
+          },
+          "inputs": {
+            "type": "object",
+            "properties": {
+              "agent_id": {
+                "oneOf": [
+                  {
+                    "$ref": "defs.json#/$defs/agent_id"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "state": {
+                "$ref": "defs.json#/$defs/state"
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "agent_id",
+              "state"
+            ]
+          },
+          "result": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "enum": [
+                  "attempted",
+                  "done",
+                  "failed",
+                  "escalated",
+                  "vetoed"
+                ]
+              },
+              "reason": {
+                "enum": [
+                  "prefetch_failed",
+                  "stale_head",
+                  "too_large",
+                  "launch_failed",
+                  "canceled",
+                  "session_failed",
+                  "unreported",
+                  "killed",
+                  "timeout",
+                  "lost",
+                  "runner_lost",
+                  "agent_gone",
+                  "expired",
+                  "implicit_done",
+                  "artifact_missing",
+                  "artifact_mismatch",
+                  "skill_missing",
+                  "artifact_invalid",
+                  "internal",
+                  "needs_input",
+                  "blocked",
+                  null
+                ]
+              },
+              "exit_code": {
+                "oneOf": [
+                  {
+                    "$ref": "defs.json#/$defs/exit_code"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "status",
+              "reason",
+              "exit_code"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "action": {
+            "const": "code_run"
+          }
+        },
+        "required": [
+          "action"
+        ]
+      },
+      "then": {
+        "properties": {
+          "target": {
+            "type": "object",
+            "properties": {
+              "run_id": {
+                "$ref": "defs.json#/$defs/run_id"
+              },
+              "pr": {
+                "$ref": "defs.json#/$defs/pr"
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "run_id",
+              "pr"
+            ]
+          },
+          "inputs": {
+            "type": "object",
+            "properties": {
+              "throwaway_id": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "argv_sha256": {
+                "$ref": "defs.json#/$defs/sha256"
+              },
+              "sandbox": {
+                "enum": [
+                  "required",
+                  "preferred_fallback",
+                  "off",
+                  null
+                ],
+                "description": "The sandbox mode actually used; null when no command ran."
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "throwaway_id",
+              "argv_sha256",
+              "sandbox"
+            ]
+          },
+          "result": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "enum": [
+                  "ok",
+                  "failed",
+                  "skipped"
+                ]
+              },
+              "reason": {
+                "enum": [
+                  "wtctl_missing",
+                  "throwaway_refused",
+                  "ref_unavailable",
+                  "throwaway_failed",
+                  "sandbox_unavailable",
+                  "sandbox_unsupported",
+                  "sandbox_failed",
+                  "ro_bind_refused",
+                  "throwaway_leaks",
+                  null
+                ]
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "status",
+              "reason"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "action": {
+            "const": "teardown"
+          }
+        },
+        "required": [
+          "action"
+        ]
+      },
+      "then": {
+        "properties": {
+          "target": {
+            "type": "object",
+            "properties": {
+              "run_id": {
+                "$ref": "defs.json#/$defs/run_id"
+              },
+              "pr": {
+                "$ref": "defs.json#/$defs/pr"
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "run_id",
+              "pr"
+            ]
+          },
+          "inputs": {
+            "type": "object",
+            "properties": {
+              "agent_id": {
+                "$ref": "defs.json#/$defs/agent_id"
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "agent_id"
+            ]
+          },
+          "result": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "enum": [
+                  "done",
+                  "failed"
+                ]
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "status"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "action": {
+            "const": "prune"
+          }
+        },
+        "required": [
+          "action"
+        ]
+      },
+      "then": {
+        "properties": {
+          "inputs": {
+            "type": "object",
+            "properties": {
+              "older_than": {
+                "$ref": "defs.json#/$defs/duration"
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "older_than"
+            ]
+          },
+          "result": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "const": "done"
+              },
+              "deleted_runs": {
+                "type": "integer",
+                "minimum": 0
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "status",
+              "deleted_runs"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "result": {
+            "properties": {
+              "status": {
+                "const": "vetoed"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          }
+        },
+        "required": [
+          "result"
+        ]
+      },
+      "then": {
+        "properties": {
+          "action": {
+            "const": "run"
+          },
+          "result": {
+            "properties": {
+              "exit_code": {
+                "const": 11
+              },
+              "reason": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
 }

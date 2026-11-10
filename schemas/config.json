@@ -1,12 +1,512 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "review-run/config",
+  "$id": "review-run/config.json",
   "title": "review-run config",
+  "description": "~/.config/review-run/config.yaml (XDG-aware) plus config.d/*.yaml drop-ins. Precedence: flags, repos.<id>, environment (REVIEW_RUN_<KEY>, top-level scalars only), global config, defaults. run_pr_code exists only under repos.<id>. Invalid config fails fast naming the key. Durations cannot be range-checked here.",
   "type": "object",
   "properties": {
+    "skill": {
+      "$ref": "#/$defs/skill",
+      "default": "review-run:review-pr",
+      "description": "The skill, <plugin>:<skill>: the bundled default or one from a plugin_dirs entry."
+    },
+    "plugin_dirs": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^/"
+      },
+      "uniqueItems": true,
+      "default": [],
+      "description": "Absolute directories of extra plugins holding other review skills; each needs the placeholders .claude/, .mcp.json, CLAUDE.md and CLAUDE.local.md, is used by its realpath and must be owned by the user and not writable by group or others. Two plugins with the same plugin.json name, or one named review-run, are a config error (a semantic check)."
+    },
+    "permission_profile": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^/",
+      "default": null,
+      "description": "Permission profile file passed on every call; null: the bundled file."
+    },
+    "sandbox": {
+      "enum": [
+        "required",
+        "preferred",
+        "off"
+      ],
+      "default": "required",
+      "description": "Session sandbox level passed on every call."
+    },
+    "setting_sources": {
+      "type": "array",
+      "items": {
+        "enum": [
+          "user",
+          "project",
+          "local"
+        ]
+      },
+      "uniqueItems": true,
+      "default": [],
+      "description": "Setting sources passed on every call."
+    },
+    "env_allowlist": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+      },
+      "uniqueItems": true,
+      "default": [
+        "PATH"
+      ],
+      "description": "Names passed with --env-allowlist-only; the same names are refused as for run_pr_code.env_allow (a semantic check)."
+    },
+    "model": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "minLength": 1,
+      "default": null,
+      "description": "--model; null: Claude Code's default."
+    },
+    "timeout": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/duration"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "--timeout; null: the kind's default (120 minutes). Must be greater than 0 (a semantic check); passed to agent-spawn as given."
+    },
+    "max_turns": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 1,
+      "default": null,
+      "description": "--max-turns on launch and resume; null: the kind's default."
+    },
+    "subagents": {
+      "type": "boolean",
+      "default": false,
+      "description": "true drops the Agent and Task denies from the profile."
+    },
+    "max_subagent_depth": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 1,
+      "description": "Depth variable when subagents is on."
+    },
+    "nits": {
+      "type": "boolean",
+      "default": false,
+      "description": "Ask the skill for nit-severity findings."
+    },
+    "guidelines_file": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^(?:/|~/).+",
+      "default": null,
+      "description": "An absolute path (~ expanded at load) to a regular file, opened without following links, at most 64 KiB of UTF-8, placed in the prompt as trusted instructions."
+    },
+    "mode": {
+      "$ref": "#/$defs/mode",
+      "default": "headless",
+      "description": "Default mode."
+    },
+    "limits": {
+      "type": "object",
+      "properties": {
+        "max_file_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 200000,
+          "description": "Per input file (below the Read tool's 256 KB refusal; the skill reads in pages)."
+        },
+        "max_total_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 1048576,
+          "description": "Total of provided patches before files are skipped."
+        },
+        "max_files": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2000,
+          "default": 300,
+          "description": "Number of input files, at most 2000 (each is one --input-file argument to agent-spawn and claude-session)."
+        },
+        "hard_ceiling_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 8388608,
+          "description": "The PR's whole diff above this fails the run (too_large)."
+        },
+        "max_artifact_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 8388608,
+          "description": "Artifact size above this is artifact_invalid."
+        },
+        "max_answer_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 65536,
+          "description": "The resume answer above this exits 2."
+        }
+      },
+      "additionalProperties": false,
+      "required": [],
+      "default": {}
+    },
+    "retention": {
+      "$ref": "#/$defs/duration",
+      "default": "30d",
+      "description": "Age at which prune deletes terminal runs."
+    },
+    "escalation_ttl": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/duration"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": "7d",
+      "description": "Age of an escalated run at which reconcile ends it failed (expired); null disables."
+    },
+    "me": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[A-Za-z0-9._@-]{1,64}$",
+          "default": null,
+          "description": "Used only for the default actor; null: the OS username."
+        }
+      },
+      "additionalProperties": false,
+      "required": [],
+      "default": {}
+    },
     "hooks": {
-      "type": "object"
+      "type": "object",
+      "properties": {
+        "pre-run": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/hook_entry_pre"
+          },
+          "default": []
+        },
+        "post-run": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/hook_entry_post"
+          },
+          "default": []
+        },
+        "post-escalate": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/hook_entry_post"
+          },
+          "default": []
+        }
+      },
+      "additionalProperties": false,
+      "required": [],
+      "default": {}
+    },
+    "repos": {
+      "type": "object",
+      "default": {},
+      "description": "Per-repo overrides keyed by repo id (limits merge key by key; mode, retention, escalation_ttl, me and hooks are global only). Precedence: flags, then repos.<id>, then environment, then global config, then defaults.",
+      "patternProperties": {
+        "^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*(?::[0-9]{1,5})?(?:/(?!\\.\\.?(?:/|$))[A-Za-z0-9._-]+)+$": {
+          "type": "object",
+          "properties": {
+            "skill": {
+              "$ref": "#/$defs/skill",
+              "description": "The skill, <plugin>:<skill>: the bundled default or one from a plugin_dirs entry."
+            },
+            "plugin_dirs": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^/"
+              },
+              "uniqueItems": true,
+              "description": "Absolute directories of extra plugins holding other review skills; each needs the placeholders .claude/, .mcp.json, CLAUDE.md and CLAUDE.local.md, is used by its realpath and must be owned by the user and not writable by group or others. Two plugins with the same plugin.json name, or one named review-run, are a config error (a semantic check)."
+            },
+            "permission_profile": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "pattern": "^/",
+              "description": "Permission profile file passed on every call; null: the bundled file."
+            },
+            "sandbox": {
+              "enum": [
+                "required",
+                "preferred",
+                "off"
+              ],
+              "description": "Session sandbox level passed on every call."
+            },
+            "setting_sources": {
+              "type": "array",
+              "items": {
+                "enum": [
+                  "user",
+                  "project",
+                  "local"
+                ]
+              },
+              "uniqueItems": true,
+              "description": "Setting sources passed on every call."
+            },
+            "env_allowlist": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+              },
+              "uniqueItems": true,
+              "description": "Names passed with --env-allowlist-only; the same names are refused as for run_pr_code.env_allow (a semantic check)."
+            },
+            "model": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "minLength": 1,
+              "description": "--model; null: Claude Code's default."
+            },
+            "timeout": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/duration"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "--timeout; null: the kind's default (120 minutes). Must be greater than 0 (a semantic check); passed to agent-spawn as given."
+            },
+            "max_turns": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 1,
+              "description": "--max-turns on launch and resume; null: the kind's default."
+            },
+            "subagents": {
+              "type": "boolean",
+              "description": "true drops the Agent and Task denies from the profile."
+            },
+            "max_subagent_depth": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Depth variable when subagents is on."
+            },
+            "nits": {
+              "type": "boolean",
+              "description": "Ask the skill for nit-severity findings."
+            },
+            "guidelines_file": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "pattern": "^(?:/|~/).+",
+              "description": "An absolute path (~ expanded at load) to a regular file, opened without following links, at most 64 KiB of UTF-8, placed in the prompt as trusted instructions."
+            },
+            "limits": {
+              "type": "object",
+              "properties": {
+                "max_file_bytes": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "description": "Per input file (below the Read tool's 256 KB refusal; the skill reads in pages)."
+                },
+                "max_total_bytes": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "description": "Total of provided patches before files are skipped."
+                },
+                "max_files": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 2000,
+                  "description": "Number of input files, at most 2000 (each is one --input-file argument to agent-spawn and claude-session)."
+                },
+                "hard_ceiling_bytes": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "description": "The PR's whole diff above this fails the run (too_large)."
+                },
+                "max_artifact_bytes": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "description": "Artifact size above this is artifact_invalid."
+                },
+                "max_answer_bytes": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "description": "The resume answer above this exits 2."
+                }
+              },
+              "additionalProperties": false,
+              "required": []
+            },
+            "run_pr_code": {
+              "type": "object",
+              "properties": {
+                "command": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "minItems": 1,
+                  "description": "An argv list, never a shell string, run in the throwaway."
+                },
+                "sandbox": {
+                  "enum": [
+                    "required",
+                    "preferred",
+                    "off"
+                  ],
+                  "default": "required"
+                },
+                "timeout": {
+                  "$ref": "#/$defs/duration",
+                  "default": "300s",
+                  "description": "Wall-clock limit; greater than 0."
+                },
+                "max_output_bytes": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "default": 1048576
+                },
+                "max_workspace_bytes": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "default": 2147483648,
+                  "description": "The monitor stops the command when the throwaway's file system has lost more free space than this, or more than 1,000,000 free inodes, since the start."
+                },
+                "env_allow": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+                  },
+                  "uniqueItems": true,
+                  "default": [],
+                  "description": "Extra names for the command's environment (non-secret). A name must match ^[A-Za-z_][A-Za-z0-9_]*$ (the pattern; any other character is refused); refused at config load (a semantic check) when its ASCII form matches *TOKEN*, *SECRET*, *KEY*, *PASS*, *CREDENTIAL*, *AUTH*, *COOKIE*, *SESSION*, *DSN*, *_URL, *_PAT, *PROXY* or NETRC (case-insensitive) or starts with ANTHROPIC_ or CLAUDE_."
+                },
+                "ro_binds": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "pattern": "^/"
+                  },
+                  "uniqueItems": true,
+                  "default": [],
+                  "description": "Extra absolute paths bound read-only (language runtimes, pre-populated caches, a node_modules directory). Each entry must be a directory. It is resolved with realpath at config load (an early diagnostic); when the code run starts it is opened once with O_PATH|O_DIRECTORY|O_NOFOLLOW, the opened object is validated through /proc/self/fd and the opened descriptor is bound with --ro-bind-fd, never a path; a failing entry skips the step (ro_bind_refused). Refused (a semantic check) when the real path is /, the home directory or an ancestor, /mnt, /media, /root, inside a WSL drive mount, under /proc, /sys, /dev, /run or /var/run, an ancestor of any tool's state directory, contains or is inside a credential location of claude-session's list (each location first resolved by realpath on this machine), or, as the first textual filter, has a credential component such as .ssh, .gnupg, .aws, .kube, .docker, .config, .claude, .netrc, .npmrc, .pypirc, credentials.toml or .git-credentials. A toolchain directory holding a credential file must be narrowed."
+                }
+              },
+              "additionalProperties": false,
+              "required": [
+                "command"
+              ],
+              "description": "Only under repos.<id>.run_pr_code; a repo without it runs no command. There is no network key in v1."
+            }
+          },
+          "additionalProperties": false,
+          "required": []
+        }
+      },
+      "additionalProperties": false
     }
   },
-  "additionalProperties": true
+  "additionalProperties": false,
+  "required": [],
+  "$defs": {
+    "duration": {
+      "type": "string",
+      "pattern": "^(?:0|[0-9]+(?:ms|s|m|h|d))$",
+      "description": "0, or an integer and a unit: ms, s, m, h, d."
+    },
+    "hook_entry_post": {
+      "type": "object",
+      "properties": {
+        "cmd": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Run through sh -c in its own process group."
+        },
+        "timeout": {
+          "$ref": "#/$defs/duration",
+          "default": "30s"
+        },
+        "async": {
+          "type": "boolean",
+          "default": false,
+          "description": "Run detached under a watchdog that enforces the timeout."
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "cmd"
+      ],
+      "description": "Cannot undo; failures are logged and warned, never fatal."
+    },
+    "hook_entry_pre": {
+      "type": "object",
+      "properties": {
+        "cmd": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Run through sh -c in its own process group."
+        },
+        "timeout": {
+          "$ref": "#/$defs/duration",
+          "default": "30s"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "cmd"
+      ],
+      "description": "Exit 0 continues; 13 escalates; any other non-zero exit or a timeout vetoes (exit 11)."
+    },
+    "mode": {
+      "enum": [
+        "headless",
+        "interactive"
+      ]
+    },
+    "skill": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+      "description": "A name Claude Code accepts as a slash command (plugin:skill or a bare name)."
+    }
+  }
 }

@@ -1,0 +1,7 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "review-run/cli/show.json",
+  "title": "review-run show --json",
+  "description": "The run object for show (without --draft). Printed whenever the outcome is a run's state (Output by exit code); a document with a top-level error key is the envelope instead (cli/error.json). show --draft prints the stored review.json, not this. show exits 0 whenever it printed; the run's outcome is exit_code.",
+  "$ref": "../defs.json#/$defs/run"
+}

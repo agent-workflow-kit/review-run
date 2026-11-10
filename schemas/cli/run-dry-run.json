@@ -1,0 +1,299 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "review-run/cli/run-dry-run.json",
+  "title": "review-run run --dry-run --json",
+  "description": "Run order steps 1 and 2 run as for run, so a failure there prints the error envelope (cli/error.json) with that step's exit code; past them this plan is printed and the exit is 0. settings lists every key settings.json would hold. Plan only: allocates no run id, writes no audit record, runs no hook and no code run, launches nothing; the prompt and inputs are written to a private directory under the state root that is removed afterwards. It exits 0 and prints would_exit. Paths in the manifest are untrusted.",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "dry_run": {
+      "const": true
+    },
+    "pr": {
+      "$ref": "../defs.json#/$defs/pr"
+    },
+    "repo": {
+      "$ref": "../defs.json#/$defs/repo_id"
+    },
+    "skill": {
+      "$ref": "../defs.json#/$defs/skill"
+    },
+    "mode": {
+      "$ref": "../defs.json#/$defs/mode"
+    },
+    "previous_run": {
+      "oneOf": [
+        {
+          "$ref": "../defs.json#/$defs/run_id"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "head_sha": {
+      "oneOf": [
+        {
+          "$ref": "../defs.json#/$defs/sha"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "settings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "key": {
+            "type": "string",
+            "pattern": "^[a-z_]+(?:\\.[a-z_]+)*$"
+          },
+          "value": {
+            "description": "The resolved value (a config value; never a secret, there are none)."
+          },
+          "origin": {
+            "enum": [
+              "flag",
+              "repo",
+              "env",
+              "config",
+              "default"
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "key",
+          "value",
+          "origin"
+        ]
+      },
+      "description": "The content settings.json would get: every resolved key with its origin."
+    },
+    "launch_argv": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "The agent-spawn launch argv review-run would use; no untrusted text."
+    },
+    "plugin_dirs": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^/"
+      },
+      "description": "The plugin directories that would be passed."
+    },
+    "tools": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "enum": [
+              "forgectl",
+              "pr-comment",
+              "agent-spawn",
+              "claude-session",
+              "wtctl",
+              "bwrap",
+              "socat"
+            ]
+          },
+          "path": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^/"
+          },
+          "version": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 64
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "path",
+          "version"
+        ]
+      },
+      "description": "Sibling tools and helpers resolved on PATH, with their versions (null when missing)."
+    },
+    "manifest": {
+      "type": "array",
+      "items": {
+        "$ref": "../defs.json#/$defs/manifest_entry"
+      }
+    },
+    "coverage_preview": {
+      "$ref": "../defs.json#/$defs/coverage"
+    },
+    "sizes": {
+      "type": "object",
+      "properties": {
+        "files": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "diff_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "provided_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "provided_files": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "files",
+        "diff_bytes",
+        "provided_bytes",
+        "provided_files"
+      ]
+    },
+    "code_run_plan": {
+      "type": "object",
+      "properties": {
+        "configured": {
+          "type": "boolean"
+        },
+        "sandbox": {
+          "enum": [
+            "required",
+            "preferred",
+            "off",
+            null
+          ],
+          "description": "The configured sandbox mode; null when not configured."
+        },
+        "sandbox_probe": {
+          "enum": [
+            "ok",
+            "unavailable",
+            "unsupported",
+            "not_applicable"
+          ],
+          "description": "The bubblewrap probe result; not_applicable when no code run is configured."
+        },
+        "would_skip": {
+          "enum": [
+            "wtctl_missing",
+            "throwaway_refused",
+            "ref_unavailable",
+            "throwaway_failed",
+            "sandbox_unavailable",
+            "sandbox_unsupported",
+            "sandbox_failed",
+            "ro_bind_refused",
+            "throwaway_leaks",
+            null
+          ],
+          "description": "The skip reason the step would have, else null."
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "configured",
+        "sandbox",
+        "sandbox_probe",
+        "would_skip"
+      ],
+      "description": "What the code-run step would do, including the sandbox probe result."
+    },
+    "would_fail": {
+      "type": "array",
+      "items": {
+        "enum": [
+          "prefetch_failed",
+          "stale_head",
+          "too_large",
+          "launch_failed",
+          "canceled",
+          "session_failed",
+          "unreported",
+          "killed",
+          "timeout",
+          "lost",
+          "runner_lost",
+          "agent_gone",
+          "expired",
+          "implicit_done",
+          "artifact_missing",
+          "artifact_mismatch",
+          "skill_missing",
+          "artifact_invalid",
+          "internal",
+          "needs_input",
+          "blocked",
+          "not_open",
+          "unknown_host",
+          "live",
+          "not_escalated",
+          "lower_refused",
+          "tool_missing",
+          "tool_too_old",
+          "no_tmux",
+          "wait_timeout",
+          "schema_newer",
+          "state_unsafe",
+          "plugin_changed",
+          "lower_failed",
+          "previous_mismatch",
+          "previous_not_done",
+          "skill_not_found",
+          "label_reserved",
+          "too_many_labels",
+          "pr_too_long"
+        ]
+      },
+      "uniqueItems": true,
+      "description": "Every reason the run would refuse or fail with; empty when none."
+    },
+    "would_exit": {
+      "$ref": "../defs.json#/$defs/exit_code"
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "$ref": "../defs.json#/$defs/run_warning"
+      }
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "dry_run",
+    "pr",
+    "repo",
+    "skill",
+    "mode",
+    "previous_run",
+    "head_sha",
+    "settings",
+    "launch_argv",
+    "plugin_dirs",
+    "tools",
+    "manifest",
+    "coverage_preview",
+    "sizes",
+    "code_run_plan",
+    "would_fail",
+    "would_exit",
+    "warnings"
+  ]
+}

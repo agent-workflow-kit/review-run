@@ -1,0 +1,161 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "review-run/hooks/pre-run.json",
+  "title": "pre-run hook payload (stdin)",
+  "description": "After resolve and preflight (run order step 2), before the run record exists and before any read of the diff or launch. Exit 0 continues, 13 escalates (unless run --override-escalation), any other non-zero vetoes (exit 11). Only trusted or derived values: never PR text.",
+  "type": "object",
+  "properties": {
+    "tool": {
+      "const": "review-run"
+    },
+    "hook": {
+      "const": "pre-run"
+    },
+    "object_type": {
+      "const": "run"
+    },
+    "object_id": {
+      "$ref": "../defs.json#/$defs/run_id",
+      "description": "The reserved run id; no run record exists yet."
+    },
+    "repo": {
+      "$ref": "../defs.json#/$defs/repo_id"
+    },
+    "labels": {
+      "$ref": "../defs.json#/$defs/labels"
+    },
+    "pr": {
+      "$ref": "../defs.json#/$defs/pr"
+    },
+    "skill": {
+      "$ref": "../defs.json#/$defs/skill"
+    },
+    "mode": {
+      "$ref": "../defs.json#/$defs/mode"
+    },
+    "previous_run": {
+      "oneOf": [
+        {
+          "$ref": "../defs.json#/$defs/run_id"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "head_sha": {
+      "$ref": "../defs.json#/$defs/sha",
+      "description": "The resolve-time head, which can differ from the reviewed anchor."
+    },
+    "pr_facts": {
+      "$ref": "../defs.json#/$defs/pr_facts"
+    },
+    "will_run_code": {
+      "type": "boolean",
+      "description": "true when the repo configures run_pr_code."
+    },
+    "code_run_sandbox": {
+      "enum": [
+        "required",
+        "preferred",
+        "off",
+        null
+      ],
+      "description": "The configured code-run sandbox mode; null when no code run is configured."
+    },
+    "override_escalation": {
+      "type": "boolean"
+    },
+    "session_sandbox": {
+      "$ref": "../defs.json#/$defs/sandbox_level",
+      "description": "The session sandbox level the run would use."
+    },
+    "subagents": {
+      "type": "boolean"
+    },
+    "permission_profile": {
+      "enum": [
+        "bundled",
+        "variant",
+        "custom"
+      ],
+      "description": "bundled, variant (without the Agent and Task denies) or custom."
+    },
+    "setting_sources": {
+      "type": "array",
+      "items": {
+        "enum": [
+          "user",
+          "project",
+          "local"
+        ]
+      },
+      "uniqueItems": true,
+      "description": "The setting sources the session would load."
+    },
+    "sizes": {
+      "type": "object",
+      "properties": {
+        "additions": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "deletions": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "changed_files": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "additions",
+        "deletions",
+        "changed_files"
+      ],
+      "description": "The PR's size counts from forgectl; null when forgectl gave none."
+    },
+    "actor": {
+      "$ref": "../defs.json#/$defs/actor"
+    },
+    "decision_ids": {
+      "$ref": "../defs.json#/$defs/decision_ids"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "tool",
+    "hook",
+    "object_type",
+    "object_id",
+    "repo",
+    "labels",
+    "pr",
+    "skill",
+    "mode",
+    "previous_run",
+    "head_sha",
+    "pr_facts",
+    "will_run_code",
+    "code_run_sandbox",
+    "override_escalation",
+    "session_sandbox",
+    "subagents",
+    "permission_profile",
+    "setting_sources",
+    "sizes",
+    "actor",
+    "decision_ids"
+  ]
+}

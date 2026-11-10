@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "review-run/cli/cancel.json",
+  "title": "review-run cancel --json",
+  "description": "The run after cancel (state failed, reason canceled, exit_code 143), unchanged for a terminal run, a run finalized by the refresh or a dry run, or still running with cancel_requested_at set when a live runner had not ended it after 120 s.",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "run": {
+      "$ref": "../defs.json#/$defs/run"
+    },
+    "changed": {
+      "type": "boolean",
+      "description": "false for a run that was already terminal or ended by the refresh, a run in phase finalize, and a dry run; true from the recording of the cancellation on."
+    },
+    "action": {
+      "enum": [
+        "none",
+        "stop",
+        "signal_runner",
+        "signal_launcher",
+        "teardown"
+      ],
+      "description": "none (terminal, or nothing to act on), stop (agent-spawn stop of an agent that is not parked), signal_runner (SIGTERM to the verified live runner when no agent exists) or signal_launcher (SIGTERM to the verified live agent-spawn launcher when no agent id and no runner exist)."
+    },
+    "dry_run": {
+      "type": "boolean"
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "$ref": "../defs.json#/$defs/run_warning"
+      },
+      "description": "The run's own warnings after the command (any code of the run warning list)."
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "run",
+    "changed",
+    "action",
+    "dry_run",
+    "warnings"
+  ]
+}

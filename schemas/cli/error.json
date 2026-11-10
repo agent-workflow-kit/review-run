@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "review-run/cli/error.json",
+  "title": "review-run error envelope",
+  "description": "Printed instead of a result whenever the outcome is not a run's state (a document with a top-level error key is the envelope): exits 1, 2, 10, 11, 12 and 20 without a run or with the run unchanged, 13 (a pre-run hook or, on resume, a lower tool) and 21. A resolve-step forgectl failure exits 10 (not_found), 20 (unknown_host, not_open), 2 (usage, lower_code) or 12 (failed, lower_failed, tool, lower_code, details.retry_after when given). For resume, an envelope means the run did not change. export prints audit.jsonl or log.jsonl lines, described by audit.json and log.json; it has no cli schema.",
+  "type": "object",
+  "properties": {
+    "error": {
+      "$ref": "../defs.json#/$defs/error"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "error"
+  ]
+}
