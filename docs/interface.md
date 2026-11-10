@@ -349,7 +349,7 @@ Its output has `stuck_teardowns`, the count of runs whose teardown failed 5 time
 
 ### `prune`
 
-`review-run prune [--older-than <duration>] [--dry-run] [--json]` deletes terminal runs (`done` and `failed`) whose `finished_at` is older than the duration (default config `retention`, 30 days) together with their directories and artifact copies, and prints `{results: [{run_id, result, reason}], warnings, dry_run}`. It never touches a `running` or `escalated` run (it skips them; there is no refusal) and skips a terminal run whose `teardown` is not `done` (`result: skipped`, `reason: teardown_pending`) so its agent id is not lost; it derives each directory from `runs/<run id>` after the id grammar check and deletes through directory file descriptors, never from a stored path. It never signals anything and is audited. It exits 0 whatever the per-run results. The audit and log records of pruned runs stay.
+`review-run prune [--older-than <duration>] [--dry-run] [--json]` deletes terminal runs (`done` and `failed`) whose `finished_at` is older than the duration (default config `retention`, 30 days) together with their directories and artifact copies, and prints `{older_than, results: [{run_id, result, reason}], warnings, dry_run}` ([`schemas/cli/prune.json`](../schemas/cli/prune.json)). It never touches a `running` or `escalated` run (it skips them; there is no refusal) and skips a terminal run whose `teardown` is not `done` (`result: skipped`, `reason: teardown_pending`) so its agent id is not lost; it derives each directory from `runs/<run id>` after the id grammar check and deletes through directory file descriptors, never from a stored path. It never signals anything and is audited. It exits 0 whatever the per-run results. The audit and log records of pruned runs stay.
 
 ### `cancel`
 
@@ -357,7 +357,7 @@ Its output has `stuck_teardowns`, the count of runs whose teardown failed 5 time
 
 ### `cron`
 
-`review-run cron install|uninstall [--dry-run] [--json]` writes or removes the tagged crontab block `# review-run managed` with an explicit `PATH` including `~/.local/bin`: `*/15 * * * * review-run reconcile --quiet` and `17 3 * * * review-run prune --quiet` (design guide section 4.3).
+`review-run cron install|uninstall [--dry-run] [--json]` writes or removes the tagged crontab block `# review-run managed` with an explicit `PATH` including `~/.local/bin`: `*/15 * * * * review-run reconcile --quiet` and `17 3 * * * review-run prune --quiet` (design guide section 4.3). With `--json` it prints `{action, dry_run, changed, block}` ([`schemas/cli/cron.json`](../schemas/cli/cron.json)); `block` holds the lines of the block that were (or would be) installed, empty after `uninstall`.
 
 ### `export`
 
