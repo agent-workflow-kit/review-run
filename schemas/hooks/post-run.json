@@ -110,6 +110,24 @@
     "decision_ids": {
       "$ref": "../defs.json#/$defs/decision_ids"
     },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "$ref": "../defs.json#/$defs/run_warning"
+      },
+      "description": "The run's closed warning codes."
+    },
+    "session_sandbox": {
+      "$ref": "../defs.json#/$defs/sandbox_level"
+    },
+    "tools_checked": {
+      "type": "boolean"
+    },
+    "tools_unexpected": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "How many tools outside the pinned set the init list held; never their names. 0 when the tools were not checked."
+    },
     "verdict": {
       "$ref": "../defs.json#/$defs/verdict"
     },
@@ -149,7 +167,8 @@
     "draft_id",
     "anchor_head_sha",
     "actor",
-    "decision_ids"
+    "decision_ids",
+    "warnings"
   ],
   "allOf": [
     {
@@ -170,7 +189,10 @@
           "risk",
           "coverage_status",
           "code_run_status",
-          "head_moved"
+          "head_moved",
+          "session_sandbox",
+          "tools_checked",
+          "tools_unexpected"
         ],
         "properties": {
           "reason": {
@@ -195,6 +217,9 @@
           "coverage_status": false,
           "code_run_status": false,
           "head_moved": false,
+          "session_sandbox": false,
+          "tools_checked": false,
+          "tools_unexpected": false,
           "reason": {
             "type": "string"
           }

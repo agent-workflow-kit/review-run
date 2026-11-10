@@ -419,7 +419,7 @@
                   },
                   "uniqueItems": true,
                   "default": [],
-                  "description": "Extra names for the command's environment (non-secret). Refused at config load (a semantic check) when a name matches *TOKEN*, *SECRET*, *KEY*, *PASS*, *CREDENTIAL*, *AUTH*, *COOKIE*, *SESSION*, *DSN*, *_URL, *_PAT, *PROXY* or NETRC (case-insensitive) or starts with ANTHROPIC_ or CLAUDE_."
+                  "description": "Extra names for the command's environment (non-secret). A name must match ^[A-Za-z_][A-Za-z0-9_]*$ (the pattern; any other character is refused); refused at config load (a semantic check) when its ASCII form matches *TOKEN*, *SECRET*, *KEY*, *PASS*, *CREDENTIAL*, *AUTH*, *COOKIE*, *SESSION*, *DSN*, *_URL, *_PAT, *PROXY* or NETRC (case-insensitive) or starts with ANTHROPIC_ or CLAUDE_."
                 },
                 "ro_binds": {
                   "type": "array",
@@ -429,7 +429,7 @@
                   },
                   "uniqueItems": true,
                   "default": [],
-                  "description": "Extra absolute paths bound read-only (language runtimes, pre-populated caches, a node_modules directory). Each entry is resolved with realpath at config load and the realpath is what is bound. Refused at config load (a semantic check) when the realpath is /, the home directory or an ancestor, /mnt, /media, /root, inside a WSL drive mount, under /proc, /sys, /dev, /run or /var/run, an ancestor of any tool's state directory, contains or is inside a credential path of claude-session's list, or has a credential component such as .ssh, .gnupg, .aws, .kube, .docker, .config, .claude, .netrc, .npmrc, .pypirc, credentials.toml or .git-credentials. A toolchain directory holding a credential file must be narrowed."
+                  "description": "Extra absolute paths bound read-only (language runtimes, pre-populated caches, a node_modules directory). Each entry must be a directory. It is resolved with realpath at config load (an early diagnostic); when the code run starts it is opened once with O_PATH|O_DIRECTORY|O_NOFOLLOW, the opened object is validated through /proc/self/fd and the opened descriptor is bound with --ro-bind-fd, never a path; a failing entry skips the step (ro_bind_refused). Refused (a semantic check) when the real path is /, the home directory or an ancestor, /mnt, /media, /root, inside a WSL drive mount, under /proc, /sys, /dev, /run or /var/run, an ancestor of any tool's state directory, contains or is inside a credential location of claude-session's list (each location first resolved by realpath on this machine), or, as the first textual filter, has a credential component such as .ssh, .gnupg, .aws, .kube, .docker, .config, .claude, .netrc, .npmrc, .pypirc, credentials.toml or .git-credentials. A toolchain directory holding a credential file must be narrowed."
                 }
               },
               "additionalProperties": false,

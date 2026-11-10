@@ -32,7 +32,8 @@
       "type": "array",
       "items": {
         "$ref": "../defs.json#/$defs/run_warning"
-      }
+      },
+      "description": "The run's own warnings after the command (any code of the run warning list)."
     }
   },
   "additionalProperties": false,

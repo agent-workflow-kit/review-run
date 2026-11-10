@@ -177,6 +177,7 @@
         "wait_timeout",
         "schema_newer",
         "state_unsafe",
+        "plugin_changed",
         "lower_failed",
         "previous_mismatch",
         "previous_not_done",
@@ -414,6 +415,7 @@
             "sandbox_unavailable",
             "sandbox_unsupported",
             "sandbox_failed",
+            "ro_bind_refused",
             "throwaway_leaks",
             null
           ],
@@ -954,6 +956,7 @@
             "sandbox_unavailable",
             "sandbox_unsupported",
             "sandbox_failed",
+            "ro_bind_refused",
             "throwaway_leaks",
             null
           ],
@@ -2145,6 +2148,7 @@
                   "wait_timeout",
                   "schema_newer",
                   "state_unsafe",
+                  "plugin_changed",
                   "lower_failed",
                   null
                 ]

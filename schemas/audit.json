@@ -731,6 +731,7 @@
                   "sandbox_unavailable",
                   "sandbox_unsupported",
                   "sandbox_failed",
+                  "ro_bind_refused",
                   "throwaway_leaks",
                   null
                 ]

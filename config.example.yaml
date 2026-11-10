@@ -112,6 +112,6 @@ repos: {}
 #       max_output_bytes: 1048576              # output captured before the command is stopped
 #       max_workspace_bytes: 2147483648        # stop the command when the workspace uses more space (or over a million inodes)
 #       env_allow: []                          # extra non-secret environment names (names with TOKEN, SECRET, KEY, PASS, AUTH, URL and the like are refused)
-#       ro_binds:                              # extra absolute paths bound read-only; realpath-checked, never a directory holding credentials
+#       ro_binds:                              # extra directories bound read-only, opened once and bound by descriptor; never one that holds or lies in a credential location
 #         - /usr/lib/node_modules
 # --- example:end

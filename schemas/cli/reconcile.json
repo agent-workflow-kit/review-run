@@ -62,25 +62,23 @@
       "type": "array",
       "items": {
         "enum": [
-          "teardown_failed",
-          "teardown_refused",
-          "throwaway_leaked",
-          "sandbox_lowered",
-          "head_unreadable",
-          "hook_failed",
-          "skill_unchecked",
-          "agent_unknown",
-          "agent_mismatch",
-          "tools_unexpected",
-          "tools_unchecked",
-          "teardown_stuck"
+          "teardown_stuck",
+          "audit_stuck",
+          "throwaway_leaked"
         ]
-      }
+      },
+      "uniqueItems": true,
+      "description": "Closed list: teardown_stuck (exactly when stuck_teardowns is above 0), audit_stuck (exactly when stuck_audit is above 0), throwaway_leaked (a recorded leaked throwaway remains after its retry)."
     },
     "stuck_teardowns": {
       "type": "integer",
       "minimum": 0,
       "description": "Runs whose teardown failed 5 times or more; the warning teardown_stuck is present exactly when this is above 0."
+    },
+    "stuck_audit": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Events whose audit records are still pending after 5 reconcile passes (audit records retry without bound); the warning audit_stuck is present exactly when this is above 0."
     }
   },
   "additionalProperties": false,
@@ -90,6 +88,7 @@
     "already_running",
     "changes",
     "warnings",
-    "stuck_teardowns"
+    "stuck_teardowns",
+    "stuck_audit"
   ]
 }

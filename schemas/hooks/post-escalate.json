@@ -43,6 +43,16 @@
     },
     "decision_ids": {
       "$ref": "../defs.json#/$defs/decision_ids"
+    },
+    "session_sandbox": {
+      "$ref": "../defs.json#/$defs/sandbox_level"
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "$ref": "../defs.json#/$defs/run_warning"
+      },
+      "description": "The run's closed warning codes."
     }
   },
   "additionalProperties": false,
@@ -58,6 +68,8 @@
     "pr",
     "agent_id",
     "actor",
-    "decision_ids"
+    "decision_ids",
+    "session_sandbox",
+    "warnings"
   ]
 }

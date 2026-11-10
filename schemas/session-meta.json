@@ -21,7 +21,7 @@
         "description": "Untrusted: a short reason, one line.",
         "minLength": 1,
         "maxLength": 200,
-        "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f\\u00ad\\u034f\\u115f\\u1160\\u2028\\u2029\\u200b-\\u200f\\u202a-\\u202e\\u2060-\\u206f\\u3164\\ufe00-\\ufe0f\\ufeff\\uffa0]*$"
+        "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f\\u00ad\\u034f\\u115f\\u1160\\u2028\\u2029\\u200b-\\u200f\\u202a-\\u202e\\u2060-\\u206f\\u3164\\ufe00-\\ufe0f\\ufeff\\uffa0\\u00a0\\u1680\\u2000-\\u200a\\u202f\\u205f\\u3000\\u17b4\\u17b5\\u180b-\\u180d\\u180f\\u2800]*$"
       },
       "maxItems": 10,
       "x-untrusted": true,
@@ -33,7 +33,7 @@
       "description": "Untrusted: the session's summary, 1 to 2000 characters, no line break other than LF and no other character the sanitizer marks.",
       "minLength": 1,
       "maxLength": 2000,
-      "pattern": "^[^\\u0000-\\u0008\\u000b-\\u001f\\u007f-\\u009f\\u00ad\\u034f\\u115f\\u1160\\u2028\\u2029\\u200b-\\u200f\\u202a-\\u202e\\u2060-\\u206f\\u3164\\ufe00-\\ufe0f\\ufeff\\uffa0]*$"
+      "pattern": "^[^\\u0000-\\u0008\\u000b-\\u001f\\u007f-\\u009f\\u00ad\\u034f\\u115f\\u1160\\u2028\\u2029\\u200b-\\u200f\\u202a-\\u202e\\u2060-\\u206f\\u3164\\ufe00-\\ufe0f\\ufeff\\uffa0\\u00a0\\u1680\\u2000-\\u200a\\u202f\\u205f\\u3000\\u17b4\\u17b5\\u180b-\\u180d\\u180f\\u2800]*$"
     },
     "coverage": {
       "type": "object",
