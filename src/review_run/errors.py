@@ -8,10 +8,16 @@ untrusted text.
 from __future__ import annotations
 
 import enum
+import re
 import unicodedata
 from typing import Any
 
 PROG = "review-run"
+
+# Grammar of schemas/defs.json decision_ids (items and maxItems): one definition for the CLI flag
+# and the ``pre-run`` hook output (tests/test_cli.py checks it against the schema).
+DECISION_ID_RE = re.compile(r"[A-Za-z0-9._:@/-]{1,128}", re.ASCII)
+MAX_DECISION_IDS = 32
 _HUMAN_MAX = 200
 
 
