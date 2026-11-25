@@ -146,6 +146,8 @@ class Prefetch:
     draft_id: str
     anchor: Anchor
     files: tuple[FileEntry, ...]
+    # TODO(#14): the diff may contain lone surrogates; it must go through sanitize before any
+    # UTF-8 write or send
     diff: str
     ci: Ci
     attempts: int
@@ -622,7 +624,7 @@ def _attempt(
         raise LowerFailure("forgectl", 0, "invalid_output")
     try:
         size = len(diff.encode("utf-8", errors="surrogatepass"))
-    except UnicodeEncodeError:  # defensive; the offending text is never put in a message
+    except UnicodeEncodeError:  # defensive backstop (surrogatepass cannot raise); no text leaks
         raise LowerFailure("forgectl", 0, "invalid_output") from None
     if size > hard_ceiling_bytes:
         raise PrefetchFailure(TOO_LARGE, tool="forgectl", lower_code="hard_ceiling")
