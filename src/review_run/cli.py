@@ -9,13 +9,16 @@ import re
 import sys
 import traceback
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any, NoReturn
 
 from . import __version__
 from .audit import export_lines
+from .config import load_config
 from .durations import DurationError, parse_duration, parse_since
 from .errors import PROG, ExitCode, ReviewRunError, printable
 from .fsmodes import apply_umask
+from .preflight import RunRequest, plan_run
 from .store import default_state_root
 
 DESCRIPTION = "Run a review skill on a pull request and store the resulting review draft."
@@ -274,9 +277,34 @@ def _export(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_command(args: argparse.Namespace) -> int:
+    """``run``: run order steps 1 and 2 (issue #16); the rest belongs to later issues."""
+    config = load_config(None if args.config is None else Path(args.config))
+    request = RunRequest(
+        pr=args.pr,
+        skill=args.skill,
+        mode=args.mode,
+        labels=tuple(args.label),
+        previous=args.previous,
+        model=args.model,
+        timeout=args.timeout_text,
+        actor=args.actor,
+        decision_ids=tuple(args.decision_id),
+        override_escalation=args.override_escalation,
+    )
+    plan = plan_run(request, config, default_state_root(), stdin_is_tty=sys.stdin.isatty())
+    if not args.quiet:
+        for code in plan.warnings:
+            print(f"{PROG}: warning: {code}", file=sys.stderr)
+    # TODO(#17): fire the pre-run hooks after reserving the id (store.reserve_id).
+    # TODO(#18): create the run record, write the run files (settings.write_run_files), pre-fetch,
+    #   launch and wait; #24 maps the outcome to the exit code; #15 prints the --dry-run plan.
+    raise ReviewRunError("internal", "run is not implemented past its checks yet")
+
+
 # Each command is replaced by its owning issue's implementation.
 _HANDLERS: dict[str, Handler] = {
-    "run": _stub("run"),  # TODO(#16): run order and settings; #18 launch; #24 outcome mapping
+    "run": _run_command,  # steps 1 and 2 (#16); TODO(#18): launch; TODO(#24): outcome mapping
     "resume": _stub("resume"),  # TODO(#28): resume
     "wait": _stub("wait"),  # TODO(#24): wait
     "list": _stub("list"),  # TODO(#11): list

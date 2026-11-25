@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "review-run/settings.json",
+  "title": "review-run run settings",
+  "description": "The settings.json of a run directory (Run settings): every key of the Config table resolved for the run with its origin, except hooks, retention, escalation_ttl and me, the plugin directories passed, the plugin directory hash, the config hash and the effective permission profile's kind and hash. Written once at run order step 4 (mode 0600); every later step reads it and never the current config or environment. limits keys appear individually as limits.<key>.",
+  "type": "object",
+  "properties": {
+    "schema_version": { "const": 1 },
+    "settings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "key": { "type": "string", "pattern": "^[a-z_]+(?:\\.[a-z_]+)*$" },
+          "value": { "description": "The resolved value (a config value)." },
+          "origin": { "enum": ["flag", "repo", "env", "config", "default"] }
+        },
+        "required": ["key", "value", "origin"],
+        "additionalProperties": false
+      }
+    },
+    "plugin_dirs": {
+      "type": "array",
+      "items": { "type": "string", "pattern": "^/" },
+      "description": "Realpaths of the plugin directories passed to the launch, sorted: the bundled plugin and, when the skill comes from another plugin, that plugin."
+    },
+    "plugin_dirs_sha256": { "$ref": "defs.json#/$defs/sha256" },
+    "config_sha256": {
+      "$ref": "defs.json#/$defs/sha256",
+      "description": "sha256 of the canonical JSON (sorted keys, no whitespace, ASCII) of every resolved value of the run, flags and hooks included."
+    },
+    "permission_profile": {
+      "type": "object",
+      "properties": {
+        "kind": { "enum": ["bundled", "variant", "custom"] },
+        "sha256": { "$ref": "defs.json#/$defs/sha256" }
+      },
+      "required": ["kind", "sha256"],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "schema_version",
+    "settings",
+    "plugin_dirs",
+    "plugin_dirs_sha256",
+    "config_sha256",
+    "permission_profile"
+  ],
+  "additionalProperties": false
+}
