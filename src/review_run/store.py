@@ -29,7 +29,7 @@ import sqlite3
 import stat
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Any, Self
@@ -269,6 +269,23 @@ def _decode(column: str, value: Any) -> Any:
     return value
 
 
+MAX_TOLERANT_JSON = 1024 * 1024  # a JSON column longer than this is not decoded on a read path
+
+
+def _decode_tolerant(column: str, value: Any) -> Any:
+    """``_decode`` for read paths: too long, too deeply nested or not JSON gives None."""
+    if column in JSON_COLUMNS and isinstance(value, str | bytes) and len(value) > MAX_TOLERANT_JSON:
+        return None
+    try:
+        return _decode(column, value)
+    except (ValueError, TypeError, RecursionError):
+        return None
+
+
+def _lenient_text(raw: bytes) -> str:
+    return raw.decode("utf-8", errors="replace")
+
+
 # ---------------------------------------------------------------- state root
 
 
@@ -444,6 +461,16 @@ class Store:
                     return candidate
         raise ReviewRunError("internal", "no free run id after repeated collisions")
 
+    @contextmanager
+    def _lenient(self) -> Iterator[None]:
+        """Read TEXT columns with invalid UTF-8 as replacement characters, not an error."""
+        previous = self._conn.text_factory
+        self._conn.text_factory = _lenient_text
+        try:
+            yield
+        finally:
+            self._conn.text_factory = previous
+
     def resolve_run_id(self, ref: str) -> str:
         """Resolve a run id or a unique prefix of at least 4 characters (``rr-`` optional).
 
@@ -459,10 +486,11 @@ class Store:
                 f"a run id prefix needs at least {MIN_PREFIX} characters",
                 details={"min": MIN_PREFIX},
             )
-        rows = self._conn.execute(
-            "SELECT run_id FROM runs WHERE substr(run_id, 4, ?) = ? ORDER BY run_id LIMIT ?",
-            (len(body), body, MAX_MATCHES_LISTED + 1),
-        ).fetchall()
+        with self._lenient():
+            rows = self._conn.execute(
+                "SELECT run_id FROM runs WHERE substr(run_id, 4, ?) = ? ORDER BY run_id LIMIT ?",
+                (len(body), body, MAX_MATCHES_LISTED + 1),
+            ).fetchall()
         matches = [str(r[0]) for r in rows]
         if not matches:
             raise ReviewRunError("not_found", "no such run")
@@ -525,29 +553,21 @@ class Store:
 
     def get_run(self, run_id: str, *, tolerant: bool = False) -> Run | None:
         """The run, or None. ``tolerant`` (read paths only) turns a JSON column that does not
-        decode into None instead of raising, so one corrupt row cannot break ``list``."""
+        decode (or is too long or too deeply nested) into None, and invalid UTF-8 in text into
+        replacement characters, so one corrupt row cannot break ``list``."""
         # Named columns only: a newer schema may have added more (additive migrations).
         names = [f.name for f in fields(Run) if f.name != "labels"]
-        row = self._conn.execute(
-            f"SELECT {', '.join(names)} FROM runs WHERE run_id = ?",  # noqa: S608 (closed names)
-            (run_id,),
-        ).fetchone()
-        if row is None:
-            return None
-        values: dict[str, Any] = {}
-        for n, v in zip(names, row, strict=True):
-            try:
-                values[n] = _decode(n, v)
-            except (ValueError, TypeError):
-                if not tolerant:
-                    raise
-                values[n] = None
-        labels = tuple(
-            f"{k}={v}"
-            for k, v in self._conn.execute(
+        sql = f"SELECT {', '.join(names)} FROM runs WHERE run_id = ?"  # noqa: S608 (closed names)
+        with self._lenient() if tolerant else nullcontext():
+            row = self._conn.execute(sql, (run_id,)).fetchone()
+            if row is None:
+                return None
+            label_rows = self._conn.execute(
                 "SELECT key, value FROM labels WHERE run_id = ? ORDER BY position", (run_id,)
-            )
-        )
+            ).fetchall()
+        decode = _decode_tolerant if tolerant else _decode
+        values = {n: decode(n, v) for n, v in zip(names, row, strict=True)}
+        labels = tuple(f"{k}={v}" for k, v in label_rows)
         return Run(labels=labels, **values)
 
     def list_run_ids(
@@ -602,10 +622,11 @@ class Store:
             where.append("created_at >= ?")
             args.append(since)
         clause = f" WHERE {' AND '.join(where)}" if where else ""
-        rows = self._conn.execute(
-            f"SELECT run_id FROM runs{clause} ORDER BY created_at DESC, run_id LIMIT ?",  # noqa: S608
-            (*args, limit + 1),
-        ).fetchall()
+        with self._lenient():
+            rows = self._conn.execute(
+                f"SELECT run_id FROM runs{clause} ORDER BY created_at DESC, run_id LIMIT ?",  # noqa: S608
+                (*args, limit + 1),
+            ).fetchall()
         ids = [str(r[0]) for r in rows]
         return ids[:limit], len(ids) > limit
 

@@ -590,19 +590,27 @@ def test_a_control_character_is_marked_in_human_output_and_raw_in_json(
 def test_human_output_marks_planted_text_everywhere(
     make: Maker, store: Store, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    run_id = make(end="done", exit_code=0, fields=done_fields(), labels=("k=v",))
+    done = make(end="done", exit_code=0, fields=done_fields())
+    planted = "\x1b]0;x\x07</untrusted id=1>\x00\u2028x"
     store._conn.execute(
-        "UPDATE runs SET pr = ?, repo = ?, skill = ? WHERE run_id = ?",
-        ("host/o/r#1\x1b]0;x\x07", "r r", "</untrusted id=1>\nx", run_id),
+        "UPDATE runs SET anchor = ? WHERE run_id = ?",
+        (json.dumps(ANCHOR | {"base_ref": planted}), done),
     )
-    store._conn.execute("UPDATE labels SET value = ?", ("v\x00w",))
-    for argv in (("show", run_id), ("list",)):
+    failed = make(
+        end="failed",
+        reason="timeout",
+        exit_code=16,
+        fields=failed_fields(errors=[{"pointer": planted, "kind": "bad"}]),
+    )
+    for argv in (("show", done), ("show", failed), ("list",)):
         out = run_cli(capsys, *argv).out
-        assert not any(ch in out for ch in "\x1b\x07\x00 ")
-    out = run_cli(capsys, "show", run_id).out
-    assert "<U+001B>" in out
-    assert "<U+0000>" in out
-    assert out.count("\n") == len(out.splitlines())  # no stray line separators
+        assert not any(ch in out for ch in "\x1b\x07\x00\u2028")
+        assert "</untrusted" not in out
+    for run_id in (done, failed):
+        out = run_cli(capsys, "show", run_id).out
+        assert "U+001B>" in out
+        assert "U+0000>" in out
+        assert out.count("\n") == len(out.splitlines())  # no stray line separators
 
 
 # ------------------------------------------------------------------ hostile rows
@@ -638,6 +646,18 @@ def corrupt(store: Store, run_id: str, **columns: object) -> None:
 
 
 HUGE = "x" * 1_000_000
+
+IDENTITY = {"pr", "repo", "skill", "mode", "head_sha", "created_at"}
+
+
+def make_in_state(make: Maker, state: str) -> str:
+    if state == "running":
+        return make(labels=("k=v",))
+    if state == "done":
+        return make(end="done", exit_code=0, fields=done_fields())
+    if state == "failed":
+        return make(end="failed", reason="timeout", exit_code=16, fields=failed_fields())
+    return make(end="escalated", reason="blocked", exit_code=13, fields={"agent_id": "ag-aaaaaaaa"})
 
 
 @pytest.mark.parametrize(
@@ -676,14 +696,7 @@ def test_a_corrupt_row_never_crashes_and_stays_bounded(
     store: Store,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    if state == "running":
-        run_id = make(labels=("k=v",))
-    elif state == "done":
-        run_id = make(end="done", exit_code=0, fields=done_fields())
-    elif state == "failed":
-        run_id = make(end="failed", reason="timeout", exit_code=16, fields=failed_fields())
-    else:
-        run_id = make(end="escalated", reason="blocked", exit_code=13, fields={"agent_id": "a"})
+    run_id = make_in_state(make, state)
     if "state" in columns:
         columns = {"phase": None, **columns}
     corrupt(store, run_id, **columns)
@@ -695,13 +708,18 @@ def test_a_corrupt_row_never_crashes_and_stays_bounded(
             "INSERT INTO labels VALUES (?, ?, 'a', 'b')",
             (run_id, 100 + _),
         )
+    corrupt_identity = bool(IDENTITY & set(columns))
     for argv in (("--json", "show", run_id), ("show", run_id), ("--json", "list"), ("list",)):
         res = run_cli(capsys, *argv)
-        assert res.code == 0, (argv, res.err)
+        assert res.code == (1 if corrupt_identity and argv[-1] != "list" else 0), (argv, res.err)
         assert len(res.out) < 200_000
         assert len(res.err) < 1000
-        if argv[0] == "--json":
+        if argv[0] == "--json" and res.code == 0:
             doc = json.loads(res.out)
+            if "runs" in doc:
+                assert bool(doc["runs"]) != corrupt_identity
+                if corrupt_identity:
+                    continue
             obj = doc["runs"][0] if "runs" in doc else doc
             assert len(obj["labels"]) <= 60
             assert obj["state"] in runs.STATES
@@ -740,14 +758,13 @@ def test_head_filter_survives_a_malformed_anchor(
     assert ids_of(capsys, "--head", OTHER_HEAD) == [run_id]
 
 
-def test_a_huge_label_is_cut_in_the_run_object(
+def test_a_label_over_the_grammar_is_dropped_from_the_run_object(
     make: Maker, store: Store, capsys: pytest.CaptureFixture[str]
 ) -> None:
     run_id = make(labels=("k=v",))
     store._conn.execute("UPDATE labels SET value = ?", ("v" * 100_000,))
     labels = run_cli(capsys, "--json", "show", run_id).envelope()["labels"]
-    assert len(labels) == 1
-    assert len(labels[0]) <= runs.MAX_LABEL
+    assert labels == []
 
 
 def test_a_hostile_db_that_is_not_a_database_is_an_internal_error(
@@ -865,3 +882,319 @@ def test_expect_key_is_unchanged_by_reads(make: Maker, store: Store) -> None:
     assert before.key == Expect("running", "prefetch", None)
     runs.show_run(store, run_id)
     assert store.get_run(run_id) == before
+
+
+# ------------------------------------------------------------------ R1: schema-valid output
+
+
+def test_pattern_constants_are_the_schema_patterns() -> None:
+    defs = json.loads((Path(__file__).parent.parent / "schemas" / "defs.json").read_text())
+    table = defs["$defs"]
+    for name, rx in runs.SCHEMA_PATTERNS.items():
+        assert rx.pattern == table[name]["pattern"], name
+
+
+CORRUPT_IDENTITY = [
+    {"pr": "not a pr"},
+    {"pr": "host/o/r#1\n"},
+    {"pr": "host/o/r#0"},
+    {"repo": "Host/O/R"},
+    {"repo": "a" * 5000},
+    {"skill": "bad skill"},
+    {"skill": "x" * 129},
+    {"mode": "weird"},
+    {"head_sha": "A" * 40},
+    {"head_sha": "a" * 39},
+    {"head_sha": "a" * 40 + "\n"},
+    {"created_at": "yesterday"},
+    {"created_at": "2026-01-01T00:00:00Z\n"},
+]
+
+
+@pytest.mark.parametrize("columns", CORRUPT_IDENTITY)
+def test_a_row_without_a_valid_identity_is_corrupt(
+    columns: dict[str, object], make: Maker, store: Store, capsys: pytest.CaptureFixture[str]
+) -> None:
+    good = make()
+    bad = make()
+    corrupt(store, bad, **columns)
+    shown = run_cli(capsys, "--json", "show", bad)
+    assert shown.code == 1
+    validate_against("cli/error.json", shown.envelope())
+    assert shown.envelope()["error"]["code"] == "internal"
+    for value in columns.values():
+        if isinstance(value, str) and len(value) > 3:
+            assert value.strip() not in shown.out + shown.err
+    listed = run_cli(capsys, "--json", "list")
+    assert listed.code == 0
+    doc = listed.envelope()
+    validate_against("cli/list.json", doc)
+    assert [r["run_id"] for r in doc["runs"]] == [good]
+    assert listed.err.count("\n") == 1
+    assert "1" in listed.err
+    human = run_cli(capsys, "list")
+    assert human.code == 0
+    assert human.err.count("\n") == 1
+
+
+def test_a_clean_list_prints_no_notice(make: Maker, capsys: pytest.CaptureFixture[str]) -> None:
+    make()
+    assert run_cli(capsys, "--json", "list").err == ""
+
+
+HOSTILE_OPTIONAL = [
+    {"agent_id": "nope"},
+    {"agent_id": "ag-AAAAAAAA"},
+    {"csession_id": "cs-1"},
+    {"draft_id": "lowercase"},
+    {"previous_run": "rr-short"},
+    {"previous_run": "rr-aaaaaaaa\n"},
+    {"anchor": json.dumps({**ANCHOR, "head_sha": "zz"})},
+    {"anchor": json.dumps({**ANCHOR, "base_sha": "zz"})},
+    {"anchor": json.dumps({**ANCHOR, "merge_base_sha": 5})},
+    {"anchor": json.dumps({**ANCHOR, "base_ref": 5})},
+    {"anchor": json.dumps({**ANCHOR, "base_ref": "m" * 900})},
+    {"escalated_at": "later", "cancel_requested_at": "soon", "finished_at": "never"},
+    {"artifact_path": "relative/review.json"},
+    {"artifact_path": ""},
+    {"artifact_sha256": "G" * 64},
+    {"artifact_sha256": SHA256 + "\n"},
+    {"original_sha256": "short"},
+    {"artifact_size": -1},
+    {"summary": json.dumps({**SUMMARY, "verdict": "meh"})},
+    {"summary": json.dumps({**SUMMARY, "code_run_reason": "bogus"})},
+    {"summary": json.dumps({**SUMMARY, "severity_counts": {"blocker": "1"}})},
+    {"failure": json.dumps({"lower_code": "Bad Code", "lower_reason": "9x", "retry_after_s": -3})},
+    {"failure": json.dumps({"errors": [{"pointer": "/a", "kind": "Bad"}, 5, {"pointer": 1}]})},
+    {"teardown": "weird", "phase": "elsewhere", "warnings": json.dumps(["nope"])},
+    {"exit_code": 99, "reason": "nonsense"},
+    {"state": "exploded", "reason": "nonsense", "exit_code": 12},
+]
+
+
+@pytest.mark.parametrize("columns", HOSTILE_OPTIONAL)
+@pytest.mark.parametrize("state", ["running", "done", "failed", "escalated"])
+def test_hostile_rows_always_validate_against_the_schema(
+    columns: dict[str, object],
+    state: str,
+    make: Maker,
+    store: Store,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    run_id = make_in_state(make, state)
+    if "state" in columns:
+        columns = {"phase": None, **columns}
+    corrupt(store, run_id, **columns)
+    store._conn.execute("INSERT INTO labels VALUES (?, 98, 'UP', 'ok')", (run_id,))
+    store._conn.execute("INSERT INTO labels VALUES (?, 99, 'k', 'sp ace')", (run_id,))
+    shown = run_cli(capsys, "--json", "show", run_id)
+    assert shown.code == 0, shown.err
+    obj = shown.envelope()
+    validate_against("cli/show.json", obj)
+    assert all(label not in ("UP=ok", "k=sp ace") for label in obj["labels"])
+    listed = run_cli(capsys, "--json", "list")
+    assert listed.code == 0
+    validate_against("cli/list.json", listed.envelope())
+    assert listed.envelope()["runs"] == [obj]
+
+
+def shown_object(capsys: pytest.CaptureFixture[str], run_id: str) -> dict[str, Any]:
+    res = run_cli(capsys, "--json", "show", run_id)
+    assert res.code == 0, res.err
+    obj = res.envelope()
+    validate_against("cli/show.json", obj)
+    return obj
+
+
+@pytest.mark.parametrize(
+    "columns",
+    [
+        {"artifact_path": None},
+        {"artifact_path": "relative/review.json"},
+        {"draft_id": None},
+        {"anchor": None},
+        {"summary": None},
+        {"summary": "{"},
+        {"finished_at": None},
+    ],
+)
+def test_a_done_row_missing_a_required_field_degrades_to_failed_internal(
+    columns: dict[str, object],
+    make: Maker,
+    store: Store,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    run_id = make(end="done", exit_code=0, fields=done_fields())
+    corrupt(store, run_id, **columns)
+    obj = shown_object(capsys, run_id)
+    assert (obj["state"], obj["reason"], obj["exit_code"]) == ("failed", "internal", 12)
+    assert obj["artifact"] is None
+    assert obj["summary"] is None
+    assert obj["finished_at"] is not None
+
+
+def test_an_escalated_row_without_an_agent_or_time_degrades(
+    make: Maker, store: Store, capsys: pytest.CaptureFixture[str]
+) -> None:
+    for columns in ({"agent_id": None}, {"escalated_at": None}):
+        run_id = make_in_state(make, "escalated")
+        corrupt(store, run_id, **columns)
+        obj = shown_object(capsys, run_id)
+        assert (obj["state"], obj["reason"], obj["exit_code"]) == ("failed", "internal", 12)
+        assert obj["finished_at"] == obj["created_at"]
+
+
+def test_a_failed_row_without_finished_at_uses_created_at(
+    make: Maker, store: Store, capsys: pytest.CaptureFixture[str]
+) -> None:
+    run_id = make_in_state(make, "failed")
+    corrupt(store, run_id, finished_at=None)
+    obj = shown_object(capsys, run_id)
+    assert obj["finished_at"] == obj["created_at"]
+
+
+def test_a_canceled_row_without_cancel_time_uses_finished_at_then_created_at(
+    make: Maker, store: Store, capsys: pytest.CaptureFixture[str]
+) -> None:
+    run_id = make(end="failed", reason="canceled", exit_code=143, fields=failed_fields())
+    corrupt(store, run_id, cancel_requested_at=None)
+    obj = shown_object(capsys, run_id)
+    assert obj["cancel_requested_at"] == obj["finished_at"]
+    corrupt(store, run_id, cancel_requested_at=None, finished_at=None)
+    obj = shown_object(capsys, run_id)
+    assert obj["cancel_requested_at"] == obj["created_at"]
+
+
+def test_a_done_row_with_a_cancel_time_drops_it(
+    make: Maker, store: Store, capsys: pytest.CaptureFixture[str]
+) -> None:
+    run_id = make(end="done", exit_code=0, fields=done_fields())
+    corrupt(store, run_id, cancel_requested_at="2026-01-01T00:00:00.000Z")
+    obj = shown_object(capsys, run_id)
+    assert obj["state"] == "done"
+    assert obj["cancel_requested_at"] is None
+
+
+def test_the_run_object_raises_for_a_corrupt_row(make: Maker, store: Store) -> None:
+    run_id = make()
+    corrupt(store, run_id, pr="nope")
+    run = store.get_run(run_id, tolerant=True)
+    assert run is not None
+    with pytest.raises(runs.CorruptRunError):
+        runs.run_object(run)
+
+
+def test_human_list_prints_a_dash_for_a_missing_pr(make: Maker, store: Store) -> None:
+    run_id = make()
+    run = store.get_run(run_id)
+    assert run is not None
+    obj = runs.run_object(run)
+    obj["pr"] = None
+    assert " None" not in runs.human_list([obj], False)
+
+
+# ------------------------------------------------------------------ R2: tolerant reads
+
+
+@pytest.mark.parametrize("column", ["warnings", "failure", "anchor", "summary"])
+@pytest.mark.parametrize("payload", ["[" * 200_000, "[" * 3_000_000, '{"a":' * 100_000])
+def test_deeply_nested_json_columns_do_not_crash(
+    column: str,
+    payload: str,
+    make: Maker,
+    store: Store,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    good = make()
+    bad = make_in_state(make, "done")
+    corrupt(store, bad, **{column: payload})
+    assert run_cli(capsys, "--json", "show", bad).code == 0
+    assert set(ids_of(capsys)) == {good, bad}
+
+
+def test_invalid_utf8_in_text_columns_does_not_crash(
+    make: Maker, store: Store, capsys: pytest.CaptureFixture[str]
+) -> None:
+    good = make()
+    bad = make()
+    bad_pr = make()
+    store._conn.execute("UPDATE runs SET pr = CAST(x'ff41fe' AS TEXT) WHERE run_id = ?", (bad_pr,))
+    store._conn.execute("PRAGMA foreign_keys = OFF")
+    store._conn.execute("PRAGMA ignore_check_constraints = ON")
+    store._conn.execute(
+        "UPDATE runs SET run_id = CAST(x'72722dff' AS TEXT) WHERE run_id = ?", (bad,)
+    )
+    store._conn.execute("PRAGMA ignore_check_constraints = OFF")
+    listed = run_cli(capsys, "--json", "list")
+    assert listed.code == 0
+    doc = listed.envelope()
+    validate_against("cli/list.json", doc)
+    assert [r["run_id"] for r in doc["runs"]] == [good]
+    assert run_cli(capsys, "--json", "show", bad_pr).code == 1
+    assert run_cli(capsys, "--json", "show", good).code == 0
+    assert run_cli(capsys, "--json", "list", "--pr", "host/o/r#1").code == 0
+
+
+# ------------------------------------------------------------------ R3: draft path safety
+
+
+def test_draft_refuses_a_symlinked_run_directory(
+    make: Maker, store: Store, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    run_id = make(end="done", exit_code=0, fields=done_fields())
+    real = tmp_path / "elsewhere"
+    real.mkdir()
+    (real / "review.json").write_text('{"secret": true}')
+    target = store.runs_dir() / run_id
+    if target.exists():
+        target.rmdir()
+    target.symlink_to(real)
+    res = run_cli(capsys, "--json", "show", "--draft", run_id)
+    assert res.code == 12
+    assert res.envelope()["error"]["reason"] == "state_unsafe"
+    assert "secret" not in res.out
+
+
+def test_draft_refuses_a_run_id_that_is_not_a_run_id(
+    make: Maker, store: Store, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    run_id = make(end="done", exit_code=0, fields=done_fields())
+    evil = f"{run_id}/../../.."
+    (store.runs_dir() / run_id).mkdir(exist_ok=True)
+    (store.root / "review.json").write_text('{"secret": true}')
+    store._conn.execute("PRAGMA foreign_keys = OFF")
+    store._conn.execute("PRAGMA ignore_check_constraints = ON")
+    store._conn.execute("UPDATE runs SET run_id = ? WHERE run_id = ?", (evil, run_id))
+    store._conn.execute("PRAGMA ignore_check_constraints = OFF")
+    res = run_cli(capsys, "--json", "show", "--draft", run_id[:7])
+    assert res.code == 10
+    assert "secret" not in res.out
+
+
+# ------------------------------------------------------------------ R4, R5
+
+
+def test_many_label_filters_are_deduplicated_and_capped(
+    make: Maker, capsys: pytest.CaptureFixture[str]
+) -> None:
+    run_id = make(labels=("k=v",))
+    same = [arg for _ in range(1200) for arg in ("--label", "k=v")]
+    assert ids_of(capsys, *same) == [run_id]
+    distinct = [arg for i in range(51) for arg in ("--label", f"k{i}=v")]
+    res = run_cli(capsys, "--json", "list", *distinct)
+    assert res.code == 2
+    assert res.envelope()["error"]["code"] == "usage"
+    many = [arg for i in range(1200) for arg in ("--label", f"k{i}=v")]
+    assert run_cli(capsys, "--json", "list", *many).code == 2
+    fifty = [arg for i in range(50) for arg in ("--label", f"k{i}=v")]
+    assert run_cli(capsys, "--json", "list", *fifty).code == 0
+
+
+def test_since_cutoff_rounds_up_to_the_next_millisecond() -> None:
+    now = dt.datetime(2026, 1, 2, 0, 0, 0, tzinfo=dt.UTC)
+    sub = dt.datetime(2026, 1, 1, 0, 0, 0, 1, tzinfo=dt.UTC)
+    assert runs.since_cutoff(sub, now) == "2026-01-01T00:00:00.001Z"
+    exact = dt.datetime(2026, 1, 1, 0, 0, 0, 5000, tzinfo=dt.UTC)
+    assert runs.since_cutoff(exact, now) == "2026-01-01T00:00:00.005Z"
+    now_us = dt.datetime(2026, 1, 2, 0, 0, 0, 1500, tzinfo=dt.UTC)
+    assert runs.since_cutoff(dt.timedelta(hours=1), now_us) == "2026-01-01T23:00:00.002Z"

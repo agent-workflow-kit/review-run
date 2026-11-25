@@ -2,9 +2,23 @@
 Reasons, Run object, ``list``, ``show``).
 
 The read paths never change state, never touch the network and tolerate a corrupt or hostile
-row: every value of a stored row is checked against its closed set or cut to a bound before it
-is printed, so no row can crash a command or make its output unbounded. ``--json`` keeps text
-raw (JSON escapes it); human output passes every stored string through the sanitizer.
+row. What ``run_object`` guarantees, for any stored row:
+
+- It either returns an object that validates against ``schemas/defs.json`` ``run``, or raises
+  ``CorruptRunError`` (an ``internal`` error with a fixed message, never stored text).
+- Every field is checked against the pattern or enum of its schema definition. An optional field
+  that fails is null (a bad label is dropped).
+- A row is corrupt when an identity field (``run_id``, ``pr``, ``repo``, ``mode``, ``skill``,
+  ``head_sha``, ``created_at``) has no valid value. ``list`` skips corrupt rows (and reports a
+  count on stderr); ``show`` exits 1.
+- A row whose state needs fields it lacks (``done`` without artifact, summary, draft id, anchor
+  or finish time; ``escalated`` without agent id or escalation time) is reported ``failed`` with
+  reason ``internal`` (exit 12). A ``failed`` row without ``finished_at`` uses ``created_at``; a
+  ``canceled`` one without ``cancel_requested_at`` uses ``finished_at``; a ``done`` row drops a
+  stray ``cancel_requested_at``.
+
+``--json`` keeps text raw (JSON escapes it); human output passes every stored string through
+the sanitizer.
 """
 
 from __future__ import annotations
@@ -14,13 +28,14 @@ import json
 import os
 import re
 import stat
+from collections.abc import Callable
 from dataclasses import dataclass
-from pathlib import Path
+from itertools import islice
 from typing import Any
 
 from .errors import ReviewRunError
 from .sanitizer import sanitize_inline
-from .store import Run, Store, format_time
+from .store import Run, Store, format_time, is_run_id
 
 SCHEMA_VERSION = 1
 MAX_LABELS = 60
@@ -30,6 +45,27 @@ MAX_ERRORS = 20
 MAX_POINTER = 200
 MAX_DRAFT_BYTES = 16 * 1024 * 1024  # 2x the default artifact cap
 MAX_LIMIT = 1_000_000
+MAX_LABEL_FILTERS = 50  # distinct --label filters; each adds an EXISTS clause to the query
+MODES = ("headless", "interactive")
+
+# The patterns of schemas/defs.json, by definition name (a test pins them to the schema). Matched
+# with fullmatch after a length bound, so a hostile value costs little.
+SCHEMA_PATTERNS: dict[str, re.Pattern[str]] = {
+    name: re.compile(pattern)
+    for name, pattern in {
+        "run_id": "^rr-[a-z2-7]{8}$",
+        "repo_id": "^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*(?::[0-9]{1,5})?(?:/(?!\\.\\.?(?:/|$))[A-Za-z0-9._-]+)+$",  # noqa: E501
+        "pr": "^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*(?::[0-9]{1,5})?(?:/(?!\\.\\.?(?:/|#))[A-Za-z0-9._-]+)+#[1-9][0-9]{0,9}$",  # noqa: E501
+        "agent_id": "^ag-[a-z2-7]{8}$",
+        "csession_id": "^cs-[a-z2-7]{8}$",
+        "draft_id": "^[0-9A-HJKMNP-TV-Z]{26}$",
+        "sha": "^[0-9a-f]{40}$",
+        "sha256": "^[0-9a-f]{64}$",
+        "ts": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]+)?Z$",
+        "label": "^[a-z0-9][a-z0-9_.-]{0,63}=[A-Za-z0-9._:/#@+=,-]{0,256}$",
+        "skill": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+    }.items()
+}
 
 STATES = ("running", "done", "escalated", "failed")
 PHASES = ("prefetch", "code_run", "session", "finalize")
@@ -65,8 +101,6 @@ _CODE_RUN_REASONS = (
 )
 _SEVERITIES = ("blocker", "major", "minor", "nit", "info", "unspecified")
 _CODE_RE = re.compile(r"[a-z][a-z0-9_]*\Z")
-_SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
-_TS_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?Z\Z")
 _RETRYABLE_LOWER = ("rate_limited", "network_error")
 
 
@@ -157,14 +191,35 @@ def is_retryable(reason: str, lower_code: str | None, lower_retryable: bool) -> 
 # ---------------------------------------------------------------- the run object
 
 
+class CorruptRunError(ReviewRunError):
+    """A stored row has no valid identity: it cannot be shown as a run (exit 1, ``internal``).
+
+    The message is fixed; no stored text ever reaches it.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("internal", "a stored run is corrupt")
+
+
 def _text(value: object, limit: int = MAX_STRING) -> str | None:
     return value[:limit] if isinstance(value, str) else None
 
 
-def _ts(value: object) -> str | None:
-    if isinstance(value, str) and len(value) <= 40 and _TS_RE.match(value):
+def _pat(name: str, value: object, limit: int) -> str | None:
+    """``value`` when it is a string of at most ``limit`` characters matching the schema pattern."""
+    if isinstance(value, str) and len(value) <= limit and SCHEMA_PATTERNS[name].fullmatch(value):
         return value
     return None
+
+
+def _need(value: str | None) -> str:
+    if value is None:
+        raise CorruptRunError
+    return value
+
+
+def _ts(value: object) -> str | None:
+    return _pat("ts", value, 40)
 
 
 def _int(value: object) -> int | None:
@@ -183,14 +238,14 @@ def _enum(value: object, allowed: tuple[str, ...]) -> str | None:
 def _anchor(value: object) -> dict[str, Any] | None:
     if not isinstance(value, dict):
         return None
-    head = _text(value.get("head_sha"), 64)
+    head = _pat("sha", value.get("head_sha"), 40)
     if head is None:
         return None
     return {
         "head_sha": head,
         "base_ref": _text(value.get("base_ref"), 255) or "",
-        "base_sha": _text(value.get("base_sha"), 64),
-        "merge_base_sha": _text(value.get("merge_base_sha"), 64),
+        "base_sha": _pat("sha", value.get("base_sha"), 40),
+        "merge_base_sha": _pat("sha", value.get("merge_base_sha"), 40),
     }
 
 
@@ -272,68 +327,119 @@ def _outcome(run: Run) -> tuple[str, str | None, int | None]:
     return state, run.reason, exit_code
 
 
+def _artifact(run: Run) -> dict[str, Any] | None:
+    path = run.artifact_path
+    sha = _pat("sha256", run.artifact_sha256, 64)
+    original = _pat("sha256", run.original_sha256, 64)
+    size = _int(run.artifact_size)
+    if (
+        isinstance(path, str)
+        and path.startswith("/")
+        and len(path) <= 4096
+        and sha is not None
+        and original is not None
+        and size is not None
+        and size >= 0
+    ):
+        return {"path": path, "sha256": sha, "size": size, "original_sha256": original}
+    return None
+
+
+def _labels(raw: object) -> list[str]:
+    if not isinstance(raw, tuple | list):
+        return []
+    valid = (x for x in raw if _pat("label", x, MAX_LABEL) is not None)
+    return list(islice(valid, MAX_LABELS))
+
+
 def run_object(run: Run) -> dict[str, Any]:
-    """The run object of ``schemas/defs.json`` ``run`` built from a stored row. Text is raw."""
+    """The run object of ``schemas/defs.json`` ``run`` built from a stored row. Text is raw.
+
+    Raises ``CorruptRunError`` when an identity field has no valid value; see the module
+    docstring for what else is repaired.
+    """
+    run_id = _need(_pat("run_id", run.run_id, 16))
+    pr = _need(_pat("pr", run.pr, 512))
+    repo = _need(_pat("repo_id", run.repo, 255))
+    skill = _need(_pat("skill", run.skill, 128))
+    mode = _need(_enum(run.mode, MODES))
+    head_sha = _need(_pat("sha", run.head_sha, 40))
+    created_at = _need(_ts(run.created_at))
+
     state, reason, exit_code = _outcome(run)
-    phase = _enum(run.phase, PHASES) if state == "running" else None
-    if state == "running" and phase is None:
-        phase = "prefetch"
-    artifact = None
-    if state == "done" and run.artifact_path and run.artifact_sha256:
-        sha, original = run.artifact_sha256, run.original_sha256
-        size = _int(run.artifact_size)
-        if (
-            isinstance(sha, str)
-            and _SHA256_RE.match(sha)
-            and isinstance(original, str)
-            and _SHA256_RE.match(original)
-            and size is not None
-            and size >= 0
-        ):
-            artifact = {
-                "path": _text(run.artifact_path, 4096),
-                "sha256": sha,
-                "size": size,
-                "original_sha256": original,
-            }
-    warnings: list[str] = []
-    if isinstance(run.warnings, list):
-        for w in run.warnings:
-            if isinstance(w, str) and w in WARNINGS and w not in warnings:
-                warnings.append(w)
-    labels = [
-        label[:MAX_LABEL]
-        for label in (run.labels if isinstance(run.labels, tuple | list) else ())
-        if isinstance(label, str)
-    ][:MAX_LABELS]
+    agent_id = _pat("agent_id", run.agent_id, 11)
+    draft_id = _pat("draft_id", run.draft_id, 26)
+    anchor = _anchor(run.anchor)
+    artifact = _artifact(run)
+    summary = _summary(run.summary)
+    escalated_at = _ts(run.escalated_at)
+    cancel_requested_at = _ts(run.cancel_requested_at)
+    finished_at = _ts(run.finished_at)
+
+    incomplete_done = state == "done" and None in (
+        artifact,
+        summary,
+        draft_id,
+        anchor,
+        finished_at,
+    )
+    incomplete_escalated = state == "escalated" and (agent_id is None or escalated_at is None)
+    if incomplete_done or incomplete_escalated:
+        state, reason, exit_code = "failed", "internal", REASONS["internal"].exits[0]
+        finished_at = finished_at or created_at
+
+    phase = None
+    if state == "running":
+        phase = _enum(run.phase, PHASES) or "prefetch"
+    if state != "escalated":
+        escalated_at = None
+    if state in ("running", "escalated"):
+        finished_at = None
+    if state == "failed":
+        finished_at = finished_at or created_at
+        if reason == "canceled" and cancel_requested_at is None:
+            cancel_requested_at = finished_at
+    if state != "done":
+        artifact = summary = None
+    else:
+        cancel_requested_at = None
     return {
         "schema_version": SCHEMA_VERSION,
-        "run_id": _text(run.run_id, 16),
-        "pr": _text(run.pr),
-        "repo": _text(run.repo),
+        "run_id": run_id,
+        "pr": pr,
+        "repo": repo,
         "state": state,
         "phase": phase,
         "reason": reason,
         "exit_code": exit_code,
-        "mode": _text(run.mode, 32),
-        "skill": _text(run.skill, 256),
-        "labels": labels,
-        "previous_run": _text(run.previous_run, 16),
-        "agent_id": _text(run.agent_id, 128),
-        "csession_id": _text(run.csession_id, 128),
-        "draft_id": _text(run.draft_id, 128),
-        "anchor": _anchor(run.anchor),
-        "head_sha": _text(run.head_sha, 64),
-        "created_at": _ts(run.created_at) or _text(run.created_at, 40),
-        "escalated_at": _ts(run.escalated_at) if state == "escalated" else None,
-        "cancel_requested_at": _ts(run.cancel_requested_at),
-        "finished_at": _ts(run.finished_at) if state in ("done", "failed") else None,
+        "mode": mode,
+        "skill": skill,
+        "labels": _labels(run.labels),
+        "previous_run": _pat("run_id", run.previous_run, 11),
+        "agent_id": agent_id,
+        "csession_id": _pat("csession_id", run.csession_id, 11),
+        "draft_id": draft_id,
+        "anchor": anchor,
+        "head_sha": head_sha,
+        "created_at": created_at,
+        "escalated_at": escalated_at,
+        "cancel_requested_at": cancel_requested_at,
+        "finished_at": finished_at,
         "artifact": artifact,
-        "summary": _summary(run.summary) if state == "done" else None,
+        "summary": summary,
         "failure": _failure(run.failure, reason or "internal") if state == "failed" else None,
-        "warnings": warnings,
+        "warnings": _warnings(run.warnings),
         "teardown": _enum(run.teardown, TEARDOWNS),
     }
+
+
+def _warnings(raw: object) -> list[str]:
+    out: list[str] = []
+    if isinstance(raw, list):
+        for w in raw:
+            if isinstance(w, str) and w in WARNINGS and w not in out:
+                out.append(w)
+    return out
 
 
 # ---------------------------------------------------------------- human output
@@ -398,7 +504,7 @@ def human_list(objects: list[dict[str, Any]], truncated: bool) -> str:
                     o["run_id"],
                     state,
                     "-" if o["exit_code"] is None else o["exit_code"],
-                    o["pr"],
+                    o["pr"] or "-",
                     (o["head_sha"] or "")[:12],
                     o["created_at"],
                 )
@@ -418,17 +524,26 @@ def _label_filter(text: str) -> str:
     return text
 
 
+def _ceil_ms(moment: dt.datetime) -> dt.datetime:
+    """``moment`` rounded up to the next millisecond (``format_time`` truncates)."""
+    extra = moment.microsecond % 1000
+    return moment + dt.timedelta(microseconds=1000 - extra) if extra else moment
+
+
 def since_cutoff(since: dt.timedelta | dt.datetime | None, now: dt.datetime) -> str | None:
-    """``--since`` as a ``format_time`` cutoff (an age counts back from ``now``)."""
+    """``--since`` as a ``format_time`` cutoff (an age counts back from ``now``).
+
+    A cutoff with sub-millisecond precision is rounded up, so it never moves earlier.
+    """
     if since is None:
         return None
     if isinstance(since, dt.timedelta):
         try:
-            return format_time(now - since)
+            return format_time(_ceil_ms(now - since))
         except OverflowError:  # an age older than year 1: everything matches
             return "0000-00-00T00:00:00.000Z"
     try:
-        return format_time(since)
+        return format_time(_ceil_ms(since))
     except (OverflowError, ValueError):
         raise ReviewRunError("usage", "not a valid --since time") from None
 
@@ -444,10 +559,22 @@ def list_runs(
     since: dt.timedelta | dt.datetime | None = None,
     limit: int = 100,
     now: dt.datetime | None = None,
+    on_corrupt: Callable[[int], None] | None = None,
 ) -> dict[str, Any]:
-    """``{schema_version, runs, truncated}``; read-only, no refresh."""
+    """``{schema_version, runs, truncated}``; read-only, no refresh.
+
+    A corrupt row (``CorruptRunError``) is left out of ``runs``; ``on_corrupt`` is called once
+    with how many were left out, when any were.
+    """
     for label in labels:
         _label_filter(label)
+    distinct_labels = tuple(dict.fromkeys(labels))
+    if len(distinct_labels) > MAX_LABEL_FILTERS:
+        raise ReviewRunError(
+            "usage",
+            "too many --label filters",
+            details={"max": MAX_LABEL_FILTERS},
+        )
     if limit < 1:
         raise ReviewRunError("usage", "the limit is out of range")
     limit = min(limit, MAX_LIMIT)
@@ -456,16 +583,24 @@ def list_runs(
         states=tuple(dict.fromkeys(states)),
         pr=pr,
         repo=repo,
-        labels=tuple(labels),
+        labels=distinct_labels,
         head=head,
         since=cutoff,
         limit=limit,
     )
     objects = []
+    corrupt = 0
     for run_id in ids:
-        run = store.get_run(run_id, tolerant=True)
-        if run is not None:
+        run = store.get_run(run_id, tolerant=True) if is_run_id(run_id) else None
+        if run is None:
+            corrupt += 1
+            continue
+        try:
             objects.append(run_object(run))
+        except CorruptRunError:
+            corrupt += 1
+    if corrupt and on_corrupt is not None:
+        on_corrupt(corrupt)
     return {"schema_version": SCHEMA_VERSION, "runs": objects, "truncated": truncated}
 
 
@@ -474,6 +609,8 @@ def list_runs(
 
 def show_run(store: Store, ref: str) -> dict[str, Any]:
     """The run object of a run id or prefix (``show --no-refresh``). Read-only.
+
+    A corrupt row raises ``CorruptRunError`` (exit 1).
 
     TODO(#24): the refresh of ``show`` (finalize, runner check) is added with finalize; until
     then ``show`` always behaves as ``--no-refresh``.
@@ -485,14 +622,31 @@ def show_run(store: Store, ref: str) -> dict[str, Any]:
     return run_object(run)
 
 
+_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+
+
+def _open_dir(path: str, no_draft: ReviewRunError, dir_fd: int | None = None) -> int:
+    """Open a directory without following a link: missing is no draft, a link is unsafe."""
+    try:
+        return os.open(path, _DIR_FLAGS, dir_fd=dir_fd)
+    except FileNotFoundError:
+        raise no_draft from None
+    except OSError:  # ELOOP (a symlink), ENOTDIR (not a directory), no permission
+        raise ReviewRunError("failed", "state path is unsafe", reason="state_unsafe") from None
+
+
 def read_draft(store: Store, ref: str) -> bytes:
     """The stored ``review.json`` of a ``done`` run, as stored (``show --draft``).
 
-    Read from ``runs/<run id>/review.json`` through a descriptor opened without following links,
-    at most ``MAX_DRAFT_BYTES``. A run with no stored artifact, or a file that is missing, not a
+    Not re-hashed: the bytes are printed as stored. Read from ``runs/<run id>/review.json``
+    through directory descriptors opened without following links (a link in ``runs/<run id>`` is
+    ``state_unsafe``), at most ``MAX_DRAFT_BYTES``. A run id that is not of the schema's form is
+    never used as a path. A run with no stored artifact, or a file that is missing, not a
     regular file or too large, is ``not_found`` (exit 10).
     """
     run_id = store.resolve_run_id(ref)
+    if not is_run_id(run_id):
+        raise ReviewRunError("not_found", "no such run")
     run = store.get_run(run_id, tolerant=True)
     if run is None:
         raise ReviewRunError("not_found", "no such run")
@@ -501,19 +655,30 @@ def read_draft(store: Store, ref: str) -> bytes:
     )
     if run.state != "done" or not run.artifact_sha256:
         raise no_draft
-    path: Path = store.runs_dir() / run_id / "review.json"
+    runs_fd = _open_dir(os.fspath(store.root / "runs"), no_draft)
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
-    except OSError:
-        raise no_draft from None
-    try:
-        info = os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_DRAFT_BYTES:
-            raise no_draft
-        with os.fdopen(fd, "rb", closefd=False) as handle:
-            data = handle.read(MAX_DRAFT_BYTES + 1)
+        run_fd = _open_dir(run_id, no_draft, runs_fd)
+        try:
+            try:
+                fd = os.open(
+                    "review.json",
+                    os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK,
+                    dir_fd=run_fd,
+                )
+            except OSError:
+                raise no_draft from None
+            try:
+                info = os.fstat(fd)
+                if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_DRAFT_BYTES:
+                    raise no_draft
+                with os.fdopen(fd, "rb", closefd=False) as handle:
+                    data = handle.read(MAX_DRAFT_BYTES + 1)
+            finally:
+                os.close(fd)
+        finally:
+            os.close(run_fd)
     finally:
-        os.close(fd)
+        os.close(runs_fd)
     if len(data) > MAX_DRAFT_BYTES:
         raise no_draft
     return data

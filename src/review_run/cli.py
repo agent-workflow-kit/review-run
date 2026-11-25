@@ -265,7 +265,8 @@ def _stub(name: str) -> Handler:
 
 def _export(args: argparse.Namespace) -> int:
     """Print audit (or log) records as JSONL lines, no envelope."""
-    # TODO(#6): the state root comes from config (--config, state_dir) once config lands.
+    # TODO(#6): --config validation (config_invalid) is wired into this handler by #6; the state
+    # root stays default_state_root() until then.
     root = default_state_root()
     try:
         for line in export_lines(root, log=args.log, since=args.since):
@@ -283,9 +284,15 @@ def _write_stdout(text: str | bytes) -> None:
         _silence_stdout()
 
 
+def _note_corrupt(count: int) -> None:
+    """One bounded stderr line: a count only, never stored text."""
+    print(f"{PROG}: skipped {count} unreadable run(s)", file=sys.stderr)
+
+
 def _list(args: argparse.Namespace) -> int:
     """``list``: read-only; no refresh."""
-    # TODO(#6): the state root comes from config once config lands.
+    # TODO(#6): --config validation (config_invalid) is wired into this handler by #6; the state
+    # root stays default_state_root() until then.
     with Store.open(default_state_root()) as store:
         result = runs_mod.list_runs(
             store,
@@ -296,6 +303,7 @@ def _list(args: argparse.Namespace) -> int:
             head=args.head,
             since=args.since,
             limit=args.limit,
+            on_corrupt=_note_corrupt,
         )
     if args.json:
         _write_stdout(runs_mod.dump(result))
