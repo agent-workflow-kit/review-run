@@ -871,7 +871,10 @@
       "then": {
         "properties": {
           "action": {
-            "const": "run"
+            "enum": [
+              "run",
+              "resume"
+            ]
           },
           "result": {
             "properties": {
