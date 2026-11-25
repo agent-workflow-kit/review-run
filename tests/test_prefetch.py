@@ -33,7 +33,7 @@ MARKER = "PLANTED-MARKER-7f3a"
 PINNED = Path(__file__).resolve().parent / "pinned_schemas"
 
 
-class _Routed:
+class _Routed(gw.SystemGateway):
     """Send ``forgectl``/``pr-comment`` to the fake wrappers (the proc guard refuses bare names)."""
 
     def __init__(self, fb: FakeBin) -> None:
@@ -48,6 +48,7 @@ class _Routed:
         stdin: str | None = None,
         env: Mapping[str, str] | None = None,
         cwd: str | None = None,
+        term_grace: float = 0.0,
     ) -> CompletedRun:
         assert env is None, "pre-fetch must not build an environment"
         self.calls.append(tuple(argv))
@@ -57,6 +58,7 @@ class _Routed:
             stdin=stdin,
             env=self.fb.env(),
             cwd=str(self.fb.dir),
+            term_grace=term_grace,
         )
 
 
@@ -485,7 +487,7 @@ def override(
             if isinstance(answer, GatewayError):
                 raise answer
             return answer
-        assert not isinstance(base, GatewayError)
+        assert not isinstance(base, Exception)
         return base(call) if callable(base) else base
 
     fake.scripts[tool] = [run]

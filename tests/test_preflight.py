@@ -32,7 +32,7 @@ PR = "github.com/o/r#1"
 REPO = "github.com/o/r"
 
 
-class Routed:
+class Routed(gw.SystemGateway):
     """Send sibling names to the fake wrappers; names in ``missing`` are not on ``PATH``."""
 
     def __init__(self, fb: FakeBin) -> None:
@@ -49,6 +49,7 @@ class Routed:
         stdin: str | None = None,
         env: Mapping[str, str] | None = None,
         cwd: str | None = None,
+        term_grace: float = 0.0,
     ) -> CompletedRun:
         self.calls.append(tuple(argv))
         self.envs.append(None if env is None else dict(env))
@@ -63,6 +64,7 @@ class Routed:
             stdin=stdin,
             env=child,
             cwd=str(self.fb.dir),
+            term_grace=term_grace,
         )
 
     def tools_called(self) -> list[str]:
