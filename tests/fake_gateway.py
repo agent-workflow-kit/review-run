@@ -24,6 +24,8 @@ class Call:
     env: dict[str, str] | None
     cwd: str | None
     timeout: float
+    term_grace: float = 0.0
+    detached: bool = False
 
     @property
     def env_names(self) -> list[str]:
@@ -64,9 +66,12 @@ class FakeGateway:
         stdin: str | None = None,
         env: Mapping[str, str] | None = None,
         cwd: str | None = None,
+        term_grace: float = 0.0,
     ) -> CompletedRun:
-        gw.check_call(argv, timeout, stdin=stdin, env=env, cwd=cwd)
-        call = Call(tuple(argv), stdin, None if env is None else dict(env), cwd, timeout)
+        gw.check_call(argv, timeout, stdin=stdin, env=env, cwd=cwd, term_grace=term_grace)
+        call = Call(
+            tuple(argv), stdin, None if env is None else dict(env), cwd, timeout, term_grace
+        )
         self.calls.append(call)
         queue = self.scripts.get(argv[0])
         if not queue:
@@ -80,11 +85,44 @@ class FakeGateway:
                 raise gw.OutputTooLarge(f"a call printed more than {gw.MAX_OUTPUT} bytes")
         return dataclasses.replace(result, argv=call.argv)
 
+    def spawn_detached(
+        self,
+        argv: Sequence[str],
+        *,
+        timeout: float,
+        stdin: str | None = None,
+        env: Mapping[str, str] | None = None,
+        cwd: str | None = None,
+        term_grace: float = 0.0,
+    ) -> gw.DetachedHandle:
+        """Record a detached start; scripted exceptions (by ``argv[0]``) raise, anything else
+        starts nothing and returns a finished handle."""
+        gw.check_call(argv, timeout, stdin=stdin, env=env, cwd=cwd, term_grace=term_grace)
+        self.calls.append(
+            Call(
+                tuple(argv), stdin, None if env is None else dict(env), cwd, timeout, term_grace,
+                True,
+            )
+        )
+        queue = self.scripts.get(argv[0])
+        if queue:
+            item = queue.pop(0) if len(queue) > 1 else queue[0]
+            if isinstance(item, GatewayError):
+                raise item
+        return _DoneHandle()
+
     def assert_no_marker(self, marker: str) -> None:
         """Fail when ``marker`` (planted untrusted text) is in any recorded argv, env or cwd."""
         for call in self.calls:
             for text in call.strings():
                 assert marker not in text, f"untrusted marker leaked into a call: {call.argv[0]}"
+
+
+class _DoneHandle:
+    pid = 0
+
+    def join(self, timeout: float | None = None) -> bool:
+        return True
 
 
 @pytest.fixture

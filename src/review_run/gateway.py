@@ -13,6 +13,11 @@ Rules:
   ``MAX_OUTPUT`` bytes on one stream, exactly that process group (created here, its id captured
   at launch while the leader is still unreaped) gets SIGKILL and the call raises. Nothing is ever
   killed by name or pattern.
+* ``term_grace`` (default 0: none) adds a SIGTERM to the group first; the group gets SIGKILL when
+  the leader has exited or the grace has passed, whichever comes first.
+* ``spawn_detached`` starts a child that is not waited for: no output pipes, its stdin an unlinked
+  private file, its own group, and a watchdog thread that ends exactly that group at the timeout
+  (the watchdog lives only as long as this process does).
 * Output is decoded explicitly as UTF-8 with ``surrogateescape``, never through the locale;
   ``stdin`` is encoded the same way (unencodable or over ``MAX_OUTPUT`` bytes: ``GatewayError``).
 * A normal exit kills nothing: group members that outlive the leader keep running, and their later
@@ -33,6 +38,8 @@ import os
 import selectors
 import signal
 import subprocess
+import tempfile
+import threading
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -98,6 +105,7 @@ def check_call(
     stdin: str | None = None,
     env: Mapping[str, str] | None = None,
     cwd: str | None = None,
+    term_grace: float = 0.0,
 ) -> bytes | None:
     """Validate one call's arguments (shared by every gateway implementation, run first).
 
@@ -116,6 +124,13 @@ def check_call(
         or timeout <= 0
     ):
         raise ValueError("timeout must be a finite number of seconds above zero")
+    if (
+        isinstance(term_grace, bool)
+        or not isinstance(term_grace, (int, float))
+        or not math.isfinite(term_grace)
+        or term_grace < 0
+    ):
+        raise ValueError("term_grace must be a finite number of seconds, zero or more")
     if cwd is not None:
         _check_text(cwd, "cwd")
     if env is not None:
@@ -150,6 +165,7 @@ class Gateway(Protocol):
         stdin: str | None = None,
         env: Mapping[str, str] | None = None,
         cwd: str | None = None,
+        term_grace: float = 0.0,
     ) -> CompletedRun:
         """Run ``argv`` without a shell and capture its output.
 
@@ -159,12 +175,63 @@ class Gateway(Protocol):
         """
         ...
 
+    def spawn_detached(
+        self,
+        argv: Sequence[str],
+        *,
+        timeout: float,
+        stdin: str | None = None,
+        env: Mapping[str, str] | None = None,
+        cwd: str | None = None,
+        term_grace: float = 0.0,
+    ) -> DetachedHandle:
+        """Start ``argv`` without waiting; its group is ended at ``timeout`` by a watchdog."""
+        ...
+
+
+class DetachedHandle(Protocol):
+    """A detached child: its PID (its group id) and a way to wait for its watchdog."""
+
+    pid: int
+
+    def join(self, timeout: float | None = None) -> bool:
+        """Wait until the child has exited or been ended; ``False`` when still running."""
+        ...
+
 
 def _kill_group(pgid: int) -> None:
     try:
         os.killpg(pgid, signal.SIGKILL)
     except ProcessLookupError:
         pass
+
+
+def _end_group(proc: subprocess.Popen[bytes], pgid: int, grace: float) -> None:
+    """End the group this module created (leader unreaped, so ``pgid`` cannot be reused): SIGTERM
+    and a wait of at most ``grace`` for the leader when ``grace`` is set, then SIGKILL for every
+    member, then reap the leader."""
+    if proc.returncode is None:
+        if grace > 0:
+            try:
+                os.killpg(pgid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            end = time.monotonic() + grace
+            while time.monotonic() < end and not _leader_exited(proc):
+                time.sleep(0.02)
+        _kill_group(pgid)
+        proc.kill()
+    proc.wait()
+
+
+class _Detached:
+    def __init__(self, pid: int, thread: threading.Thread) -> None:
+        self.pid = pid
+        self._thread = thread
+
+    def join(self, timeout: float | None = None) -> bool:
+        self._thread.join(timeout)
+        return not self._thread.is_alive()
 
 
 def _leader_exited(proc: subprocess.Popen[bytes]) -> bool:
@@ -189,8 +256,9 @@ class SystemGateway:
         stdin: str | None = None,
         env: Mapping[str, str] | None = None,
         cwd: str | None = None,
+        term_grace: float = 0.0,
     ) -> CompletedRun:
-        data = check_call(argv, timeout, stdin=stdin, env=env, cwd=cwd)
+        data = check_call(argv, timeout, stdin=stdin, env=env, cwd=cwd, term_grace=term_grace)
         args = list(argv)
         if cwd is not None and not os.path.isdir(cwd):
             raise GatewayError("working directory missing")
@@ -221,10 +289,7 @@ class SystemGateway:
             # and reap after, so a member alive when the leader exits is still killed. The leader
             # is unreaped here (the success path never raises after reaping), so its PID, our
             # group id, cannot have been reused.
-            if proc.returncode is None:
-                _kill_group(pgid)
-                proc.kill()
-            proc.wait()
+            _end_group(proc, pgid, term_grace)
             raise
         finally:
             for stream in (proc.stdin, proc.stdout, proc.stderr):
@@ -234,6 +299,58 @@ class SystemGateway:
                     except OSError:
                         pass
         return CompletedRun(tuple(args), proc.returncode, decode(out), decode(err))
+
+    def spawn_detached(
+        self,
+        argv: Sequence[str],
+        *,
+        timeout: float,
+        stdin: str | None = None,
+        env: Mapping[str, str] | None = None,
+        cwd: str | None = None,
+        term_grace: float = 0.0,
+    ) -> DetachedHandle:
+        data = check_call(argv, timeout, stdin=stdin, env=env, cwd=cwd, term_grace=term_grace)
+        args = list(argv)
+        if cwd is not None and not os.path.isdir(cwd):
+            raise GatewayError("working directory missing")
+        # The child's stdin: an unlinked private file (no pipe to feed, nothing to clean up).
+        with tempfile.TemporaryFile() as feed:
+            if data:
+                feed.write(data)
+                feed.flush()
+            feed.seek(0)
+            try:
+                proc = subprocess.Popen(
+                    args,
+                    stdin=feed,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    env=None if env is None else dict(env),
+                    cwd=cwd,
+                    start_new_session=True,
+                )
+            except OSError as exc:
+                if cwd is not None and exc.filename == cwd:
+                    raise GatewayError("working directory unusable") from exc
+                if isinstance(exc, (FileNotFoundError, PermissionError, NotADirectoryError)):
+                    raise ToolMissing(f"cannot execute {os.path.basename(args[0])!r}") from exc
+                raise GatewayError(
+                    f"cannot start {os.path.basename(args[0])!r}: errno {exc.errno}"
+                ) from exc
+        pgid = proc.pid
+
+        def watch() -> None:
+            try:
+                proc.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                _end_group(proc, pgid, term_grace)
+            except BaseException:  # never leave a child without a watchdog verdict
+                _end_group(proc, pgid, 0.0)
+
+        thread = threading.Thread(target=watch, name="review-run-watchdog", daemon=True)
+        thread.start()
+        return _Detached(pgid, thread)
 
 
 def _communicate(
@@ -347,6 +464,24 @@ def run(
     stdin: str | None = None,
     env: Mapping[str, str] | None = None,
     cwd: str | None = None,
+    term_grace: float = 0.0,
 ) -> CompletedRun:
     """``get_gateway().run(...)``: the entry point other modules call."""
-    return get_gateway().run(argv, timeout=timeout, stdin=stdin, env=env, cwd=cwd)
+    return get_gateway().run(
+        argv, timeout=timeout, stdin=stdin, env=env, cwd=cwd, term_grace=term_grace
+    )
+
+
+def spawn_detached(
+    argv: Sequence[str],
+    *,
+    timeout: float,
+    stdin: str | None = None,
+    env: Mapping[str, str] | None = None,
+    cwd: str | None = None,
+    term_grace: float = 0.0,
+) -> DetachedHandle:
+    """``get_gateway().spawn_detached(...)``."""
+    return get_gateway().spawn_detached(
+        argv, timeout=timeout, stdin=stdin, env=env, cwd=cwd, term_grace=term_grace
+    )
