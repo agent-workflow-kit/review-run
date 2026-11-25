@@ -31,7 +31,7 @@ def parse_duration(text: str, *, positive: bool = False) -> dt.timedelta:
     if match is None or (match.group(2) is None and text != "0"):
         raise DurationError("a duration is 0 or an integer with a unit: ms, s, m, h or d")
     digits = match.group(1)
-    if len(digits) > _MAX_DIGITS:
+    if len(digits.lstrip("0")) > _MAX_DIGITS:
         raise DurationError("a duration is at most 100 years")
     millis = int(digits) * _UNIT_MS[match.group(2) or "s"]
     if millis > _MAX_MS:
@@ -46,6 +46,6 @@ def parse_since(text: str) -> dt.timedelta | dt.datetime:
     if _RFC3339_RE.fullmatch(text):
         try:
             return dt.datetime.fromisoformat(text).astimezone(dt.UTC)
-        except ValueError:
+        except (ValueError, OverflowError):
             raise DurationError("not a valid RFC 3339 timestamp") from None
     return parse_duration(text)
