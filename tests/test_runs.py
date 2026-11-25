@@ -830,6 +830,19 @@ def test_draft_prints_the_stored_bytes_and_a_stderr_notice(
         assert res.err.count("\n") == 1
 
 
+def test_draft_of_a_done_row_that_show_degrades_exits_10(
+    make: Maker, store: Store, capsys: pytest.CaptureFixture[str]
+) -> None:
+    run_id = make(end="done", exit_code=0, fields=done_fields())
+    (store.run_dir(run_id) / "review.json").write_text('{"schema_version":1}')
+    assert run_cli(capsys, "show", "--draft", run_id).code == 0
+    corrupt(store, run_id, draft_id=None)
+    for argv in (("show", "--draft", run_id), ("--json", "show", "--draft", run_id)):
+        res = run_cli(capsys, *argv)
+        assert res.code == 10
+        assert "schema_version" not in res.out
+
+
 def test_draft_refuses_a_symlink_a_directory_and_a_huge_file(
     make: Maker, store: Store, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

@@ -653,7 +653,11 @@ def read_draft(store: Store, ref: str) -> bytes:
     no_draft = ReviewRunError(
         "not_found", "the run has no stored draft", details={"run_id": run_id}
     )
-    if run.state != "done" or not run.artifact_sha256:
+    try:
+        shown = run_object(run)
+    except CorruptRunError:
+        raise no_draft from None
+    if shown["state"] != "done" or shown["artifact"] is None:
         raise no_draft
     runs_fd = _open_dir(os.fspath(store.root / "runs"), no_draft)
     try:
