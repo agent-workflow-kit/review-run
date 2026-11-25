@@ -243,9 +243,14 @@ def _word(value: object) -> str | None:
 def _retry_after(value: object) -> int | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    if not math.isfinite(value) or value < 0:
+    if isinstance(value, int):  # may be beyond float range: never convert it
+        return None if value < 0 else min(value, _MAX_RETRY_AFTER)
+    try:
+        if not math.isfinite(value) or value < 0:
+            return None
+        return min(math.ceil(value), _MAX_RETRY_AFTER)
+    except OverflowError:
         return None
-    return min(math.ceil(value), _MAX_RETRY_AFTER)
 
 
 def _reject_constant(_name: str) -> Any:
@@ -366,9 +371,10 @@ def _line(value: object) -> str:
     return value
 
 
-def _ref(value: object) -> str:
-    """A branch name: forgectl's grammar excludes controls and whitespace (and caps at 1024)."""
-    _need(isinstance(value, str) and 0 < len(value) <= 1024)
+def _ref(value: object, *, limit: int = 1024) -> str:
+    """A branch name: forgectl's grammar excludes controls and whitespace (and caps at 1024;
+    ``anchor.base_ref`` is capped at 255 by the schema)."""
+    _need(isinstance(value, str) and 0 < len(value) <= limit)
     assert isinstance(value, str)
     _need(all(unicodedata.category(c)[0] not in "CZ" for c in value))
     return value
@@ -417,7 +423,7 @@ def _parse_draft_new(doc: object, pr: str) -> tuple[str, Anchor]:
     _need(all(k in a for k in ("head_sha", "base_ref", "base_sha", "merge_base_sha")))
     anchor = Anchor(
         head_sha=_sha(a.get("head_sha")),
-        base_ref=_ref(a.get("base_ref")),
+        base_ref=_ref(a.get("base_ref"), limit=255),
         base_sha=_sha(a.get("base_sha"), null=True),
         merge_base_sha=_sha(a.get("merge_base_sha"), null=True),
     )
@@ -602,13 +608,23 @@ def _attempt(
     if not complete:
         raise PrefetchFailure(TOO_LARGE, tool="forgectl", lower_code="files_incomplete")
 
-    doc, got = _read("forgectl", ["diff", pr, "--json"], lambda d: _parse_head(d, pr))
+    try:
+        doc, got = _read("forgectl", ["diff", pr, "--json"], lambda d: _parse_head(d, pr))
+    except LowerFailure as failure:
+        if failure.exit_code is None and failure.code == "output_too_large":
+            # the gateway's output cap equals the default hard ceiling: that is "too large"
+            raise PrefetchFailure(TOO_LARGE, tool="forgectl", lower_code="hard_ceiling") from None
+        raise
     if got != head:
         raise _Moved
     diff = doc.get("diff")
     if not isinstance(diff, str):
         raise LowerFailure("forgectl", 0, "invalid_output")
-    if len(diff.encode("utf-8", errors="surrogateescape")) > hard_ceiling_bytes:
+    try:
+        size = len(diff.encode("utf-8", errors="surrogatepass"))
+    except UnicodeEncodeError:  # defensive; the offending text is never put in a message
+        raise LowerFailure("forgectl", 0, "invalid_output") from None
+    if size > hard_ceiling_bytes:
         raise PrefetchFailure(TOO_LARGE, tool="forgectl", lower_code="hard_ceiling")
 
     doc, got = _read("forgectl", ["ci", pr, "--json"], lambda d: _parse_head(d, pr))
@@ -655,9 +671,11 @@ def persist_prefetch(
     """Persist what finalize needs: ``pr.json`` (the four PR facts) in the run directory, then
     ``draft_id`` and ``anchor`` on the run's row in one compare-and-set on ``expect``.
 
-    ``False`` when the row no longer has that key (a cancellation or another process moved it);
-    nothing but the harmless ``pr.json`` is left then. The row is the commit point.
+    ``False`` when the compare-and-set on ``expect`` (state, phase and awaited run) did not match;
+    nothing but the harmless ``pr.json`` is left then. A cancellation request is not part of that
+    key; it is the orchestrator's concern. The row is the commit point.
     """
+    # TODO(#16): check cancel_requested_at around persist_prefetch
     run_dir = store.run_dir(run_id)
     data = json.dumps(facts.run_facts(), sort_keys=True).encode("ascii") + b"\n"
     write_private_file(run_dir / "pr.json", data)
@@ -687,7 +705,8 @@ def load_previous(store: Store, run_id: str, *, max_bytes: int) -> PreviousRevie
         raise _previous_failure("previous_missing")
     path = store.run_dir(run_id) / "review.json"
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        # O_NONBLOCK: a FIFO must not block the open; it is refused as non-regular below
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
     except FileNotFoundError:
         raise _previous_failure("previous_missing") from None
     except OSError:

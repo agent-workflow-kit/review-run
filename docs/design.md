@@ -80,7 +80,7 @@ Every relied-on behavior becomes a `live` or process regression test in the plan
 
 Sandbox on WSL2: the `/usr/lib` bind exposes WSL's driver store and `--tmpfs /usr/lib/wsl` after it hides it (bubblewrap 0.9.0, WSL2); bubblewrap cannot create that mount point where the directory does not exist, so it is added only when present.
 
-Minimum sibling versions: review-run needs claude-session and agent-spawn releases that support `--no-implicit-done` and a wtctl release that accepts `create --throwaway --source auto --label`; the exact versions are filled when those releases ship, and until then review-run compares `agent-spawn --version` and `claude-session --version` with these minimums at run order step 1 and exits 12 `tool_too_old` before anything is allocated ([Run order](interface.md#run-order), [Upgrades](interface.md#upgrades)).
+Minimum sibling versions: review-run needs claude-session and agent-spawn releases that support `--no-implicit-done` and a wtctl release that accepts `create --throwaway --source auto --label`; the exact versions are filled when those releases ship, and until then review-run compares `agent-spawn --version` and `claude-session --version` with these minimums at run order step 1 and exits 12 `tool_too_old` before anything is allocated ([Run order](interface.md#run-order), [Upgrades](interface.md#upgrades)). Until then the minimums are the releases the pinned schemas were copied from (agent-spawn 0.38.1, claude-session 0.45.2, `MIN_VERSIONS` in `preflight.py`); an unparsable `--version` of either fails closed (`lower_failed`, `invalid_output`).
 
 ## Modules
 
