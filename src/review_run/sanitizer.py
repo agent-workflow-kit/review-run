@@ -55,6 +55,13 @@ _FILLERS = frozenset(
         0xFFA0,
     }
 )
+# todo(#20): schemas/session-meta.json (meta.risk_reasons items, line ~27, and meta.summary,
+# line ~35) uses BMP-only literal ranges for the marked characters, so (1) TAG characters
+# (U+E0001, U+E0020 to U+E007F), the variation selectors U+E0100 to U+E01EF, other astral Cf
+# and lone surrogates are accepted although interface.md says they are excluded; (2) U+2065
+# (Cn) is rejected in summary although Cn is allowed there; (3) `$` in risk_reasons allows a
+# trailing LF under Python's re. Deferred: not part of this module; fix with the session-claim
+# validation.
 _MARKED_CATEGORIES = frozenset({"Cf", "Co", "Cs", "Cn", "Zl", "Zp"})
 # After NFKD, characters ignored when looking for an opener: all marks and every invisible
 # character (a superset of what marking already removed).
@@ -62,7 +69,8 @@ _INVISIBLE_CATEGORIES = frozenset({"Mn", "Me", "Mc", "Cf", "Co", "Cs", "Cn", "Cc
 
 # Only characters outside printable ASCII, TAB and LF can need marking.
 _NEEDS_CHECK = re.compile(r"[^\x20-\x7e\t\n]")
-_NON_ASCII = re.compile(r"[^\x00-\x7f]")
+_MARKER = re.compile(r"<U\+[0-9A-F]{4,6}>")
+_MARKER_MAX_LENGTH = 10  # "<U+10FFFF>"
 _LT_CHAR = re.compile("[" + re.escape(LT_CHARS) + "]")
 # "<", optional whitespace, optional "/" and more whitespace, "untrusted" (the interface's
 # ``<\s*/?\s*untrusted`` with the second ``\s*`` only after a "/", so a long whitespace run
@@ -113,6 +121,15 @@ def _to_str(data: str | bytes | bytearray | memoryview) -> str:
     raise TypeError(f"expected str or bytes-like, got {type(data).__name__}")
 
 
+def _marker_span(text: str, index: int) -> tuple[int, int] | None:
+    """The span of the marker that strictly contains the cut before character ``index``."""
+    lo = max(0, index - _MARKER_MAX_LENGTH + 1)
+    for match in _MARKER.finditer(text, lo, index + _MARKER_MAX_LENGTH - 1):
+        if match.start() < index < match.end():
+            return match.span()
+    return None
+
+
 def _truncate(text: str, budget: int) -> str:
     raw = text.encode("utf-8")
     if len(raw) <= budget:
@@ -121,6 +138,16 @@ def _truncate(text: str, budget: int) -> str:
     # Cut on character boundaries: a partial character at either cut is dropped.
     head = raw[:half].decode("utf-8", errors="ignore")
     tail = raw[len(raw) - half :].decode("utf-8", errors="ignore") if half else ""
+    # A cut inside a ``<U+XXXX>`` marker moves out of it: the head ends before the marker, the
+    # tail starts after it.
+    span = _marker_span(text, len(head))
+    if span is not None:
+        head = text[: span[0]]
+    if tail:
+        start = len(text) - len(tail)
+        span = _marker_span(text, start)
+        if span is not None:
+            tail = text[span[1] :]
     omitted = len(raw) - len(head.encode("utf-8")) - len(tail.encode("utf-8"))
     lead = "" if not head or head.endswith("\n") else "\n"
     return f"{head}{lead}[... {omitted} bytes omitted ...]\n{tail}"
@@ -139,15 +166,38 @@ def _ignored_in_normal_form(char: str) -> bool:
     )
 
 
-def _drop_ignored(text: str) -> str:
-    return _NON_ASCII.sub(lambda m: "" if _ignored_in_normal_form(m.group()) else m.group(), text)
+def _normal_char(char: str) -> str:
+    """NFKD, ignored characters dropped, case folded, NFKD and the drop once more (case folding
+    can produce characters that normalize further), for ONE character. A single character's
+    NFKD never reorders marks."""
+
+    def keep(text: str) -> str:
+        return "".join(c for c in text if not _ignored_in_normal_form(c))
+
+    return keep(unicodedata.normalize("NFKD", keep(unicodedata.normalize("NFKD", char)).casefold()))
+
+
+class _NormalTable(dict[int, str]):
+    """A ``str.translate`` table that computes (and caches) each character's normal form."""
+
+    def __missing__(self, codepoint: int) -> str:
+        value = _normal_char(chr(codepoint))
+        if len(self) < _TABLE_LIMIT:
+            self[codepoint] = value
+        return value
+
+
+_TABLE_LIMIT = 200_000
+_NORMAL_TABLE = _NormalTable()
 
 
 def _normalized(line: str) -> str:
-    """NFKD, marks and invisible characters dropped, case folded (then once more, since case
-    folding can produce characters that normalize further)."""
-    text = _drop_ignored(unicodedata.normalize("NFKD", line)).casefold()
-    return _drop_ignored(unicodedata.normalize("NFKD", text))
+    """The normalized form: every character NFKD-decomposed, every mark (Mn, Mc, Me) and
+    invisible character dropped, case folded (then once more, since case folding can produce
+    characters that normalize further). It is computed one character at a time: canonical
+    reordering of combining marks is quadratic on long runs, and since every mark is dropped
+    the order never matters, so the result equals the whole-line form."""
+    return line.translate(_NORMAL_TABLE)
 
 
 def _line_is_lookalike(line: str) -> bool:
@@ -188,17 +238,22 @@ def sanitize(
        Zp, variation selectors, every Zs other than U+0020 and the listed invisible fillers
        become ``<U+XXXX>``, as does every character in ``mark_extra`` (the manifest uses
        ``"|"``).
-    4. With ``budget`` (bytes of the marked text): when longer, only the first and the last
-       ``budget // 2`` bytes (on character boundaries) are kept, with the line
+    4. With ``budget`` (bytes of the marked text, N below): when longer, only the first and the
+       last ``budget // 2`` bytes (on character and marker boundaries) are kept, with the line
        ``[... N bytes omitted ...]`` between them. The result may exceed the budget by that
-       line, and a second pass with a budget is not a no-op.
+       line, and step 5 afterwards adds up to 3 bytes per ``<``-like character of a matching
+       line; a second pass with a budget is not a no-op. A caller that needs a hard cap must
+       measure the result.
     5. Last, line by line: a line whose normalized form matches ``<\\s*/?\\s*untrusted`` has
        every character whose NFKD form begins with ``<`` replaced by ``&lt;``. Other lines
        are unchanged.
 
     Linear in the input size. Without ``budget`` the function is idempotent."""
-    if budget is not None and budget < 0:
-        raise ValueError("budget must not be negative")
+    if budget is not None:
+        if isinstance(budget, bool) or not isinstance(budget, int):
+            raise TypeError(f"budget must be an int or None, got {type(budget).__name__}")
+        if budget < 0:
+            raise ValueError("budget must not be negative")
     text = _to_str(data).replace("\r\n", "\n")
     text = _mark(text, mark_extra)
     if budget is not None:
@@ -209,11 +264,12 @@ def sanitize(
 def sanitize_inline(value: str | bytes | bytearray | memoryview, limit: int = 200) -> str:
     """One line of ``value`` for human output: ``sanitize`` with TAB and LF marked too.
 
-    The input is cut to ``limit`` characters before marking (so a marker is never split) and
-    ``...`` follows a cut. Use it for pointers, ids and names printed in human mode."""
+    CRLF becomes LF first, then the input is cut to ``limit`` characters before marking (so a
+    marker is never split) and ``...`` follows a cut.
+    Use it for pointers, ids and names printed in human mode."""
     if limit < 1:
         raise ValueError("limit must be at least 1")
-    text = _to_str(value)
+    text = _to_str(value).replace("\r\n", "\n")
     cut = len(text) > limit
     body = sanitize(text[:limit], mark_extra="\n\t")
     return body + "..." if cut else body
@@ -223,13 +279,43 @@ def redact(text: str, values: Iterable[str]) -> str:
     """Replace every occurrence of each value of at least 8 characters with ``<redacted>``.
 
     Meant for code-run output after ``sanitize`` and before the output enters the prompt
-    (interface.md, Code run, step 5): a safety net for accidents, so a value that was
-    transformed (encoded, split, or holding a character the sanitizer marked) passes it. One
-    pass, longest value first at each position, so a replacement is never rescanned and a
-    value that is a prefix of another leaves no tail. The replacement holds no whitespace
-    and no ``untrusted``, so it cannot create a fence look-alike."""
-    secrets = sorted({v for v in values if len(v) >= REDACT_MIN_LENGTH}, key=len, reverse=True)
-    if not secrets or not text:
+    (interface.md, Code run, step 5): a safety net for accidents. A value matches in its raw
+    form and in its sanitized form (so a secret holding CR, a marked character or
+    ``<untrusted`` is found in sanitized text); any other transformation (encoded, split)
+    passes. The 8-character minimum applies to the raw value. The matches of all values are
+    merged where they overlap or touch and each merged span is replaced once, so no tail of a
+    partially overlapping value is left and a replacement is never rescanned. The replacement
+    holds no whitespace and no ``untrusted``, so it cannot create a fence look-alike.
+
+    ``values`` must be a collection of strings, not one string."""
+    if isinstance(values, str | bytes | bytearray):
+        raise TypeError("values must be a collection of strings, not a single string")
+    patterns: set[str] = set()
+    for value in values:
+        if len(value) >= REDACT_MIN_LENGTH:
+            patterns.add(value)
+            patterns.add(sanitize(value))
+    patterns.discard("")
+    if not patterns or not text:
         return text
-    pattern = re.compile("|".join(re.escape(s) for s in secrets))
-    return pattern.sub(REDACTED, text)
+    spans: list[tuple[int, int]] = []
+    for pattern in patterns:
+        start = text.find(pattern)
+        while start != -1:
+            spans.append((start, start + len(pattern)))
+            start = text.find(pattern, start + 1)
+    if not spans:
+        return text
+    spans.sort()
+    parts: list[str] = []
+    position = 0
+    current_start, current_end = spans[0]
+    for start, end in spans[1:]:
+        if start <= current_end:
+            current_end = max(current_end, end)
+            continue
+        parts.extend((text[position:current_start], REDACTED))
+        position = current_end
+        current_start, current_end = start, end
+    parts.extend((text[position:current_start], REDACTED, text[current_end:]))
+    return "".join(parts)
