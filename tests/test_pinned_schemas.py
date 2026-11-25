@@ -22,9 +22,7 @@ SRC = REPO / "src"
 
 HEADER_KEY = "x-pinned-from"
 SEMVER = re.compile(r"^\d+\.\d+\.\d+$")
-# pr-comment's review-draft schema is not pinned yet: it is not published in a
-# sibling release (see docs/pinned-schemas.md).
-SIBLINGS = {"forgectl", "agent-spawn", "claude-session", "wtctl"}
+SIBLINGS = {"forgectl", "pr-comment", "agent-spawn", "claude-session", "wtctl"}
 # Importable names of the sibling tools, hyphenated and underscored.
 SIBLING_MODULES = {"forgectl", "pr_comment", "agent_spawn", "claude_session", "wtctl"}
 
@@ -163,6 +161,32 @@ def _imported_roots(tree: ast.AST) -> set[str]:
     return roots
 
 
+_SIBLING_ALTERNATION = "|".join(m.replace("_", "[-_]") for m in sorted(SIBLING_MODULES))
+_SIBLING_PATH = re.compile(r"\.\./(?:" + _SIBLING_ALTERNATION + ")")
+
+
+def _dynamic_violations(tree: ast.AST) -> list[str]:
+    """Dynamic imports of a sibling, and string paths that climb to a sibling checkout."""
+    found = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            fn = node.func
+            name = ""
+            if isinstance(fn, ast.Name):
+                name = fn.id
+            elif isinstance(fn, ast.Attribute):
+                name = fn.attr
+            if name in ("__import__", "import_module") and node.args:
+                arg = node.args[0]
+                if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                    if arg.value.lstrip(".").split(".")[0] in SIBLING_MODULES:
+                        found.append(f"dynamically imports sibling {arg.value!r}")
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+            if _SIBLING_PATH.search(node.value):
+                found.append(f"reaches a sibling checkout by path {node.value!r}")
+    return found
+
+
 def source_violations(files: list[Path]) -> list[str]:
     found = []
     for f in files:
@@ -170,6 +194,7 @@ def source_violations(files: list[Path]) -> list[str]:
         bad = _imported_roots(ast.parse(text)) & SIBLING_MODULES
         if bad:
             found.append(f"{f}: imports sibling {sorted(bad)}")
+        found.extend(f"{f}: {msg}" for msg in _dynamic_violations(ast.parse(text)))
         for marker in ("pinned_schemas", HEADER_KEY):
             if marker in text:
                 found.append(f"{f}: references pinned files ({marker})")
@@ -184,6 +209,10 @@ def test_src_does_not_import_siblings_or_read_pinned_files() -> None:
 @pytest.mark.parametrize(
     "code",
     [
+        "import importlib\nimportlib.import_module('forgectl')\n",
+        "__import__('agent_spawn')\n",
+        "from importlib import import_module\nimport_module('wtctl.cli')\n",
+        "P = '../forgectl/src'\n",
         "import forgectl\n",
         "from agent_spawn.cli import main\n",
         "import claude_session.status as s\n",
@@ -200,4 +229,10 @@ def test_source_check_detects_violations(tmp_path: Path, code: str) -> None:
 def test_source_check_allows_clean_code(tmp_path: Path) -> None:
     f = tmp_path / "mod.py"
     f.write_text("import json\nfrom pathlib import Path\n", encoding="utf-8")
+    assert source_violations([f]) == []
+
+
+def test_source_check_allows_bare_sibling_name_strings(tmp_path: Path) -> None:
+    f = tmp_path / "mod.py"
+    f.write_text("BINARY = 'forgectl'\n", encoding="utf-8")
     assert source_violations([f]) == []

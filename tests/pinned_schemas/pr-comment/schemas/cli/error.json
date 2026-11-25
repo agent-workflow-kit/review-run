@@ -1,0 +1,21 @@
+{
+  "x-pinned-from": {
+    "sibling": "pr-comment",
+    "version": "0.39.0",
+    "source": "schemas/cli/error.json"
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "pr-comment/cli/error.json",
+  "title": "Error envelope (any command with --json)",
+  "description": "Printed on stdout for a non-zero exit with --json, a dry run included, except where a command prints its result document (resolve and unresolve with per-thread errors, draft check on exit 2). When forgectl fails, pr-comment exits with forgectl's exit code, copies its code, reason and details, and carries forgectl's envelope in lower_error.",
+  "type": "object",
+  "properties": {
+    "error": {
+      "$ref": "../defs.json#/$defs/error"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "error"
+  ]
+}

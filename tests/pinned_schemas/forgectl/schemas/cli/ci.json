@@ -1,7 +1,7 @@
 {
   "x-pinned-from": {
     "sibling": "forgectl",
-    "version": "0.55.3",
+    "version": "0.56.0",
     "source": "schemas/cli/ci.json"
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",

@@ -1,7 +1,7 @@
 {
   "x-pinned-from": {
     "sibling": "wtctl",
-    "version": "1.1.4",
+    "version": "1.2.0",
     "source": "schemas/cli/error.json"
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",

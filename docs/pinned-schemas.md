@@ -11,7 +11,7 @@ enforces it).
 Each file carries a top-level `x-pinned-from` object:
 
 ```json
-{"x-pinned-from": {"sibling": "forgectl", "version": "0.55.3", "source": "schemas/cli/show.json"}}
+{"x-pinned-from": {"sibling": "forgectl", "version": "0.56.0", "source": "schemas/cli/show.json"}}
 ```
 
 `version` is the sibling's release (tag without the `v`), `source` the path in
@@ -24,25 +24,28 @@ files that a pinned schema references (for example `defs.json`) are copied too.
 
 | Sibling | Version | Files |
 |---|---|---|
-| forgectl | 0.55.3 | `cli/show`, `cli/files`, `cli/diff`, `cli/ci`, `cli/error`, `defs` |
-| agent-spawn | 0.38.1 | `cli/launch` (launch result), `cli/wait` and `cli/show` (outcome object), `cli/error` (error envelope), `defs` |
+| forgectl | 0.56.0 | `cli/show`, `cli/files`, `cli/diff`, `cli/ci`, `cli/error`, `defs` |
+| agent-spawn | 0.38.1 | `cli/launch` (launch result), `cli/wait` and `cli/show` (outcome object), `cli/resume` (resume result), `cli/list` (`list --json`), `cli/error` (error envelope), `defs` |
 | claude-session | 0.45.2 | `cli/status`, `cli/outcome` (referenced by `status`), `cli/error` |
-| wtctl | 1.1.4 | `cli/create`, `cli/remove`, `cli/list` (`list --throwaways`), `cli/error`, `defs` |
-| pr-comment | none yet | see below |
+| wtctl | 1.2.0 | `cli/create`, `cli/remove`, `cli/list` (`wtctl list --json`, which `list --throwaways` filters), `cli/error`, `defs` |
+| pr-comment | 0.39.0 | `review-draft`, `cli/draft-new`, `cli/draft-check`, `cli/error`, `defs` |
 
-### Not yet pinned: pr-comment
-
-pr-comment's latest release (0.0.1) is the scaffold: its `schemas/cli/` is
-empty, so there is no review-draft schema and no `draft new` or `draft check`
-output schema to copy. Pin them with the procedure below once pr-comment
-releases them, and add `pr-comment` to `SIBLINGS` in the test.
+Only the outputs review-run parses are pinned. For agent-spawn that is
+`launch`, `wait`, `show`, `resume` and `list`; the outputs of `stop`,
+`teardown` and the other commands are not pinned because review-run does not
+read them.
 
 ## Refreshing after a sibling release
 
-1. Find the release: `git -C ../<sibling> tag --sort=-v:refname | head -1`.
-2. Re-copy each pinned file (and any file it newly `$ref`s) from that tag, so
-   an uncommitted sibling checkout cannot leak in:
-   `git -C ../<sibling> show v<version>:schemas/<path>`.
+`<sibling checkout>` stands for any clone of the sibling repository. Its
+working tree and local tags may be stale, so never copy files from the working
+tree or trust local tags without fetching.
+
+1. Find the latest release: `git -C <sibling checkout> fetch --tags`, then
+   `gh release list --repo agent-workflow-kit/<sibling> --limit 1` (or
+   `git -C <sibling checkout> tag --sort=-v:refname | head -1` after the fetch).
+2. Re-copy each pinned file (and any file it newly `$ref`s) from that tag:
+   `git -C <sibling checkout> show v<version>:schemas/<path>`.
 3. Put the `x-pinned-from` header first in each file (`sibling`, new `version`,
    `source`) and keep the rest of the document unchanged. Remove files the
    sibling deleted.
@@ -56,4 +59,8 @@ releases them, and add `pr-comment` to `SIBLINGS` in the test.
 Every fake sibling output under `tests/fakebin/` must validate against the
 matching file here (acceptance criterion of issue #3, enforced by #10). Schemas
 use JSON Schema 2020-12 with relative `$ref`s across files, so a validator needs
-a registry over this directory tree. This issue adds no validator dependency.
+a registry over this directory tree. Each file's `$id` is `<sibling>/<path>.json`
+without the `schemas/` segment (for example `wtctl/cli/list.json`,
+`agent-spawn/defs.json`, `pr-comment/review-draft.json`), so key the registry by
+`$id`, or map `<sibling>/<path>` to
+`tests/pinned_schemas/<sibling>/schemas/<path>`. This issue adds no validator dependency.
