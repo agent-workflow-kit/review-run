@@ -61,6 +61,12 @@ def group_members(pgid: int, *, live_only: bool = False) -> list[int]:
 
     A member keeps the id reserved, so while any exists it cannot have been reused by a stranger.
     """
+    try:
+        os.kill(-pgid, 0)  # killpg(pgid, 0); tests that record killpg calls must not see this
+    except ProcessLookupError:
+        return []  # no process in the group (not even a zombie): nothing to scan for
+    except PermissionError:
+        pass  # a member we may not signal: fall through to the scan
     found: list[int] = []
     for entry in os.listdir("/proc"):
         if not entry.isdigit():

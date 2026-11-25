@@ -434,7 +434,11 @@ def pairs(flags: list[str]) -> list[tuple[str, str | None]]:
     i = 0
     while i < len(flags):
         assert flags[i].startswith("--"), f"a positional or stray value: {flags[i]!r}"
-        if flags[i] in boolean:
+        if "=" in flags[i]:  # one item: --name=value
+            name, _, value = flags[i].partition("=")
+            out.append((name, value))
+            i += 1
+        elif flags[i] in boolean:
             out.append((flags[i], None))
             i += 1
         else:
@@ -472,6 +476,15 @@ def test_launch_flags_have_no_positional_and_no_option_like_value(
     flags = flags_for(settings, labels=("a=b",), actor="human:me", decision_ids=("d1",))
     for name, value in pairs(flags):
         assert value is None or not value.startswith("-"), name
+
+
+def test_a_decision_id_that_looks_like_an_option_is_one_argv_item(
+    tmp_path: Path, plugin: Path
+) -> None:
+    settings, _ = make_settings(make_config(tmp_path), plugin)
+    flags = flags_for(settings, decision_ids=("-x", "d2"))
+    assert "--decision-id=-x" in flags and "--decision-id=d2" in flags
+    assert "--decision-id" not in flags and "-x" not in flags
 
 
 def test_launch_flags_interactive_and_optional_values(tmp_path: Path, plugin: Path) -> None:
@@ -542,3 +555,389 @@ def test_settings_json_validates_against_its_schema(tmp_path: Path, plugin: Path
     config = make_config(tmp_path, "subagents: true\n")
     settings, _ = make_settings(config, plugin, {"model": "m"})
     validate_against("settings.json", json.loads(settings.to_bytes()))
+
+
+# -- mutation-check additions ------------------------------------------------------------------
+
+
+def _stored_run(tmp_path: Path, plugin: Path) -> Path:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir(mode=0o700)
+    settings, profile = make_settings(make_config(tmp_path), plugin)
+    rs.write_run_files(run_dir, settings, profile)
+    return run_dir
+
+
+def test_no_process_key_reaches_settings_json_by_the_literal_names(
+    tmp_path: Path, plugin: Path
+) -> None:
+    """Spelled out here: the test must not trust ``rs.EXCLUDED`` itself."""
+    settings, _ = make_settings(make_config(tmp_path), plugin)
+    tops = {k.split(".")[0] for k in settings.entries}
+    assert not tops & {"hooks", "retention", "escalation_ttl", "me"}
+    stored = {e["key"].split(".")[0] for e in json.loads(settings.to_bytes())["settings"]}
+    assert not stored & {"hooks", "retention", "escalation_ttl", "me"}
+
+
+def test_build_settings_sorts_the_plugin_dirs_by_bytes(tmp_path: Path, plugin: Path) -> None:
+    resolved = make_config(tmp_path).resolve(REPO)
+    profile, _ = rs.effective_profile(resolved.values)
+    settings = rs.build_settings(
+        resolved, plugin_dirs=["/z", "/a", "/M"], plugin_dirs_hash="0" * 64, profile=profile
+    )
+    assert settings.plugin_dirs == ("/M", "/a", "/z")
+
+
+@pytest.mark.parametrize(
+    ("what", "yaml_a", "yaml_b", "env_a", "env_b", "flags_a", "flags_b"),
+    [
+        ("hooks", "hooks:\n  pre-run:\n    - cmd: 'true'\n", "hooks:\n  pre-run:\n    - cmd: 'false'\n", {}, {}, None, None),
+        ("retention", "retention: 10d\n", "retention: 20d\n", {}, {}, None, None),
+        ("escalation_ttl", "escalation_ttl: 1d\n", "escalation_ttl: 2d\n", {}, {}, None, None),
+        ("me", "me:\n  name: ann\n", "me:\n  name: bob\n", {}, {}, None, None),
+        ("limits", "limits:\n  max_files: 10\n", "limits:\n  max_files: 11\n", {}, {}, None, None),
+        ("repo origin", f"repos:\n  {REPO}:\n    model: r1\n", f"repos:\n  {REPO}:\n    model: r2\n", {}, {}, None, None),
+        ("env origin", "", "", {"REVIEW_RUN_SANDBOX": "preferred"}, {"REVIEW_RUN_SANDBOX": "off"}, None, None),
+        ("flag origin", "", "", {}, {}, {"model": "x"}, {"model": "y"}),
+        ("config origin", "nits: true\nmax_turns: 3\n", "nits: true\nmax_turns: 4\n", {}, {}, None, None),
+    ],
+)  # fmt: skip
+def test_config_sha256_covers_every_resolved_value_whatever_its_origin(
+    tmp_path: Path, plugin: Path, what: str, yaml_a: str, yaml_b: str,
+    env_a: dict[str, str], env_b: dict[str, str],
+    flags_a: dict[str, Any] | None, flags_b: dict[str, Any] | None,
+) -> None:  # fmt: skip
+    a = make_settings(make_config(tmp_path, yaml_a, env_a), plugin, flags_a)[0]
+    b = make_settings(make_config(tmp_path, yaml_b, env_b), plugin, flags_b)[0]
+    assert a.config_sha256 != b.config_sha256, what
+
+
+def test_load_refuses_a_settings_file_or_profile_owned_by_someone_else(
+    tmp_path: Path, plugin: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_dir = _stored_run(tmp_path, plugin)
+    assert rs.load_run_settings(run_dir)
+    monkeypatch.setattr(os, "geteuid", lambda: os.getuid() + 1)
+    with pytest.raises(ReviewRunError) as exc:
+        rs.load_run_settings(run_dir)
+    assert exc.value.code == "internal"
+
+
+def _fifo_holding(path: Path, data: bytes) -> int:
+    """A FIFO at ``path`` that already holds ``data`` and still has a writer (the returned
+    descriptor, to close), so a non-blocking reader sees the bytes and no end of file."""
+    os.mkfifo(path, 0o600)
+    fd = os.open(path, os.O_RDWR)
+    os.write(fd, data)
+    return fd
+
+
+@pytest.mark.parametrize("name", [rs.SETTINGS_FILE, rs.PROFILE_FILE])
+def test_load_refuses_a_fifo_even_when_it_holds_valid_content(
+    tmp_path: Path, plugin: Path, name: str
+) -> None:
+    run_dir = _stored_run(tmp_path, plugin)
+    content = (run_dir / name).read_bytes()
+    (run_dir / name).unlink()
+    fd = _fifo_holding(run_dir / name, content)
+    try:
+        with pytest.raises(ReviewRunError) as exc:
+            rs.load_run_settings(run_dir)
+    finally:
+        os.close(fd)
+    assert exc.value.code == "internal"
+
+
+def test_the_settings_file_size_limit_is_inclusive(tmp_path: Path, plugin: Path) -> None:
+    run_dir = _stored_run(tmp_path, plugin)
+    path = run_dir / rs.SETTINGS_FILE
+    body = path.read_bytes().rstrip(b"\n")
+    path.write_bytes(body + b" " * (rs.MAX_SETTINGS_BYTES - len(body)))  # exactly the limit
+    assert rs.load_run_settings(run_dir)
+    path.write_bytes(body + b" " * (rs.MAX_SETTINGS_BYTES + 1 - len(body)))  # one byte over
+    with pytest.raises(ReviewRunError) as exc:
+        rs.load_run_settings(run_dir)
+    assert exc.value.code == "internal"
+
+
+@pytest.mark.parametrize("key", ["plugin_dirs_sha256", "config_sha256"])
+@pytest.mark.parametrize("bad", ["a" * 63, "a" * 65, "A" * 64, "g" * 64, "", 7])
+def test_load_refuses_a_hash_that_is_not_64_lowercase_hex(
+    tmp_path: Path, plugin: Path, key: str, bad: object
+) -> None:
+    run_dir = _stored_run(tmp_path, plugin)
+    doc = json.loads((run_dir / rs.SETTINGS_FILE).read_text(encoding="utf-8"))
+    doc[key] = "a" * 64
+    (run_dir / rs.SETTINGS_FILE).write_text(json.dumps(doc), encoding="utf-8")
+    assert rs.load_run_settings(run_dir)  # the shape alone is fine
+    doc[key] = bad
+    (run_dir / rs.SETTINGS_FILE).write_text(json.dumps(doc), encoding="utf-8")
+    with pytest.raises(ReviewRunError) as exc:
+        rs.load_run_settings(run_dir)
+    assert exc.value.code == "internal"
+
+
+def test_load_refuses_an_unknown_profile_kind_with_the_right_hash(
+    tmp_path: Path, plugin: Path
+) -> None:
+    run_dir = _stored_run(tmp_path, plugin)
+    doc = json.loads((run_dir / rs.SETTINGS_FILE).read_text(encoding="utf-8"))
+    doc["permission_profile"]["kind"] = "other"
+    (run_dir / rs.SETTINGS_FILE).write_text(json.dumps(doc), encoding="utf-8")
+    with pytest.raises(ReviewRunError) as exc:
+        rs.load_run_settings(run_dir)
+    assert exc.value.code == "internal"
+
+
+@pytest.mark.parametrize("dirs", [[1], ["/a", None], [["/a"]]])
+def test_load_refuses_plugin_dirs_that_are_not_strings(
+    tmp_path: Path, plugin: Path, dirs: list[object]
+) -> None:
+    run_dir = _stored_run(tmp_path, plugin)
+    doc = json.loads((run_dir / rs.SETTINGS_FILE).read_text(encoding="utf-8"))
+    doc["plugin_dirs"] = dirs
+    (run_dir / rs.SETTINGS_FILE).write_text(json.dumps(doc), encoding="utf-8")
+    with pytest.raises(ReviewRunError) as exc:
+        rs.load_run_settings(run_dir)
+    assert exc.value.code == "internal"
+
+
+def test_write_run_files_refuses_a_profile_that_differs_only_in_kind_or_only_in_hash(
+    tmp_path: Path, plugin: Path
+) -> None:
+    settings, profile = make_settings(make_config(tmp_path), plugin)
+    only_kind = rs.ProfilePlan("custom", profile.data, profile.sha256)
+    only_hash = rs.ProfilePlan(profile.kind, profile.data, "0" * 64)
+    for other in (only_kind, only_hash):
+        with pytest.raises(ValueError):
+            rs.write_run_files(tmp_path, settings, other)
+    assert not (tmp_path / rs.PROFILE_FILE).exists()  # nothing written before the refusal
+
+
+def test_a_custom_profile_owned_by_someone_else_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    custom = tmp_path / "p.json"
+    custom.write_text("{}", encoding="utf-8")
+    custom.chmod(0o600)
+    assert rs.read_profile_file(str(custom)) == b"{}"
+    monkeypatch.setattr(os, "geteuid", lambda: os.getuid() + 1)
+    with pytest.raises(ReviewRunError) as exc:
+        rs.read_profile_file(str(custom))
+    assert exc.value.details == {"key": "permission_profile"}
+
+
+def test_a_custom_profile_that_is_a_fifo_or_directory_is_refused(tmp_path: Path) -> None:
+    fifo = tmp_path / "fifo.json"
+    fd = _fifo_holding(fifo, b"{}")
+    try:
+        with pytest.raises(ReviewRunError) as exc:
+            rs.read_profile_file(str(fifo))
+    finally:
+        os.close(fd)
+    assert exc.value.details == {"key": "permission_profile"}
+    (tmp_path / "dir.json").mkdir(mode=0o700)
+    with pytest.raises(ReviewRunError):
+        rs.read_profile_file(str(tmp_path / "dir.json"))
+
+
+def test_a_group_writable_custom_profile_is_accepted_only_in_a_private_group(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from review_run import config_yaml
+
+    custom = tmp_path / "p.json"
+    custom.write_text("{}", encoding="utf-8")
+    custom.chmod(0o620)
+    monkeypatch.setattr(config_yaml, "private_group", lambda gid: True)
+    assert rs.read_profile_file(str(custom)) == b"{}"
+
+
+def test_the_custom_profile_size_limit_is_inclusive(tmp_path: Path) -> None:
+    """Valid JSON padded with trailing blanks, so only the size can make it fail."""
+    custom = tmp_path / "p.json"
+    for size, ok in ((rs.MAX_PROFILE_BYTES, True), (rs.MAX_PROFILE_BYTES + 1, False)):
+        custom.unlink(missing_ok=True)
+        custom.write_bytes(b"{}" + b" " * (size - 2))
+        custom.chmod(0o600)
+        if ok:
+            assert len(rs.read_profile_file(str(custom))) == rs.MAX_PROFILE_BYTES
+        else:
+            with pytest.raises(ReviewRunError) as exc:
+                rs.read_profile_file(str(custom))
+            assert exc.value.details == {"key": "permission_profile"}
+
+
+# -- round 1 review: validation on load, non-finite numbers, file modes ------------------------
+
+
+def _stored(tmp_path: Path, plugin: Path) -> tuple[Path, dict[str, Any]]:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir(mode=0o700)
+    settings, profile = make_settings(make_config(tmp_path), plugin)
+    rs.write_run_files(run_dir, settings, profile)
+    doc = json.loads((run_dir / rs.SETTINGS_FILE).read_text(encoding="utf-8"))
+    return run_dir, doc
+
+
+def _rewrite(run_dir: Path, doc: dict[str, Any]) -> None:
+    path = run_dir / rs.SETTINGS_FILE
+    path.unlink()
+    path.write_text(json.dumps(doc), encoding="utf-8")
+    path.chmod(0o600)
+
+
+def _set(doc: dict[str, Any], key: str, value: Any) -> None:
+    for item in doc["settings"]:
+        if item["key"] == key:
+            item["value"] = value
+            return
+    raise AssertionError(key)
+
+
+def _drop(doc: dict[str, Any], key: str) -> None:
+    doc["settings"] = [i for i in doc["settings"] if i["key"] != key]
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda d: _drop(d, "mode"),
+        lambda d: _drop(d, "skill"),
+        lambda d: _drop(d, "sandbox"),
+        lambda d: _drop(d, "setting_sources"),
+        lambda d: _drop(d, "env_allowlist"),
+        lambda d: _drop(d, "subagents"),
+        lambda d: _drop(d, "max_subagent_depth"),
+        lambda d: _drop(d, "model"),
+        lambda d: _drop(d, "timeout"),
+        lambda d: _drop(d, "max_turns"),
+        lambda d: _set(d, "mode", "other"),
+        lambda d: _set(d, "mode", "--evil"),
+        lambda d: _set(d, "skill", 3),
+        lambda d: _set(d, "skill", "--evil"),
+        lambda d: _set(d, "sandbox", "--evil"),
+        lambda d: _set(d, "setting_sources", "user"),
+        lambda d: _set(d, "setting_sources", ["--evil"]),
+        lambda d: _set(d, "env_allowlist", [1]),
+        lambda d: _set(d, "subagents", 1),
+        lambda d: _set(d, "max_subagent_depth", True),
+        lambda d: _set(d, "max_subagent_depth", "1"),
+        lambda d: _set(d, "model", "--evil"),
+        lambda d: _set(d, "model", 5),
+        lambda d: _set(d, "timeout", "-5m"),
+        lambda d: _set(d, "max_turns", "7"),
+        lambda d: _set(d, "max_turns", False),
+        lambda d: d["settings"].append({"key": "Bad Key", "value": 1, "origin": "flag"}),
+        lambda d: d["settings"].append({"key": "unknown_key", "value": 1, "origin": "flag"}),
+        lambda d: d["settings"].append({"key": "hooks.pre-run", "value": [], "origin": "flag"}),
+        lambda d: d.update(plugin_dirs=["relative/dir"]),
+        lambda d: d.update(schema_version=True),
+        lambda d: d.update(schema_version=1.0),
+        lambda d: d.update(extra=1),
+        lambda d: d["permission_profile"].update(extra=1),
+        lambda d: d.update(settings="x"),
+    ],
+)
+def test_load_enforces_the_settings_schema_and_the_values_launch_reads(
+    tmp_path: Path, plugin: Path, mutate: Any
+) -> None:
+    run_dir, doc = _stored(tmp_path, plugin)
+    mutate(doc)
+    _rewrite(run_dir, doc)
+    with pytest.raises(ReviewRunError) as exc:
+        rs.load_run_settings(run_dir)
+    assert exc.value.code == "internal"
+
+
+def test_load_accepts_the_values_the_schema_allows(tmp_path: Path, plugin: Path) -> None:
+    run_dir, doc = _stored(tmp_path, plugin)
+    _set(doc, "model", "m")
+    _set(doc, "timeout", "5m")
+    _set(doc, "max_turns", 7)
+    _rewrite(run_dir, doc)
+    assert rs.load_run_settings(run_dir).value("max_turns") == 7
+
+
+def test_load_refuses_a_non_finite_number(tmp_path: Path, plugin: Path) -> None:
+    run_dir, doc = _stored(tmp_path, plugin)
+    _set(doc, "max_turns", 123456789)
+    raw = json.dumps(doc).replace("123456789", "1e999")
+    assert "1e999" in raw
+    path = run_dir / rs.SETTINGS_FILE
+    path.unlink()
+    path.write_text(raw, encoding="utf-8")
+    path.chmod(0o600)
+    with pytest.raises(ReviewRunError) as exc:
+        rs.load_run_settings(run_dir)
+    assert exc.value.code == "internal"
+
+
+def test_reject_non_finite_looks_inside_containers() -> None:
+    rs.reject_non_finite({"a": [1, 2.5, {"b": None}]})
+    for bad in (float("inf"), [float("nan")], {"a": {"b": [float("-inf")]}}):
+        with pytest.raises(ValueError):
+            rs.reject_non_finite(bad)
+    with pytest.raises(ValueError):
+        rs.strict_finite_json('{"a": 1e999}')
+
+
+def test_a_custom_profile_with_a_non_finite_number_is_refused(tmp_path: Path) -> None:
+    custom = tmp_path / "p.json"
+    custom.write_text('{"x": 1e999}', encoding="utf-8")
+    custom.chmod(0o600)
+    with pytest.raises(ReviewRunError) as exc:
+        rs.read_profile_file(str(custom))
+    assert exc.value.details == {"key": "permission_profile"}
+
+
+def test_the_hashes_and_the_document_are_never_written_with_nan(
+    tmp_path: Path, plugin: Path
+) -> None:
+    settings, _ = make_settings(make_config(tmp_path), plugin)
+    bad = rs.RunSettings(
+        {**settings.entries, "model": (float("nan"), "flag")},
+        settings.plugin_dirs,
+        settings.plugin_dirs_sha256,
+        settings.config_sha256,
+        settings.profile_kind,
+        settings.profile_sha256,
+    )
+    with pytest.raises(ValueError):
+        bad.to_bytes()
+    resolved = make_config(tmp_path).resolve(REPO)
+    resolved.values["model"] = float("inf")
+    with pytest.raises(ValueError):
+        rs.config_sha256(resolved)
+
+
+@pytest.mark.parametrize("name", [rs.SETTINGS_FILE, rs.PROFILE_FILE])
+@pytest.mark.parametrize("mode", [0o640, 0o604, 0o660, 0o666])
+def test_load_refuses_a_run_file_that_group_or_others_can_access(
+    tmp_path: Path, plugin: Path, name: str, mode: int
+) -> None:
+    run_dir, _ = _stored(tmp_path, plugin)
+    (run_dir / name).chmod(mode)
+    with pytest.raises(ReviewRunError) as exc:
+        rs.load_run_settings(run_dir)
+    assert exc.value.code == "internal"
+
+
+def test_a_custom_profile_follows_the_shared_group_write_rule(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from review_run import config_yaml
+
+    custom = tmp_path / "p.json"
+    custom.write_text("{}", encoding="utf-8")
+    custom.chmod(0o620)
+    monkeypatch.setattr(config_yaml, "private_group", lambda gid: True)
+    assert rs.read_profile_file(str(custom)) == b"{}"
+    monkeypatch.setattr(config_yaml, "private_group", lambda gid: False)
+    with pytest.raises(ReviewRunError) as exc:
+        rs.read_profile_file(str(custom))
+    assert exc.value.details == {"key": "permission_profile"}
+    custom.chmod(0o602)  # world-writable: refused even in a private group
+    monkeypatch.setattr(config_yaml, "private_group", lambda gid: True)
+    with pytest.raises(ReviewRunError):
+        rs.read_profile_file(str(custom))

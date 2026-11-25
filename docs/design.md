@@ -100,7 +100,7 @@ Minimum sibling versions: review-run needs claude-session and agent-spawn releas
 | `hooks` | hook execution and payload building |
 | `audit` | `audit.jsonl`, `log.jsonl`, `export` |
 | `runs` | `resume`, `wait`, the refresh of `show`, `cancel`, `reconcile` (finalization by another process, expiry, the label recovery, outbox redelivery), `prune`, `cron` |
-| `plugin/` | the bundled skill and permission profile, located with `importlib.resources.files('review_run') / 'plugin'` |
+| `plugin/` | the bundled skill and permission profile, located with `importlib.resources.files('review_run') / 'plugin'`; it is walked like any plugin directory (user-owned, not group- or world-writable), so an install or checkout made at umask 002 needs `chmod -R g-w`; the refusal has its own message and no copy is made (D-27) |
 
 ## Data model
 

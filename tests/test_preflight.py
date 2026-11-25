@@ -24,6 +24,7 @@ from review_run.config import Config, load_config
 from review_run.errors import ReviewRunError
 from review_run.gateway import CompletedRun, ToolMissing
 from review_run.store import Expect, NewRun, Store, lease_name
+from tests.fakebin._common import VERSIONS
 from tests.fakes import FakeBin
 
 REPO_PLUGIN = Path(__file__).resolve().parent.parent / "plugin"
@@ -52,6 +53,13 @@ class Routed:
     ) -> CompletedRun:
         self.calls.append(tuple(argv))
         self.envs.append(None if env is None else dict(env))
+        if (
+            tuple(argv[1:]) == ("--version",)
+            and argv[0] not in self.missing
+            and argv[0] in VERSIONS
+            and "--version" not in self.fb.scenario.get(argv[0], {})
+        ):  # an unscripted version probe is answered in-process (a spawn costs ~0.1 s)
+            return CompletedRun(tuple(argv), 0, f"{argv[0]} {VERSIONS[argv[0]]}\n", "")
         if argv[0] in self.missing:
             raise ToolMissing(f"{argv[0]} not found")
         child = self.fb.env()
@@ -246,9 +254,65 @@ def test_previous_not_done_is_exit_2_with_the_state(root: Path, state: str) -> N
 
 def test_parse_version() -> None:
     assert pre.parse_version("agent-spawn 0.38.1\n") == (0, 38, 1)
-    assert pre.parse_version("claude-session v1.2.3-rc1\nmore") == (1, 2, 3)
+    assert pre.parse_version("claude-session v1.2.3\nmore") == (1, 2, 3)
     for bad in ("", "\n", "agent-spawn", "agent-spawn 1.2", "1.2.3", "x " + "9" * 7 + ".1.1"):
         assert pre.parse_version(bad) is None
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "agent-spawn 0.38.1-rc1",
+        "agent-spawn 0.38.1+build",
+        "agent-spawn 0.38.1234567",
+        "agent-spawn 0.38.1.4",
+        "agent-spawn 0.38.1 extra",
+        "agent-spawn  0.38.1",
+        "agent-spawn V0.38.1",
+    ],
+)
+def test_parse_version_refuses_what_it_would_have_to_truncate_or_guess(bad: str) -> None:
+    assert pre.parse_version(bad) is None
+
+
+def test_parse_version_compares_the_tool_name() -> None:
+    assert pre.parse_version("agent-spawn 0.38.1", "agent-spawn") == (0, 38, 1)
+    assert pre.parse_version("claude-session 0.45.2", "agent-spawn") is None
+
+
+def test_a_version_line_naming_another_tool_fails_closed(fakebin: FakeBin, routed: Routed) -> None:
+    fakebin.script("agent-spawn", "--version", {"stdout_raw": "claude-session 0.99.0\n"})
+    err = fails(pre.check_tools)
+    assert (err.reason, err.tool, err.lower_code) == (
+        "lower_failed",
+        "agent-spawn",
+        "invalid_output",
+    )
+
+
+def test_a_prerelease_version_of_a_checked_tool_fails_closed(
+    fakebin: FakeBin, routed: Routed
+) -> None:
+    fakebin.script("claude-session", "--version", {"stdout_raw": "claude-session 0.45.2-rc1\n"})
+    err = fails(pre.check_tools)
+    assert (err.reason, err.tool, err.lower_code) == (
+        "lower_failed",
+        "claude-session",
+        "invalid_output",
+    )
+
+
+def test_a_version_probe_through_a_real_fake_sibling_spawns_and_parses(
+    fakebin: FakeBin, routed: Routed
+) -> None:
+    """One real spawn: the fake wrapper's own ``--version`` output is what the parser reads."""
+    done = gw.SystemGateway().run(
+        [fakebin.argv0("agent-spawn"), "--version"],
+        timeout=15.0,
+        env=fakebin.env(),
+        cwd=str(fakebin.dir),
+    )
+    assert pre.parse_version(done.stdout, "agent-spawn") == (0, 38, 1)
 
 
 def test_every_required_tool_is_resolved_and_passes(fakebin: FakeBin, routed: Routed) -> None:
@@ -442,7 +506,10 @@ def test_a_damaged_plugin_dir_refuses_the_run(
     else:
         os.mkfifo(plugin / "pipe", 0o644)
     err = fails(pre.plan_run, request(), config_of(tmp_path), root)
-    assert (err.code, err.details, err.exit_code) == ("config_invalid", {"key": "plugin_dirs"}, 2)
+    expected = (
+        None if damage in ("group_writable", "world_writable_dir") else {"key": "plugin_dirs"}
+    )
+    assert (err.code, err.details, err.exit_code) == ("config_invalid", expected, 2)
     assert "agent-spawn" not in routed.tools_called()[4:]  # the dry run never started
     nothing_allocated(root)
 
@@ -534,6 +601,47 @@ def test_lower_text_is_never_copied() -> None:
     err = fails(pre.map_dry_run, 12, json.dumps({"error": {"code": hostile, "message": hostile}}))
     assert hostile not in json.dumps(err.envelope())
     assert err.lower_code == "failed"
+
+
+@pytest.mark.parametrize(
+    "stdout",
+    [
+        "{}",
+        json.dumps({"dry_run": False, "would_refuse": None}),
+        json.dumps({"dry_run": 1, "would_refuse": None}),
+        json.dumps({"dry_run": True, "would_refuse": "third_party_cwd"}),
+        json.dumps({"dry_run": True, "would_refuse": "", "x": 1}),
+        json.dumps({"dry_run": True, "would_refuse": None, "error": {"code": "x"}}),
+        '{"dry_run": true, "would_refuse": null, "n": 1e999}',
+    ],
+)
+def test_dry_run_exit_0_needs_a_clean_plan(stdout: str) -> None:
+    err = fails(pre.map_dry_run, 0, stdout)
+    assert (err.reason, err.lower_code, err.tool) == (
+        "lower_failed",
+        "invalid_output",
+        "agent-spawn",
+    )
+
+
+def test_dry_run_exit_20_with_a_non_finite_number_is_lower_failed() -> None:
+    stdout = '{"dry_run": true, "would_refuse": "live", "n": 1e999}'
+    assert fails(pre.map_dry_run, 20, stdout).reason == "lower_failed"
+
+
+def test_a_failed_dry_run_keeps_the_envelopes_tool_and_lower_code() -> None:
+    err = fails(
+        pre.map_dry_run, 12, envelope("failed", tool="claude-session", lower_code="start_failed")
+    )
+    assert (err.reason, err.tool, err.lower_code) == (
+        "lower_failed",
+        "claude-session",
+        "start_failed",
+    )
+    err = fails(pre.map_dry_run, 12, envelope("failed", tool="claude-session"))
+    assert (err.tool, err.lower_code) == ("claude-session", "failed")
+    err = fails(pre.map_dry_run, 12, envelope("failed", tool="evil tool", lower_code="Bad Code"))
+    assert (err.tool, err.lower_code) == ("agent-spawn", "failed")
 
 
 # -- the whole of steps 1 and 2 -------------------------------------------------------------------
@@ -664,6 +772,47 @@ def test_an_unsafe_state_root_stops_before_the_resolve_step(
     err = fails(pre.plan_run, request(), config_of(tmp_path), root)
     assert err.reason == "state_unsafe"
     assert fakebin.calls("forgectl", "show") == []
+    assert list(real.iterdir()) == []
+
+
+def test_a_missing_tool_beats_an_unsafe_state_root(
+    fakebin: FakeBin, routed: Routed, plugin: Path, tmp_path: Path, root: Path
+) -> None:
+    real = tmp_path / "real"
+    real.mkdir()
+    root.symlink_to(real)
+    routed.missing.add("pr-comment")
+    err = fails(pre.plan_run, request(previous="rr-aaaa"), config_of(tmp_path), root)
+    assert (err.reason, err.tool) == ("tool_missing", "pr-comment")
+    assert list(real.iterdir()) == []  # the store was never opened or migrated
+
+
+def test_an_unknown_previous_under_an_unsafe_state_root_is_state_unsafe(
+    fakebin: FakeBin, routed: Routed, plugin: Path, tmp_path: Path, root: Path
+) -> None:
+    real = tmp_path / "real"
+    real.mkdir()
+    root.symlink_to(real)
+    err = fails(pre.plan_run, request(previous="rr-aaaa"), config_of(tmp_path), root)
+    assert err.reason == "state_unsafe"
+    assert list(real.iterdir()) == []
+
+
+def test_a_malformed_previous_under_an_unsafe_state_root_is_still_usage(
+    fakebin: FakeBin, routed: Routed, plugin: Path, tmp_path: Path, root: Path
+) -> None:
+    root.symlink_to(tmp_path)
+    err = fails(pre.plan_run, request(previous="x"), config_of(tmp_path), root)
+    assert err.exit_code == 2 and routed.calls == []
+
+
+def test_check_previous_does_not_open_a_store_under_an_unsafe_root(
+    tmp_path: Path, root: Path
+) -> None:
+    real = tmp_path / "real"
+    real.mkdir()
+    root.symlink_to(real)
+    assert fails(pre.check_previous, root, "rr-aaaa").reason == "state_unsafe"
     assert list(real.iterdir()) == []
 
 
@@ -939,3 +1088,429 @@ def test_cli_run_prints_profile_warnings_on_stderr(
     assert "warning: custom_profile_subagents" in res.err
     quiet = run_cli(capsys, "--config", str(cfg), "--quiet", "run", PR_URL)
     assert "warning" not in quiet.err
+
+
+# -- the documented order of the checks (mutation-check additions) -------------------------------
+# Each case breaks two adjacent steps at once; the earlier step's error must win.
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "expect"),
+    [
+        (
+            dict(pr="not a pr", model="-bad"),
+            ("the pull request argument has an invalid shape", None, None),
+        ),
+        (
+            dict(model="-bad", override_escalation=True),
+            ("flag for model: must not start with '-'", None, {"key": "model"}),
+        ),
+        (
+            dict(override_escalation=True, labels=("owner=x",)),
+            ("--override-escalation needs a human actor", None, None),
+        ),
+        (
+            dict(labels=("owner=x",), previous="rr-zzzz"),
+            ("a label uses a reserved key", "label_reserved", None),
+        ),
+    ],
+    ids=[
+        "pr-shape-then-flags",
+        "flags-then-override",
+        "override-then-labels",
+        "labels-then-previous",
+    ],
+)
+def test_the_usage_checks_run_in_the_documented_order(
+    fakebin: FakeBin, routed: Routed, plugin: Path, tmp_path: Path, root: Path,
+    kwargs: dict[str, Any], expect: tuple[str, str | None, dict[str, Any] | None],
+) -> None:  # fmt: skip
+    err = fails(pre.plan_run, request(**kwargs), config_of(tmp_path), root)
+    assert (err.message, err.reason, err.details) == expect
+    assert err.exit_code == 2 and routed.calls == []
+
+
+def test_tools_are_checked_before_the_state_root(
+    fakebin: FakeBin, routed: Routed, plugin: Path, tmp_path: Path, root: Path
+) -> None:
+    real = tmp_path / "real"
+    real.mkdir()
+    root.symlink_to(real)  # state_unsafe, but a tool is too old as well
+    fakebin.script("agent-spawn", "--version", {"version": "0.1.0"})
+    assert fails(pre.plan_run, request(), config_of(tmp_path), root).reason == "tool_too_old"
+
+
+def test_the_state_root_is_checked_before_the_resolve_step_even_when_the_pr_is_unknown(
+    fakebin: FakeBin, routed: Routed, plugin: Path, tmp_path: Path, root: Path
+) -> None:
+    real = tmp_path / "real"
+    real.mkdir()
+    root.symlink_to(real)
+    fakebin.use("forgectl", "not_found")
+    assert fails(pre.plan_run, request(), config_of(tmp_path), root).reason == "state_unsafe"
+
+
+def test_pr_too_long_is_reported_before_previous_mismatch(
+    fakebin: FakeBin, routed: Routed, plugin: Path, tmp_path: Path, root: Path
+) -> None:
+    long = "x" * 260
+    run_id = done_run(root, "done", pr="github.com/o/r#2")  # would be a mismatch as well
+    fakebin.configure("forgectl", hosts=["github.com"])
+    fakebin.script(
+        "forgectl", "show",
+        {"merge": {"pr": f"github.com/o/{long}#1", "repo": f"github.com/o/{long}"}},
+    )  # fmt: skip
+    err = fails(pre.plan_run, request(previous=run_id), config_of(tmp_path), root)
+    assert err.reason == "pr_too_long"
+
+
+def test_previous_mismatch_is_reported_before_the_repo_settings_and_skill(
+    fakebin: FakeBin, routed: Routed, plugin: Path, tmp_path: Path, root: Path
+) -> None:
+    run_id = done_run(root, "done", pr="github.com/o/r#2")
+    err = fails(
+        pre.plan_run, request(previous=run_id, skill="nope:nope"), config_of(tmp_path), root
+    )
+    assert err.reason == "previous_mismatch"
+
+
+def test_the_profile_is_chosen_before_the_skill_is_resolved(
+    fakebin: FakeBin, routed: Routed, plugin: Path, tmp_path: Path, root: Path
+) -> None:
+    bad = tmp_path / "profile.json"
+    bad.write_text("[]", encoding="utf-8")
+    bad.chmod(0o600)
+    config = config_of(tmp_path, f"permission_profile: {bad}\n")
+    err = fails(pre.plan_run, request(skill="nope:nope"), config, root)
+    assert (err.code, err.details) == ("config_invalid", {"key": "permission_profile"})
+
+
+def test_placeholders_are_checked_before_the_hash_walk(
+    fakebin: FakeBin, routed: Routed, plugin: Path, tmp_path: Path, root: Path
+) -> None:
+    (plugin / "CLAUDE.md").unlink()  # a missing placeholder ...
+    (plugin / "evil").symlink_to("CLAUDE.local.md")  # ... and a refused entry
+    err = fails(pre.plan_run, request(), config_of(tmp_path), root)
+    assert err.message == "a plugin directory lacks the placeholder entries"
+
+
+def test_the_plugin_steps_come_before_wtctl_and_wtctl_before_the_dry_run(
+    fakebin: FakeBin, routed: Routed, plugin: Path, tmp_path: Path, root: Path
+) -> None:
+    routed.missing.add("wtctl")
+    config = config_of(
+        tmp_path, f"repos:\n  {REPO}:\n    run_pr_code:\n      command: [make, test]\n"
+    )
+    assert fails(pre.plan_run, request(skill="nope:nope"), config, root).reason == "skill_not_found"
+    fakebin.use("agent-spawn", "dry_run_would_refuse")
+    err = fails(pre.plan_run, request(), config, root)
+    assert (err.reason, err.tool) == ("tool_missing", "wtctl")
+    assert fakebin.calls("agent-spawn", "launch") == []
+
+
+# -- mapping grammar and previous shape (mutation-check additions) -------------------------------
+
+
+@pytest.mark.parametrize(
+    ("reason", "tool"),
+    [
+        ("third_party_cwd", "agent-spawn"),
+        ("third_party_run", "agent-spawn"),
+        ("live", "agent-spawn"),
+        ("tearing_down", "agent-spawn"),
+        ("anything_else", "claude-session"),
+        ("a" * 64, "claude-session"),  # the longest closed word
+    ],
+)
+def test_every_agent_spawn_refusal_names_agent_spawn_and_others_claude_session(
+    reason: str, tool: str
+) -> None:
+    err = fails(pre.map_dry_run, 20, plan_doc(would_refuse=reason))
+    assert (err.reason, err.tool, err.lower_code) == ("lower_refused", tool, reason)
+
+
+@pytest.mark.parametrize(
+    "reason",
+    ["Live", "LIVE", "9live", "_live", "live-x", "live x", "live\n", "live!", "a" * 65, "", "é"],
+)
+def test_a_refusal_reason_outside_the_closed_word_grammar_is_lower_failed(reason: str) -> None:
+    err = fails(pre.map_dry_run, 20, plan_doc(would_refuse=reason))
+    assert (err.reason, err.lower_code) == ("lower_failed", "invalid_output")
+
+
+@pytest.mark.parametrize(
+    ("code", "lower", "expected"),
+    [
+        ("usage", None, "usage"),
+        ("Usage", None, "failed"),  # case variants are not words
+        ("9usage", "tmux_gone", "tmux_gone"),  # an invalid code falls back to the lower code
+        ("us-age", None, "failed"),
+        ("usage\n", None, "failed"),
+        ("a" * 64, None, "a" * 64),
+        ("a" * 65, None, "failed"),
+        (None, "b" * 64, "b" * 64),
+        (None, "b" * 65, "failed"),
+        (None, "Bad", "failed"),
+    ],
+)
+def test_the_lower_code_of_a_failed_dry_run_is_a_closed_word(
+    code: str | None, lower: str | None, expected: str
+) -> None:
+    fields = {k: v for k, v in (("lower_code", lower),) if v is not None}
+    stdout = envelope(code, **fields) if code is not None else envelope("-", **fields)
+    err = fails(pre.map_dry_run, 3, stdout)
+    assert (err.reason, err.lower_code) == ("lower_failed", expected)
+
+
+def test_a_run_id_prefix_longer_than_eight_characters_is_usage_without_a_store(
+    root: Path,
+) -> None:
+    assert fails(pre.check_previous, root, "rr-" + "a" * 8).exit_code == 10
+    assert fails(pre.check_previous, root, "rr-" + "a" * 9).exit_code == 2
+    assert not root.exists()
+
+
+# -- skill lookup, plugin directories, previous (mutation-check additions) -----------------------
+
+
+@pytest.mark.parametrize("skill", ["other:deep/../deep", "other:../skills/deep", "other:./deep"])
+def test_a_skill_name_with_path_syntax_is_not_found_even_when_the_path_exists(
+    plugin: Path, tmp_path: Path, skill: str
+) -> None:
+    other = extra_plugin(tmp_path)  # skills/deep/SKILL.md exists, and so does each path above
+    assert os.path.isfile(other / "skills" / "deep" / ".." / "deep" / "SKILL.md")
+    err = fails(pre.resolve_skill, skill, [str(other.resolve())])
+    assert err.reason == "skill_not_found"
+
+
+def test_an_unknown_plugin_does_not_fall_back_to_the_bundled_plugin(
+    plugin: Path, tmp_path: Path
+) -> None:
+    assert (plugin / "skills" / "review-pr" / "SKILL.md").is_file()
+    other = extra_plugin(tmp_path)
+    for dirs in ([], [str(other.resolve())]):
+        err = fails(pre.resolve_skill, "nope:review-pr", dirs)
+        assert err.reason == "skill_not_found"
+
+
+def test_the_passed_plugin_directories_are_realpaths_in_sorted_order(
+    plugin: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    early = tmp_path / "aaa-first"
+    extra_plugin(tmp_path).rename(early)  # sorts before the bundled copy
+    link = tmp_path / "zzz-link"
+    link.symlink_to(plugin)
+    monkeypatch.setattr(rs, "bundled_plugin_dir", lambda: link)  # reached through a link
+    passed = pre.plugin_dirs_for("other:deep", [str(early.resolve())])
+    assert passed == (str(early.resolve()), str(plugin.resolve()))
+
+
+def test_a_hash_refusal_names_its_closed_reason_in_the_message(
+    plugin: Path,
+) -> None:
+    (plugin / "x-link").symlink_to("CLAUDE.md")
+    assert "(symlink)" in fails(pre.hash_plugin_dirs, [str(plugin)]).message
+    (plugin / "x-link").unlink()
+    other = extra_plugin(tmp_path_of(plugin), "w")
+    (other / "CLAUDE.md").chmod(0o664)
+    assert "(writable)" in fails(pre.hash_plugin_dirs, [str(other)]).message
+    assert fails(pre.hash_plugin_dirs, [str(other)]).details == {"key": "plugin_dirs"}
+
+
+def tmp_path_of(plugin: Path) -> Path:
+    return plugin.parent
+
+
+def test_a_group_writable_bundled_plugin_has_its_own_message(plugin: Path) -> None:
+    (plugin / "CLAUDE.md").chmod(0o664)  # an install made at umask 002
+    err = fails(pre.hash_plugin_dirs, [str(plugin.resolve())])
+    assert err.code == "config_invalid" and err.details is None and err.exit_code == 2
+    assert "the bundled plugin directory is writable by group or others" in err.message
+    assert "chmod -R g-w" in err.message and "plugin_dirs" not in err.message
+    (plugin / "CLAUDE.md").chmod(0o644)
+    (plugin / "skills").chmod(0o775)
+    assert (
+        "the bundled plugin directory is writable"
+        in fails(pre.hash_plugin_dirs, [str(plugin.resolve())]).message
+    )
+
+
+def test_a_foreign_owned_bundled_plugin_has_its_own_message(
+    plugin: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(os, "geteuid", lambda: os.getuid() + 1)
+    err = fails(pre.hash_plugin_dirs, [str(plugin.resolve())])
+    assert "the bundled plugin directory is owned by someone else" in err.message
+    assert err.details is None
+
+
+def test_a_symlink_in_the_bundled_plugin_keeps_the_generic_message(plugin: Path) -> None:
+    (plugin / "x-link").symlink_to("CLAUDE.md")
+    err = fails(pre.hash_plugin_dirs, [str(plugin.resolve())])
+    assert err.details == {"key": "plugin_dirs"} and "(symlink)" in err.message
+
+
+def test_previous_that_is_reserved_but_has_no_run_record_is_exit_10(root: Path) -> None:
+    with Store.open(root) as store:
+        run_id = store.reserve_id()
+    err = fails(pre.check_previous, root, run_id)
+    assert (err.code, err.exit_code) == ("not_found", 10)
+
+
+@pytest.mark.parametrize("code", [1, 3, 11, 13, 21])
+def test_a_termctl_envelope_is_no_tmux_only_for_exit_2_or_12(code: int) -> None:
+    err = fails(pre.map_dry_run, code, envelope("failed", tool="termctl", lower_code="tmux_gone"))
+    assert (err.reason, err.tool, err.lower_code) == ("lower_failed", "termctl", "tmux_gone")
+
+
+@pytest.mark.parametrize("code", [1, 2, 3, 13])
+def test_tool_missing_passes_through_only_for_exit_12(code: int) -> None:
+    err = fails(pre.map_dry_run, code, envelope("tool_missing", tool="claude-session"))
+    assert (err.reason, err.tool, err.lower_code) == (
+        "lower_failed", "claude-session", "tool_missing",
+    )  # fmt: skip
+
+
+@pytest.mark.parametrize(
+    ("named", "expected"),
+    [
+        ("forgectl", "forgectl"),
+        ("pr-comment", "pr-comment"),
+        ("agent-spawn", "agent-spawn"),
+        ("claude-session", "claude-session"),
+        ("wtctl", "wtctl"),
+        ("some-other-tool", "agent-spawn"),  # an unknown name is never reported as missing
+        ("Claude-Session", "agent-spawn"),
+    ],
+)
+def test_a_tool_missing_envelope_names_only_a_known_sibling(named: str, expected: str) -> None:
+    err = fails(pre.map_dry_run, 12, envelope("tool_missing", tool=named))
+    assert (err.reason, err.tool) == ("tool_missing", expected)
+
+
+@pytest.mark.parametrize("stdout", ['{"error": "boom"}', '{"error": []}', '{"error": null}', "[]"])
+def test_a_dry_run_envelope_whose_error_is_not_an_object_is_lower_failed(stdout: str) -> None:
+    err = fails(pre.map_dry_run, 3, stdout)
+    assert (err.reason, err.lower_code) == ("lower_failed", "failed")
+
+
+def test_the_dry_runs_scratch_directory_and_files_are_private_while_it_exists(
+    fakebin: FakeBin, routed: Routed, plugin: Path, tmp_path: Path, root: Path
+) -> None:
+    seen: dict[str, int] = {}
+    real_run = routed.run
+
+    def spy(argv: Sequence[str], **kw: Any) -> CompletedRun:
+        if argv[:2] == ["agent-spawn", "launch"]:
+            profile = Path(argv[list(argv).index("--permission-profile") + 1])
+            seen["dir"] = profile.parent.stat().st_mode & 0o777
+            seen["tmp"] = profile.parent.parent.stat().st_mode & 0o777
+            seen["file"] = profile.stat().st_mode & 0o777
+        return real_run(argv, **kw)
+
+    routed.run = spy  # type: ignore[method-assign]
+    pre.plan_run(request(), config_of(tmp_path), root)
+    assert seen == {"dir": 0o700, "tmp": 0o700, "file": 0o600}
+
+
+def test_the_dry_runs_scratch_directory_is_removed_when_the_dry_run_fails(
+    fakebin: FakeBin, routed: Routed, plugin: Path, tmp_path: Path, root: Path
+) -> None:
+    fakebin.use("agent-spawn", "dry_run_would_refuse")
+    fails(pre.plan_run, request(), config_of(tmp_path), root)
+    assert list((root / "tmp").iterdir()) == []
+    routed.missing.add("agent-spawn")  # the gateway raising instead of returning
+    routed.calls.clear()
+    settings, profile = _dry_run_inputs(tmp_path, plugin)
+    err = fails(
+        pre.launch_dry_run, settings, profile, repo=REPO, pr=PR, request=request(), root=root
+    )
+    assert err.reason == "tool_missing" and list((root / "tmp").iterdir()) == []
+
+
+def _dry_run_inputs(tmp_path: Path, plugin: Path) -> tuple[rs.RunSettings, rs.ProfilePlan]:
+    resolved = config_of(tmp_path).resolve(REPO, {})
+    profile, _ = rs.effective_profile(resolved.values)
+    dirs = [str(plugin.resolve())]
+    settings = rs.build_settings(
+        resolved, plugin_dirs=dirs, plugin_dirs_hash=pre.hash_plugin_dirs(dirs), profile=profile
+    )
+    return settings, profile
+
+
+# -- what the dry run is asked and how its failures map (mutation-check additions) ---------------
+
+
+def _spy_launch(routed: Routed, raises: Exception | None = None) -> None:
+    """Make the ``agent-spawn launch`` call raise ``raises`` (other calls pass through)."""
+    real_run = routed.run
+
+    def spy(argv: Sequence[str], **kw: Any) -> CompletedRun:
+        if raises is not None and argv[:2] == ["agent-spawn", "launch"]:
+            raise raises
+        return real_run(argv, **kw)
+
+    routed.run = spy  # type: ignore[method-assign]
+
+
+def test_the_dry_run_carries_the_actor_decision_ids_and_the_normalized_pr(
+    fakebin: FakeBin, routed: Routed, plugin: Path, tmp_path: Path, root: Path
+) -> None:
+    pre.plan_run(
+        request(actor="human:me", decision_ids=("d1", "d2"), labels=("team=x",)),
+        config_of(tmp_path),
+        root,
+    )
+    argv = list(fakebin.calls("agent-spawn", "launch")[0].argv)
+    assert argv[argv.index("--actor") + 1] == "human:me"
+    assert [a for a in argv if a.startswith("--decision-id")] == [
+        "--decision-id=d1",
+        "--decision-id=d2",
+    ]
+    labels = [argv[i + 1] for i, a in enumerate(argv) if a == "--label"]
+    assert f"pr={PR}" in labels and f"repo={REPO}" in labels and "team=x" in labels
+    assert f"run={pre.PLACEHOLDER_RUN_ID}" in labels  # the dry run names no real run
+
+
+def test_a_decision_id_that_looks_like_an_option_is_one_dry_run_argv_item(
+    fakebin: FakeBin, routed: Routed, plugin: Path, tmp_path: Path, root: Path
+) -> None:
+    pre.plan_run(request(decision_ids=("-x",)), config_of(tmp_path), root)
+    argv = list(fakebin.calls("agent-spawn", "launch")[0].argv)
+    assert "--decision-id=-x" in argv and "-x" not in argv and "--decision-id" not in argv
+
+
+def test_agent_spawn_missing_at_the_dry_run_is_tool_missing(
+    fakebin: FakeBin, routed: Routed, plugin: Path, tmp_path: Path, root: Path
+) -> None:
+    _spy_launch(routed, ToolMissing("agent-spawn not found"))
+    err = fails(pre.plan_run, request(), config_of(tmp_path), root)
+    assert (err.reason, err.tool, err.exit_code) == ("tool_missing", "agent-spawn", 12)
+    assert list((root / "tmp").iterdir()) == []
+
+
+def test_a_gateway_failure_at_the_dry_run_keeps_its_lower_code(
+    fakebin: FakeBin, routed: Routed, plugin: Path, tmp_path: Path, root: Path
+) -> None:
+    _spy_launch(routed, gw.CallTimeout("t"))
+    err = fails(pre.plan_run, request(), config_of(tmp_path), root)
+    assert (err.reason, err.tool, err.lower_code) == ("lower_failed", "agent-spawn", "timeout")
+    assert list((root / "tmp").iterdir()) == []
+
+
+def test_cli_run_prints_profile_warnings_on_stderr_only(
+    capsys: pytest.CaptureFixture[str], fakebin: FakeBin, routed: Routed, plugin: Path,
+    tmp_path: Path,
+) -> None:  # fmt: skip
+    from tests.helpers import run_cli
+
+    custom = tmp_path / "p.json"
+    custom.write_text("{}", encoding="utf-8")
+    custom.chmod(0o600)
+    cfg = tmp_path / "c.yaml"
+    cfg.write_text(f"permission_profile: {custom}\nsubagents: true\n", encoding="utf-8")
+    cfg.chmod(0o600)
+    res = run_cli(capsys, "--json", "--config", str(cfg), "run", PR_URL)
+    assert "custom_profile_subagents" in res.err
+    assert "custom_profile_subagents" not in res.out
+    assert res.envelope()["error"]["code"] == "internal"  # stdout is still the one envelope
