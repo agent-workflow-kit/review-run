@@ -28,6 +28,10 @@ FORBIDDEN_MODULES = {
     "pexpect",
     "sh",
     "plumbum",
+    "_posixsubprocess",
+    "ctypes",
+    "webbrowser",
+    "concurrent.futures.process",
 }
 FORBIDDEN_OS = {
     "system", "popen", "fork", "forkpty", "execv", "execve", "execvp", "execvpe", "execl",
@@ -35,6 +39,11 @@ FORBIDDEN_OS = {
     "spawnve", "spawnvp", "spawnvpe", "posix_spawn", "posix_spawnp",
 }  # fmt: skip
 FORBIDDEN_NAMES = {"__import__", "import_module"}  # dynamic imports dodge the scan
+ASYNC_SPAWN = {
+    "create_subprocess_exec", "create_subprocess_shell", "subprocess_exec", "subprocess_shell",
+}  # fmt: skip
+#: Names that must not even appear as a string constant handed to getattr.
+GETATTR_FORBIDDEN = FORBIDDEN_OS | FORBIDDEN_NAMES | ASYNC_SPAWN | {"subprocess", "Popen"}
 
 
 def violations(source: str) -> list[str]:
@@ -54,20 +63,32 @@ def violations(source: str) -> list[str]:
             if module in FORBIDDEN_MODULES or module.split(".")[0] in FORBIDDEN_MODULES:
                 found.append(f"from {module} import ...")
             found += [
-                f"from {module} import {a.name}" for a in node.names if a.name in FORBIDDEN_NAMES
+                f"from {module} import {a.name}"
+                for a in node.names
+                if a.name in FORBIDDEN_NAMES | ASYNC_SPAWN
+                or f"{module}.{a.name}" in FORBIDDEN_MODULES
             ]
             if module == "asyncio" and any(a.name == "subprocess" for a in node.names):
                 found.append("from asyncio import subprocess")
+            if module == "os" and any(a.name == "*" for a in node.names):
+                found.append("from os import *")
             if module == "os":
                 found += [f"from os import {a.name}" for a in node.names if a.name in FORBIDDEN_OS]
         elif isinstance(node, ast.Attribute):
             if isinstance(node.value, ast.Name) and node.value.id in os_aliases:
                 if node.attr in FORBIDDEN_OS:
                     found.append(f"os.{node.attr}")
-            if node.attr in FORBIDDEN_NAMES:
+            if node.attr in FORBIDDEN_NAMES | ASYNC_SPAWN:
                 found.append(node.attr)
-        elif isinstance(node, ast.Name) and node.id in FORBIDDEN_NAMES:
+        elif isinstance(node, ast.Name) and node.id in FORBIDDEN_NAMES | ASYNC_SPAWN:
             found.append(node.id)
+        elif isinstance(node, ast.Call) and getattr(node.func, "id", None) == "getattr":
+            if (
+                len(node.args) >= 2
+                and isinstance(node.args[1], ast.Constant)
+                and node.args[1].value in GETATTR_FORBIDDEN
+            ):
+                found.append(f"getattr(..., {node.args[1].value!r})")
     return sorted(set(found))
 
 
@@ -104,6 +125,26 @@ def test_no_module_outside_the_gateway_spawns_a_process(path: Path) -> None:
         "import os\nos.posix_spawn('/x', [], {})",
         "__import__('subprocess')",
         "import importlib\nimportlib.import_module('subprocess')",
+        "import asyncio\nasyncio.create_subprocess_exec('x')",
+        "import asyncio\nasyncio.create_subprocess_shell('x')",
+        "from asyncio import create_subprocess_exec",
+        "import asyncio\nasyncio.get_event_loop().subprocess_exec(None, 'x')",
+        "loop.subprocess_shell(None, 'x')",
+        "import _posixsubprocess",
+        "from _posixsubprocess import fork_exec",
+        "import ctypes",
+        "from ctypes import CDLL",
+        "import webbrowser",
+        "import concurrent.futures.process",
+        "from concurrent.futures import process",
+        "from concurrent.futures.process import ProcessPoolExecutor",
+        "import multiprocessing.pool",
+        "from os import *",
+        "import os\ngetattr(os, 'system')('x')",
+        "import os\ngetattr(os, 'posix_spawn')",
+        "getattr(__builtins__, '__import__')('subprocess')",
+        "import asyncio\ngetattr(asyncio, 'create_subprocess_exec')",
+        "import importlib\ngetattr(importlib, 'import_module')",
     ],
 )
 def test_the_scan_catches_every_way_in(source: str) -> None:
@@ -116,6 +157,8 @@ def test_the_scan_catches_every_way_in(source: str) -> None:
         "import os\nos.getpid()\nos.path.join('a', 'b')",
         "# import subprocess\nx = 'subprocess.run'",
         "from review_run import gateway\ngateway.run(['x'], timeout=1)",
+        "from concurrent.futures import ThreadPoolExecutor",
+        "getattr(obj, 'name')",
     ],
 )
 def test_the_scan_allows_ordinary_code(source: str) -> None:
