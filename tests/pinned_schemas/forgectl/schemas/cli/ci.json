@@ -1,0 +1,28 @@
+{
+  "x-pinned-from": {
+    "sibling": "forgectl",
+    "version": "0.56.0",
+    "source": "schemas/cli/ci.json"
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "forgectl/cli/ci.json",
+  "title": "ci output",
+  "type": "object",
+  "properties": {
+    "pr": {
+      "$ref": "../defs.json#/$defs/pr"
+    },
+    "head_sha": {
+      "$ref": "../defs.json#/$defs/sha"
+    },
+    "ci": {
+      "$ref": "../defs.json#/$defs/ci"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "pr",
+    "head_sha",
+    "ci"
+  ]
+}
