@@ -323,15 +323,15 @@ def _check_inputs_result(action: str, inputs: Mapping[str, Any], result: Mapping
         _run_inputs(inputs, action)
         _outcome(result, _OUTCOME_STATUS, _EXIT_CODES)
         if result["status"] == "vetoed" and (
-            action != "run" or result["exit_code"] != 11 or result["reason"] is not None
+            result["exit_code"] != 11 or result["reason"] is not None
         ):
-            raise ValueError("vetoed is a run with reason null and exit_code 11")
+            raise ValueError("vetoed has reason null and exit_code 11")
     elif action == "cancel":
         _nullable(inputs["agent_id"], _agent_id)
         _one_of(inputs["state"], _STATES, "state")
         _outcome(result, _OUTCOME_STATUS, _EXIT_CODES)
         if result["status"] == "vetoed":
-            raise ValueError("only a run is vetoed")
+            raise ValueError("only a run or a resume is vetoed")
     elif action == "finalize":
         _one_of(inputs["cause"], _FINALIZE_CAUSES, "cause")
         _one_of(inputs["finalized_by"], _FINALIZED_BY, "finalized_by")
@@ -365,9 +365,9 @@ def _check_inputs_result(action: str, inputs: Mapping[str, Any], result: Mapping
 def validate_audit_record(record: Mapping[str, Any]) -> None:
     """Raise ``ValueError`` unless ``record`` is a record of ``schemas/audit.json``: the closed
     key sets, the value grammars (patterns, types, enums) and the per-action rules (the
-    ``finalize`` actor, ``vetoed`` is a ``run`` with exit code 11, a non-null target for every
-    action but ``prune``). Everything the writer would refuse is refused here, so the writer
-    never writes a record that ``export`` or the schema would drop."""
+    ``finalize`` actor, ``vetoed`` is a ``run`` or ``resume`` with exit code 11, a non-null
+    target for every action but ``prune``). Everything the writer would refuse is refused here,
+    so the writer never writes a record that ``export`` or the schema would drop."""
     if set(record) != _RECORD_KEYS:
         raise ValueError("audit record keys are not the closed set")
     _check_strings(record, "audit")

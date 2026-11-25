@@ -16,6 +16,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+import jsonschema
 import pytest
 
 from review_run import audit
@@ -32,6 +33,7 @@ from review_run.audit import (
 )
 from review_run.errors import ReviewRunError
 from review_run.store import NewEvent, Store, default_state_root
+from tests.conftest import validate_against
 from tests.helpers import run_cli
 from tests.test_audit import (
     CALLER,
@@ -219,6 +221,55 @@ def test_vetoed_is_only_a_run_with_exit_11_and_no_reason() -> None:
     for bad in ({**ok, "exit_code": 0}, {**ok, "reason": "timeout"}):
         with pytest.raises(ValueError):
             validate_audit_record(mutated("run", setter(("result",), bad)))
+
+
+def test_a_resume_pair_closes_vetoed_with_exit_11_and_matches_the_schema(
+    root: Path, writer: AuditWriter
+) -> None:
+    inputs = {k: v for k, v in RUN_INPUTS.items() if k != "override_escalation"}
+    attempt = writer.begin("resume", caller=CALLER, run_id=RUN, pr=PR, inputs=inputs)
+    vetoed = {"status": "vetoed", "reason": None, "exit_code": 11}
+    writer.end("resume", attempt, caller=CALLER, run_id=RUN, pr=PR, inputs=inputs, result=vetoed)
+    recs = [json.loads(line) for line in writer.path.read_text().splitlines()]
+    assert [r["result"]["status"] for r in recs] == ["attempted", "vetoed"]
+    for rec in recs:
+        validate_against("audit.json", rec)
+    for bad in ({**vetoed, "exit_code": 0}, {**vetoed, "reason": "timeout"}):
+        with pytest.raises(ValueError):
+            writer.end(
+                "resume", attempt, caller=CALLER, run_id=RUN, pr=PR, inputs=inputs, result=bad
+            )
+
+
+def test_a_cancel_is_never_vetoed() -> None:
+    cancel = make_audit_record(
+        "cancel",
+        caller=CALLER,
+        run_id=RUN,
+        pr=PR,
+        inputs={"agent_id": "ag-abcdefgh", "state": "running"},
+        result=DONE,
+    )
+    cancel["result"] = {"status": "vetoed", "reason": None, "exit_code": 11}
+    with pytest.raises(ValueError):
+        validate_audit_record(cancel)
+    with pytest.raises(jsonschema.ValidationError):
+        validate_against("audit.json", cancel)
+
+
+def test_a_file_without_owner_read_write_is_state_unsafe_and_nothing_is_written(
+    root: Path, writer: AuditWriter
+) -> None:
+    root.mkdir(mode=0o700)
+    path = root / "audit.jsonl"
+    path.write_bytes(b"")
+    path.chmod(0o200)
+    with pytest.raises(ReviewRunError) as err:
+        writer.append(base_record("prune"))
+    unsafe(err)
+    assert err.value.exit_code == 12
+    path.chmod(0o600)
+    assert path.read_bytes() == b""
 
 
 def test_cancel_resume_and_teardown_values_are_checked() -> None:
