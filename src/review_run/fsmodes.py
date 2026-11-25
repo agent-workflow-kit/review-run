@@ -44,7 +44,10 @@ def ensure_private_dir(path: Path | str) -> None:
         try:
             fd = os.open(path, flags)
         except FileNotFoundError:
-            os.mkdir(path, DIR_MODE)
+            try:
+                os.mkdir(path, DIR_MODE)
+            except FileExistsError:
+                pass  # another process created it first: open and verify it like any existing one
             fd = os.open(path, flags)
     except OSError as exc:
         # A symlink (ELOOP or ENOTDIR), a file, a missing parent or no permission. Anything
