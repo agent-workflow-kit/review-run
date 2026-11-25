@@ -767,7 +767,7 @@ def test_hunkless_section_with_counts_and_no_marker_is_a_mismatch() -> None:
     diff = "diff --git a/m b/m\nold mode 100644\nnew mode 100755\n"
     f = fails([fe("m", add=3, dele=0)], diff)
     assert (f.reason, f.lower_code) == ("prefetch_failed", "diff_files_mismatch")
-    f = fails([fe("m", add=None, dele=0)], diff)
+    f = fails([fe("m", add=None, dele=3)], diff)
     assert f.lower_code == "diff_files_mismatch"
 
 
@@ -800,3 +800,38 @@ def test_path_length_limit_is_4096_characters() -> None:
     prev = "o/" + "q" * 4095
     diff = f"diff --git a/{prev} b/a\nrename from {prev}\nrename to a\n"
     assert fails([fe("a", "renamed", prev, 0, 0)], diff).lower_code == "diff_files_mismatch"
+
+
+# --- lone surrogates at the hard ceiling and partial-null counts -------------------------------
+
+
+@pytest.mark.parametrize("lone", ["\ud800", "\udc80", "\udfff"])
+def test_hard_ceiling_never_raises_unicode_error_for_lone_surrogates(lone: str) -> None:
+    f = fails([], lone * 3, hard_ceiling_bytes=8)
+    assert (f.reason, f.tool, f.lower_code) == ("too_large", "forgectl", "hard_ceiling")
+
+
+def test_hard_ceiling_counts_a_lone_surrogate_as_three_bytes() -> None:
+    assert fails([], "\ud800" * 3, hard_ceiling_bytes=8).lower_code == "hard_ceiling"
+    # exactly at the ceiling passes the ceiling check (then fails on the missing sections)
+    f = fails([], "\ud800" * 3, hard_ceiling_bytes=9)
+    assert f.lower_code == "diff_files_mismatch"
+
+
+_RENAME = "diff --git a/o b/a\nrename from o\nrename to a\n"
+
+
+@pytest.mark.parametrize("add,dele", [(None, 0), (0, None), (0, 0)])
+def test_hunkless_rename_with_zero_or_null_zero_counts_is_empty(
+    add: int | None, dele: int | None
+) -> None:
+    m = build([fe("a", "renamed", "o", add, dele)], _RENAME)
+    assert m.to_json()[0]["disposition"] == "empty"
+
+
+@pytest.mark.parametrize("add,dele", [(0, 3), (None, 3), (3, None), (2, 1)])
+def test_hunkless_section_with_counted_change_is_a_mismatch(
+    add: int | None, dele: int | None
+) -> None:
+    f = fails([fe("a", "renamed", "o", add, dele)], _RENAME)
+    assert (f.reason, f.lower_code) == ("prefetch_failed", "diff_files_mismatch")

@@ -495,14 +495,15 @@ def build_manifest(
     parts all come out empty (a cap smaller than one character) is skipped as ``size_cap``.
     Sizes are UTF-8 bytes of the sanitized text. Nothing provided with something skipped raises
     ``too_large``; nothing provided with only ``binary`` and ``empty`` entries (or no files at
-    all) is a valid, empty result. A section with no hunk is ``binary`` (a binary marker, or both
-    counts null), ``empty`` (both counts 0) or a ``diff_files_mismatch`` (any other counts: the
-    diff lacks the patch forgectl counted). A path or previous path above 4096 characters is a
+    all) is a valid, empty result. A section with no hunk is ``binary`` (a binary marker, or
+    both counts null), ``empty`` (no change counted: each count 0 or null) or a
+    ``diff_files_mismatch`` (a count above 0: the diff lacks the patch forgectl counted). A path
+    or previous path above 4096 characters is a
     ``diff_files_mismatch`` too (it could not be written to ``manifest.json``).
     """
     if len(files) > MAX_FILES_IN_PR:
         raise _too_large("too_many_files")
-    if len(diff.encode("utf-8", errors="surrogateescape")) > hard_ceiling_bytes:
+    if len(diff.encode("utf-8", errors="surrogatepass")) > hard_ceiling_bytes:
         raise PrefetchFailure(TOO_LARGE, tool="forgectl", lower_code="hard_ceiling")
     raws = _split_sections(diff, len(files))
     headers = []
@@ -516,8 +517,7 @@ def build_manifest(
         if any(p != entry.path for p in header.new) or any(p != want_old for p in header.old):
             raise _mismatch()
         if not header.has_hunk and not header.binary_marker:
-            counts = (entry.additions, entry.deletions)
-            if counts != (None, None) and counts != (0, 0):
+            if (entry.additions or 0) + (entry.deletions or 0) > 0:
                 raise _mismatch(f"file {number} has counted changes but no patch")
         headers.append(header)
 
