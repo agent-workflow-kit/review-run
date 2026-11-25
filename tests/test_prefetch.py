@@ -524,13 +524,19 @@ def test_prefetch_mapping_table_covers_every_refusal_reason(
     assert failure.lower_reason == reason
 
 
-@pytest.mark.parametrize(("exc", "lower"), GATEWAY_ERRORS)
-@pytest.mark.parametrize("command", ["draft", "files", "diff", "ci"])
+# the (diff, output_too_large) pair maps to too_large instead (own test below)
+READ_FAILURES = [
+    pytest.param(command, exc, lower, id=f"{command}-{lower}")
+    for command in ("draft", "files", "diff", "ci")
+    for exc, lower in GATEWAY_ERRORS
+    if not (command == "diff" and lower == "output_too_large")
+]
+
+
+@pytest.mark.parametrize(("command", "exc", "lower"), READ_FAILURES)
 def test_prefetch_maps_every_gateway_failure_on_every_read(
     fake_gateway: FakeGateway, command: str, exc: gw.GatewayError, lower: str
 ) -> None:
-    if command == "diff" and lower == "output_too_large":
-        pytest.skip("the diff read maps the output cap to too_large (own test below)")
     script_all_ok(fake_gateway)
     tool = "pr-comment" if command == "draft" else "forgectl"
     override(fake_gateway, command, lambda: exc)
@@ -726,10 +732,7 @@ def test_a_lone_surrogate_in_the_diff_never_escapes_as_an_encoding_error(
     fake_gateway: FakeGateway,
 ) -> None:
     script_all_ok(fake_gateway, diff="a\ud800b")
-    try:
-        fetch()
-    except pf.PrefetchFailure as failure:
-        assert failure.lower_code == "invalid_output"
+    assert fetch().diff == "a\ud800b"  # surrogatepass accepts it
 
 
 def test_a_diff_over_the_gateway_output_cap_is_too_large(fake_gateway: FakeGateway) -> None:
