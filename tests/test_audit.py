@@ -259,7 +259,9 @@ def test_untrusted_text_is_refused_not_written(root: Path, writer: AuditWriter) 
         LogWriter(root).write("warning", f"line\x1b[31m {MARKER}")
     with pytest.raises(ValueError):
         writer.append({"ts": "2026-01-01T00:00:00Z"})
-    assert not writer.path.exists() or MARKER not in writer.path.read_text()
+    log_path = root / "log.jsonl"
+    for path in (writer.path, log_path):
+        assert not path.exists() or MARKER not in path.read_text()
 
 
 def test_oversize_record_is_refused(writer: AuditWriter) -> None:
@@ -375,7 +377,7 @@ def test_a_killed_writer_leaves_valid_jsonl_and_the_next_append_works(
 ) -> None:
     go = tmp_path / "go"
     go.write_text("go")
-    proc = spawn(root, go, 10_000, "k", "slow")
+    proc = spawn(root, go, 10_000, "kill", "slow")
     assert proc.stdout is not None
     for _ in range(5):  # wait until some records exist
         assert proc.stdout.readline()
@@ -489,7 +491,7 @@ def test_flush_refuses_a_record_of_another_event(root: Path, writer: AuditWriter
     rec = make_event("rr-abcdefgh-post-run-1").audit[0]
     with pytest.raises(ValueError):
         writer.append_event_records("rr-zzzzzzzz-post-run-1", [rec])
-    assert not writer.path.exists() or lines_of(writer.path) == []
+    assert not writer.path.exists()  # nothing valid to write: the file is not even created
 
 
 # -- export ----------------------------------------------------------------------------------
