@@ -360,10 +360,11 @@ def test_an_audit_failure_does_not_stop_the_hooks_and_is_raised_afterwards(
     fake_gateway.script(SH, ok())
     _, event_id = seed(store)
 
-    def broken(self: AuditWriter, events: Any) -> int:
+    def broken(self: AuditWriter, events: Any) -> Any:
         raise OSError("disk full")
 
-    monkeypatch.setattr(AuditWriter, "append_events", broken)
+    # flush_outbox writes through append_events_report (append_events wraps it)
+    monkeypatch.setattr(AuditWriter, "append_events_report", broken)
     with pytest.raises(OSError):
         deliver(store, root, post_run_config({"cmd": "n"}))
     assert events_of(fake_gateway) == [event_id]
