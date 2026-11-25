@@ -1,0 +1,12 @@
+{"ts":"2026-01-01T12:00:00.000Z","level":"info","event":"phase_change","message":"phase_change ok","run_id":"rr-abcdefgh","pr":"host/o/r#7","phase":"session","state":"running"}
+{"ts":"2026-01-01T12:00:00.000Z","level":"info","event":"state_change","message":"state_change ok","run_id":"rr-abcdefgh","pr":"host/o/r#7","phase":"session","state":"running"}
+{"ts":"2026-01-01T12:00:00.000Z","level":"info","event":"warning","message":"warning ok","run_id":"rr-abcdefgh","pr":"host/o/r#7","phase":"session","state":"running"}
+{"ts":"2026-01-01T12:00:00.000Z","level":"info","event":"normalization","message":"normalization ok","run_id":"rr-abcdefgh","pr":"host/o/r#7","phase":"session","state":"running"}
+{"ts":"2026-01-01T12:00:00.000Z","level":"info","event":"sibling_error","message":"sibling_error ok","run_id":"rr-abcdefgh","pr":"host/o/r#7","phase":"session","state":"running"}
+{"ts":"2026-01-01T12:00:00.000Z","level":"info","event":"hook_failed","message":"hook_failed ok","run_id":"rr-abcdefgh","pr":"host/o/r#7","phase":"session","state":"running"}
+{"ts":"2026-01-01T12:00:00.000Z","level":"info","event":"hook_skipped","message":"hook_skipped ok","run_id":"rr-abcdefgh","pr":"host/o/r#7","phase":"session","state":"running"}
+{"ts":"2026-01-01T12:00:00.000Z","level":"info","event":"teardown_retry","message":"teardown_retry ok","run_id":"rr-abcdefgh","pr":"host/o/r#7","phase":"session","state":"running"}
+{"ts":"2026-01-01T12:00:00.000Z","level":"info","event":"reconcile","message":"reconcile ok","run_id":"rr-abcdefgh","pr":"host/o/r#7","phase":"session","state":"running"}
+{"ts":"2026-01-01T12:00:00.000Z","level":"info","event":"throwaway_leaked","message":"throwaway_leaked ok","run_id":"rr-abcdefgh","pr":"host/o/r#7","phase":"session","state":"running"}
+{"ts":"2026-01-01T12:00:00.000Z","level":"error","event":"sibling_error","message":"forgectl failed","tool":"forgectl","code":"timeout"}
+{"ts":"2026-01-01T12:00:00.000Z","level":"info","event":"normalization","message":"fixed 3","count":3}
