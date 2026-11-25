@@ -12,11 +12,12 @@ from collections.abc import Callable
 from typing import Any, NoReturn
 
 from . import __version__
+from . import runs as runs_mod
 from .audit import export_lines
 from .durations import DurationError, parse_duration, parse_since
 from .errors import PROG, ExitCode, ReviewRunError, printable
 from .fsmodes import apply_umask
-from .store import default_state_root
+from .store import Store, default_state_root
 
 DESCRIPTION = "Run a review skill on a pull request and store the resulting review draft."
 STATES = ("running", "done", "escalated", "failed")
@@ -264,7 +265,8 @@ def _stub(name: str) -> Handler:
 
 def _export(args: argparse.Namespace) -> int:
     """Print audit (or log) records as JSONL lines, no envelope."""
-    # TODO(#6): the state root comes from config (--config, state_dir) once config lands.
+    # TODO(#6): --config validation (config_invalid) is wired into this handler by #6; the state
+    # root stays default_state_root() until then.
     root = default_state_root()
     try:
         for line in export_lines(root, log=args.log, since=args.since):
@@ -274,13 +276,62 @@ def _export(args: argparse.Namespace) -> int:
     return 0
 
 
+def _write_stdout(text: str | bytes) -> None:
+    data = text.encode("utf-8") if isinstance(text, str) else text
+    try:
+        sys.stdout.buffer.write(data)
+    except BrokenPipeError:
+        _silence_stdout()
+
+
+def _note_corrupt(count: int) -> None:
+    """One bounded stderr line: a count only, never stored text."""
+    print(f"{PROG}: skipped {count} unreadable run(s)", file=sys.stderr)
+
+
+def _list(args: argparse.Namespace) -> int:
+    """``list``: read-only; no refresh."""
+    # TODO(#6): --config validation (config_invalid) is wired into this handler by #6; the state
+    # root stays default_state_root() until then.
+    with Store.open(default_state_root()) as store:
+        result = runs_mod.list_runs(
+            store,
+            states=args.state,
+            pr=args.pr,
+            repo=args.repo,
+            labels=args.label,
+            head=args.head,
+            since=args.since,
+            limit=args.limit,
+            on_corrupt=_note_corrupt,
+        )
+    if args.json:
+        _write_stdout(runs_mod.dump(result))
+    else:
+        _write_stdout(runs_mod.human_list(result["runs"], result["truncated"]))
+    return 0
+
+
+def _show(args: argparse.Namespace) -> int:
+    """``show``: the run object, or with ``--draft`` the stored review.json as stored."""
+    with Store.open(default_state_root()) as store:
+        if args.draft:
+            data = runs_mod.read_draft(store, args.run)
+            print(f"{PROG}: printing the stored draft as stored (untrusted text)", file=sys.stderr)
+            _write_stdout(data)
+            return 0
+        obj = runs_mod.show_run(store, args.run)
+    _write_stdout(runs_mod.dump(obj) if args.json else runs_mod.human_run(obj))
+    return 0
+
+
 # Each command is replaced by its owning issue's implementation.
 _HANDLERS: dict[str, Handler] = {
     "run": _stub("run"),  # TODO(#16): run order and settings; #18 launch; #24 outcome mapping
     "resume": _stub("resume"),  # TODO(#28): resume
     "wait": _stub("wait"),  # TODO(#24): wait
-    "list": _stub("list"),  # TODO(#11): list
-    "show": _stub("show"),  # TODO(#11): show
+    "list": _list,
+    "show": _show,  # TODO(#24): the refresh of show (without --no-refresh)
     "reconcile": _stub("reconcile"),  # TODO(#29): reconcile
     "prune": _stub("prune"),  # TODO(#37): prune
     "cancel": _stub("cancel"),  # TODO(#26): cancel
