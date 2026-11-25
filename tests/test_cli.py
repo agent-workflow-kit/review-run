@@ -20,8 +20,8 @@ COMMANDS: list[list[str]] = [
     ["cancel", "rr-aaaa"],
     ["cron", "install"],
     ["cron", "uninstall"],
-    ["export"],
 ]
+# `export` is implemented (tests/test_audit.py); the others are stubs of later issues.
 
 
 def test_version_prints_version_and_exits_zero(capsys: pytest.CaptureFixture[str]) -> None:
@@ -248,7 +248,6 @@ def test_main_sets_umask_077(capsys: pytest.CaptureFixture[str]) -> None:
         ["prune", "--older-than", "30d"],
         ["list", "--since", "2h"],
         ["list", "--since", "2026-03-10T10:00:00Z"],
-        ["export", "--since", "500ms"],
     ],
 )
 def test_valid_durations_reach_the_stub(
