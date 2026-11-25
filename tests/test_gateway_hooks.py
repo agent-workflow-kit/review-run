@@ -343,3 +343,39 @@ def test_a_stdin_file_that_cannot_be_made_is_a_gateway_error(
     monkeypatch.setattr(tempfile, "TemporaryFile", boom)
     with pytest.raises(gw.GatewayError):
         SystemGateway().spawn_detached(py("pass"), timeout=5, stdin="x")
+
+
+def test_a_relative_program_with_a_slash_is_looked_up_in_the_given_cwd(tmp_path: Path) -> None:
+    script = tmp_path / "x.sh"
+    script.write_text("#!/bin/sh\nexit 0\n")
+    script.chmod(0o755)
+    handle = SystemGateway().spawn_detached(["./x.sh"], timeout=30, cwd=str(tmp_path))
+    assert handle.join(10)
+    with pytest.raises(ToolMissing):
+        SystemGateway().spawn_detached(["./absent.sh"], timeout=30, cwd=str(tmp_path))
+
+
+def test_a_second_sigterm_during_the_cleanup_grace_does_not_orphan_the_group(
+    tmp_path: Path,
+) -> None:
+    pidfile = tmp_path / "hookpid"
+    hook = (
+        "import os, signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+        f"open({str(pidfile)!r}, 'w').write(str(os.getpid())); time.sleep(60)"
+    )
+    parent, _ = _run_parent(
+        tmp_path,
+        f"gateway.SystemGateway().run([sys.executable, '-c', {hook!r}],"
+        " timeout=60, term_grace=2)\n",
+    )
+    hook_pid = 0
+    try:
+        hook_pid = int(_wait_for(pidfile))
+        os.kill(parent.pid, signal.SIGTERM)
+        time.sleep(0.5)  # the parent is now waiting out the grace for the SIGTERM-proof hook
+        os.kill(parent.pid, signal.SIGTERM)
+        assert parent.wait(15) == 143
+        assert wait_dead(hook_pid, 10)
+    finally:
+        _kill_quietly(hook_pid)
+        parent.stdout.close() if parent.stdout else None

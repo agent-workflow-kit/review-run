@@ -48,7 +48,7 @@ import sys
 import tempfile
 import threading
 import time
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Protocol
@@ -274,18 +274,22 @@ os._exit(code if 0 <= code < 256 else 1)
 """
 
 
-def _find_program(argv0: str, env: Mapping[str, str] | None) -> bool:
+def _find_program(argv0: str, env: Mapping[str, str] | None, cwd: str | None = None) -> bool:
     if "/" in argv0:
-        return os.path.isfile(argv0) and os.access(argv0, os.X_OK)
+        # A relative path is resolved by the child against its working directory.
+        path = os.path.join(cwd, argv0) if cwd is not None else argv0
+        return os.path.isfile(path) and os.access(path, os.X_OK)
     path = (os.environ if env is None else env).get("PATH")
     return shutil.which(argv0, path=path if path is not None else os.defpath) is not None
 
 
 @contextmanager
-def _ending_signals() -> Iterator[None]:
+def _ending_signals() -> Iterator[Callable[[], None]]:
     """While a child is awaited in the main thread, SIGTERM and SIGHUP (still at their default
     action) raise ``SystemExit`` (143, 130), so the ``BaseException`` path of ``run`` ends the
-    child's group. Previous handlers come back afterwards; off the main thread this does nothing."""
+    child's group. The yielded callable turns the handlers into no-ops, so a further signal cannot
+    interrupt the cleanup that ends the group. Previous handlers come back afterwards; off the
+    main thread this does nothing."""
     installed: dict[int, object] = {}
     if threading.current_thread() is threading.main_thread():
 
@@ -301,8 +305,16 @@ def _ending_signals() -> Iterator[None]:
                     installed[sig] = signal.signal(sig, make(code))  # type: ignore[arg-type]
             except (ValueError, OSError):
                 pass
+
+    def quiesce() -> None:
+        for sig in installed:
+            try:
+                signal.signal(sig, lambda _signum, _frame: None)
+            except (ValueError, OSError):
+                pass
+
     try:
-        yield
+        yield quiesce
     finally:
         for sig, previous in installed.items():
             try:
@@ -339,44 +351,50 @@ class SystemGateway:
         args = list(argv)
         if cwd is not None and not os.path.isdir(cwd):
             raise GatewayError("working directory missing")
-        try:
-            proc = subprocess.Popen(
-                args,
-                # Without input the child gets /dev/null, never this process's own stdin.
-                stdin=subprocess.DEVNULL if data is None else subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                env=None if env is None else dict(env),
-                cwd=cwd,
-                start_new_session=True,
-            )
-        except OSError as exc:
-            if cwd is not None and exc.filename == cwd:  # the directory, not the program
-                raise GatewayError("working directory unusable") from exc
-            if isinstance(exc, (FileNotFoundError, PermissionError, NotADirectoryError)):
-                raise ToolMissing(f"cannot execute {os.path.basename(args[0])!r}") from exc
-            raise GatewayError(
-                f"cannot start {os.path.basename(args[0])!r}: errno {exc.errno}"
-            ) from exc
-        pgid = proc.pid  # the group this call created; valid while the leader is unreaped
-        try:
-            with _ending_signals():
+        proc: subprocess.Popen[bytes] | None = None
+        # The handlers stay installed from before the start until the group has been ended.
+        with _ending_signals() as quiesce:
+            try:
+                try:
+                    proc = subprocess.Popen(
+                        args,
+                        # Without input the child gets /dev/null, never this process's own stdin.
+                        stdin=subprocess.DEVNULL if data is None else subprocess.PIPE,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        env=None if env is None else dict(env),
+                        cwd=cwd,
+                        start_new_session=True,
+                    )
+                except OSError as exc:
+                    if cwd is not None and exc.filename == cwd:  # the directory, not the program
+                        raise GatewayError("working directory unusable") from exc
+                    if isinstance(exc, (FileNotFoundError, PermissionError, NotADirectoryError)):
+                        raise ToolMissing(f"cannot execute {os.path.basename(args[0])!r}") from exc
+                    raise GatewayError(
+                        f"cannot start {os.path.basename(args[0])!r}: errno {exc.errno}"
+                    ) from exc
                 out, err = _communicate(proc, data, timeout)
-        except BaseException:
-            # Timeout, overflow, interrupt or any failure: end exactly the group we created, first,
-            # and reap after, so a member alive when the leader exits is still killed. The leader
-            # is unreaped here (the success path never raises after reaping), so its PID, our
-            # group id, cannot have been reused.
-            _end_group(proc, pgid, term_grace)
-            raise
-        finally:
-            for stream in (proc.stdin, proc.stdout, proc.stderr):
-                if stream is not None:
-                    try:
-                        stream.close()
-                    except OSError:
-                        pass
-        return CompletedRun(tuple(args), proc.returncode, decode(out), decode(err))
+                result = proc
+            except BaseException:
+                # Timeout, overflow, interrupt or any failure: end exactly the group we created,
+                # first, and reap after, so a member alive when the leader exits is still killed.
+                # The leader is unreaped here (the success path never raises after reaping), so
+                # its PID, our group id, cannot have been reused. Further signals are ignored
+                # until the group is gone.
+                quiesce()
+                if proc is not None:
+                    _end_group(proc, proc.pid, term_grace)
+                raise
+            finally:
+                if proc is not None:
+                    for stream in (proc.stdin, proc.stdout, proc.stderr):
+                        if stream is not None:
+                            try:
+                                stream.close()
+                            except OSError:
+                                pass
+        return CompletedRun(tuple(args), result.returncode, decode(out), decode(err))
 
     def spawn_detached(
         self,
@@ -392,7 +410,7 @@ class SystemGateway:
         args = list(argv)
         if cwd is not None and not os.path.isdir(cwd):
             raise GatewayError("working directory missing")
-        if not _find_program(args[0], env):
+        if not _find_program(args[0], env, cwd):
             raise ToolMissing(f"cannot execute {os.path.basename(args[0])!r}")
         supervisor = [sys.executable, "-I", "-c", _SUPERVISOR, repr(float(timeout)),
                       repr(float(term_grace)), *args]  # fmt: skip
