@@ -5,7 +5,7 @@ import pytest
 
 from review_run import __version__, cli
 from review_run.cli import build_parser, main
-from tests.conftest import validate_against
+from tests.conftest import SCHEMAS, validate_against
 from tests.golden_harness import check_golden
 from tests.helpers import run_cli
 
@@ -343,3 +343,10 @@ def test_stdout_is_one_json_document(capsys: pytest.CaptureFixture[str]) -> None
     res = run_cli(capsys, "--json", "list", "--bogus")
     assert res.out.endswith("\n")
     assert json.loads(res.out) == res.envelope()
+
+
+def test_decision_id_grammar_matches_the_schema() -> None:
+    schema = json.loads((SCHEMAS / "defs.json").read_text(encoding="utf-8"))
+    node = schema["$defs"]["decision_ids"]
+    assert node["items"]["pattern"] == f"^{cli._DECISION_ID_RE.pattern}$"
+    assert node["maxItems"] == cli.MAX_DECISION_IDS
