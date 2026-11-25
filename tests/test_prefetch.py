@@ -48,6 +48,7 @@ class _Routed:
         stdin: str | None = None,
         env: Mapping[str, str] | None = None,
         cwd: str | None = None,
+        term_grace: float = 0.0,
     ) -> CompletedRun:
         assert env is None, "pre-fetch must not build an environment"
         self.calls.append(tuple(argv))
@@ -57,7 +58,20 @@ class _Routed:
             stdin=stdin,
             env=self.fb.env(),
             cwd=str(self.fb.dir),
+            term_grace=term_grace,
         )
+
+    def spawn_detached(
+        self,
+        argv: Sequence[str],
+        *,
+        timeout: float,
+        stdin: str | None = None,
+        env: Mapping[str, str] | None = None,
+        cwd: str | None = None,
+        term_grace: float = 0.0,
+    ) -> gw.DetachedHandle:
+        raise AssertionError(f"pre-fetch must not spawn a detached process: {argv[0]!r}")
 
 
 @pytest.fixture
@@ -485,7 +499,7 @@ def override(
             if isinstance(answer, GatewayError):
                 raise answer
             return answer
-        assert not isinstance(base, GatewayError)
+        assert not isinstance(base, (GatewayError, OSError, RuntimeError))
         return base(call) if callable(base) else base
 
     fake.scripts[tool] = [run]
