@@ -1,0 +1,11 @@
+#!/usr/bin/env python3
+"""Fake forgectl (see tests/fakebin/_forgectl.py); run through the harness wrapper, never by name."""
+
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__)))))
+
+from tests.fakebin._forgectl import main  # noqa: E402
+
+main(sys.argv[1:])
