@@ -770,7 +770,7 @@
             "null"
           ],
           "pattern": "^[a-z][a-z0-9_]*$",
-          "description": "The sibling's closed error code."
+          "description": "A sibling's closed error code, or one of the gateway codes timeout, tool_missing, output_too_large or failed."
         },
         "lower_reason": {
           "type": [
@@ -2036,7 +2036,7 @@
             "null"
           ],
           "pattern": "^[a-z][a-z0-9_]*$",
-          "description": "A sibling tool's closed error code; never its message."
+          "description": "A sibling's closed error code, or one of the gateway codes timeout, tool_missing, output_too_large or failed; never a message."
         },
         "hook": {
           "enum": [
