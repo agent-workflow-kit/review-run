@@ -27,7 +27,7 @@
       ],
       "pattern": "^/",
       "default": null,
-      "description": "Permission profile file passed on every call; null: the bundled file."
+      "description": "Permission profile file passed on every call; null: the bundled file. Checked at load (a semantic check): a regular file owned by the user, not writable by others, at most 256 KiB, final symlink not followed."
     },
     "sandbox": {
       "enum": [
@@ -70,7 +70,7 @@
       ],
       "minLength": 1,
       "default": null,
-      "description": "--model; null: Claude Code's default."
+      "description": "--model; null: Claude Code's default. A control character or a leading - is refused at load (a semantic check)."
     },
     "timeout": {
       "oneOf": [
@@ -258,7 +258,7 @@
                 "null"
               ],
               "pattern": "^/",
-              "description": "Permission profile file passed on every call; null: the bundled file."
+              "description": "Permission profile file passed on every call; null: the bundled file. Checked at load (a semantic check): a regular file owned by the user, not writable by others, at most 256 KiB, final symlink not followed."
             },
             "sandbox": {
               "enum": [
@@ -295,7 +295,7 @@
                 "null"
               ],
               "minLength": 1,
-              "description": "--model; null: Claude Code's default."
+              "description": "--model; null: Claude Code's default. A control character or a leading - is refused at load (a semantic check)."
             },
             "timeout": {
               "oneOf": [
