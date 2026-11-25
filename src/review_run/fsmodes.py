@@ -7,6 +7,7 @@ followed.
 
 from __future__ import annotations
 
+import errno
 import os
 import secrets
 import stat
@@ -17,6 +18,10 @@ from .errors import ReviewRunError
 DIR_MODE = 0o700
 FILE_MODE = 0o600
 UMASK = 0o077
+_UNSAFE_ERRNOS = frozenset(
+    {errno.ELOOP, errno.ENOTDIR, errno.EACCES, errno.EPERM, errno.EEXIST, errno.ENOENT}
+)
+_TMP_NAME_MAX = 100
 
 
 def apply_umask() -> None:
@@ -40,8 +45,11 @@ def ensure_private_dir(path: Path | str) -> None:
         except FileNotFoundError:
             os.mkdir(path, DIR_MODE)
             fd = os.open(path, flags)
-    except OSError:
-        # A symlink (ELOOP or ENOTDIR), a file, a missing parent or no permission.
+    except OSError as exc:
+        # A symlink (ELOOP or ENOTDIR), a file, a missing parent or no permission. Anything
+        # else (ENOSPC, EROFS, ...) is not a state-safety problem and propagates.
+        if exc.errno not in _UNSAFE_ERRNOS:
+            raise
         raise _unsafe() from None
     try:
         info = os.fstat(fd)
@@ -64,14 +72,22 @@ def create_private_file(path: Path | str, data: bytes, *, fsync: bool = False) -
         FILE_MODE,
     )
     try:
-        os.fchmod(fd, FILE_MODE)  # exact whatever the umask
-        view = memoryview(data)
-        while view:
-            view = view[os.write(fd, view) :]
-        if fsync:
-            os.fsync(fd)
-    finally:
-        os.close(fd)
+        try:
+            os.fchmod(fd, FILE_MODE)  # exact whatever the umask
+            view = memoryview(data)
+            while view:
+                view = view[os.write(fd, view) :]
+            if fsync:
+                os.fsync(fd)
+        finally:
+            os.close(fd)
+    except BaseException:
+        # Never leave a partial file at the final path.
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+        raise
 
 
 def write_private_file(path: Path | str, data: bytes) -> None:
@@ -81,10 +97,21 @@ def write_private_file(path: Path | str, data: bytes) -> None:
     target; a symlink at the target is replaced, never followed.
     """
     target = Path(path)
-    tmp = target.with_name(f".{target.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
-    create_private_file(tmp, data, fsync=True)
+    tmp = target.with_name(
+        f".{target.name[:_TMP_NAME_MAX]}.{os.getpid()}.{secrets.token_hex(4)}.tmp"
+    )
     try:
+        create_private_file(tmp, data, fsync=True)
         os.replace(tmp, target)
     except BaseException:
         tmp.unlink(missing_ok=True)
         raise
+    _fsync_dir(target.parent)
+
+
+def _fsync_dir(directory: Path) -> None:
+    fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)

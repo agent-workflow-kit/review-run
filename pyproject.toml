@@ -5,6 +5,7 @@ description = "Run a review skill on a pull request and store the resulting revi
 readme = "README.md"
 requires-python = ">=3.12"
 license = "MIT"
+# todo(#6): jsonschema and PyYAML are runtime dependencies (docs/design.md); move jsonschema from the dev group to [project].dependencies and add PyYAML
 dependencies = []
 
 [project.scripts]

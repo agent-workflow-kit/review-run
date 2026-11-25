@@ -4,14 +4,16 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
+import traceback
 from collections.abc import Callable
 from typing import Any, NoReturn
 
 from . import __version__
 from .durations import DurationError, parse_duration, parse_since
-from .errors import PROG, ExitCode, ReviewRunError
+from .errors import PROG, ExitCode, ReviewRunError, printable
 from .fsmodes import apply_umask
 
 DESCRIPTION = "Run a review skill on a pull request and store the resulting review draft."
@@ -49,6 +51,26 @@ def _positive_duration(text: str) -> object:
         return parse_duration(text, positive=True)
     except DurationError:
         raise argparse.ArgumentTypeError("not a valid duration greater than 0") from None
+
+
+class _TimeoutAction(argparse.Action):
+    """``--timeout``: store the timedelta in ``timeout`` and the text as given in
+    ``timeout_text`` (the text is what agent-spawn receives)."""
+
+    def __call__(
+        self,
+        parser: argparse.ArgumentParser,
+        namespace: argparse.Namespace,
+        values: object,
+        option_string: str | None = None,
+    ) -> None:
+        text = str(values)
+        try:
+            delta = parse_duration(text, positive=True)
+        except DurationError:
+            raise argparse.ArgumentError(self, "not a valid duration greater than 0") from None
+        setattr(namespace, self.dest, delta)
+        namespace.timeout_text = text
 
 
 def _since(text: str) -> object:
@@ -136,7 +158,8 @@ def _register_run(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--previous", metavar="RUN")
     _add_no_wait(parser)
     parser.add_argument("--model", metavar="M")
-    parser.add_argument("--timeout", type=_positive_duration, metavar="DUR")
+    parser.add_argument("--timeout", action=_TimeoutAction, default=None, metavar="DUR")
+    parser.set_defaults(timeout_text=None)
     _add_hook(parser)
     parser.add_argument("--override-escalation", action="store_true")
     _add_audit(parser)
@@ -153,7 +176,8 @@ def _register_resume(parser: argparse.ArgumentParser) -> None:
 
 def _register_wait(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("run")
-    parser.add_argument("--timeout", type=_positive_duration, metavar="DUR")
+    parser.add_argument("--timeout", action=_TimeoutAction, default=None, metavar="DUR")
+    parser.set_defaults(timeout_text=None)
 
 
 def _register_list(parser: argparse.ArgumentParser) -> None:
@@ -254,16 +278,35 @@ _HANDLERS: dict[str, Handler] = {
 # -- entry point -----------------------------------------------------------------------------
 
 
-def _wants_json(argv: list[str]) -> bool:
-    """Whether ``--json`` is among the flags (used when parsing itself failed)."""
+def _has_flag(argv: list[str], flag: str) -> bool:
+    """Whether ``flag`` is among the flags (used when parsing itself failed)."""
     flags = argv[: argv.index("--")] if "--" in argv else argv
-    return "--json" in flags
+    return flag in flags
+
+
+def _wants_json(argv: list[str]) -> bool:
+    return _has_flag(argv, "--json")
+
+
+def _silence_stdout() -> None:
+    """Stdout is closed or full: point fd 1 at /dev/null so that nothing later fails on it."""
+    try:
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        try:
+            os.dup2(devnull, 1)
+        finally:
+            os.close(devnull)
+    except OSError:
+        pass
 
 
 def _report(err: ReviewRunError, *, as_json: bool) -> int:
     print(err.human(), file=sys.stderr)
     if as_json:
-        print(json.dumps(err.envelope(), ensure_ascii=True))
+        try:
+            print(json.dumps(err.envelope(), ensure_ascii=True))
+        except OSError:
+            _silence_stdout()
     return err.exit_code
 
 
@@ -273,22 +316,41 @@ def _run(argv: list[str]) -> int:
     command: str | None = args.command
     if command is None:
         raise ReviewRunError("usage", "a command is required", human_detail="a command is required")
-    if args.verbose and args.quiet:
-        raise ReviewRunError("usage", "invalid arguments", human_detail="--verbose and --quiet")
     if len(getattr(args, "decision_id", [])) > MAX_DECISION_IDS:
         raise ReviewRunError("usage", "too many decision ids", details={"max": MAX_DECISION_IDS})
     return _HANDLERS[command](args)
 
 
-def main(argv: list[str] | None = None) -> int:
-    apply_umask()
-    argv = list(sys.argv[1:] if argv is None else argv)
+def _diagnose(exc: BaseException) -> None:
+    """``--verbose`` line for an unexpected error: its type and innermost frame, no message."""
+    frames = traceback.extract_tb(exc.__traceback__)
+    where = f" at {os.path.basename(frames[-1].filename)}:{frames[-1].lineno}" if frames else ""
+    print(f"{PROG}: {printable(type(exc).__name__)}{where}", file=sys.stderr)
+
+
+def _dispatch(argv: list[str]) -> int:
     try:
         return _run(argv)
     except ReviewRunError as err:
         return _report(err, as_json=_wants_json(argv))
-    except Exception:  # an unexpected bug: no traceback, no untrusted text
-        return _report(ReviewRunError("internal", "unexpected error"), as_json=_wants_json(argv))
+    except KeyboardInterrupt:
+        return int(ExitCode.SIGINT)
+    except Exception as exc:  # an unexpected bug: no traceback, no untrusted text
+        code = _report(ReviewRunError("internal", "unexpected error"), as_json=_wants_json(argv))
+        if _has_flag(argv, "--verbose"):
+            _diagnose(exc)
+        return code
+
+
+def main(argv: list[str] | None = None) -> int:
+    apply_umask()
+    argv = list(sys.argv[1:] if argv is None else argv)
+    code = _dispatch(argv)
+    try:
+        sys.stdout.flush()
+    except OSError:
+        _silence_stdout()
+    return code
 
 
 __all__ = ["ExitCode", "build_parser", "main"]

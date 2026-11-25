@@ -3,8 +3,8 @@ from importlib import metadata
 
 import pytest
 
-from review_run import __version__
-from review_run.cli import main
+from review_run import __version__, cli
+from review_run.cli import build_parser, main
 from tests.conftest import validate_against
 from tests.golden_harness import check_golden
 from tests.helpers import run_cli
@@ -104,18 +104,109 @@ def test_stub_human_mode_prints_one_line_to_stderr(capsys: pytest.CaptureFixture
     assert res.err.startswith("review-run: internal: ")
 
 
-def test_global_flags_accepted_before_and_after_the_subcommand(
-    capsys: pytest.CaptureFixture[str],
+def test_global_flags_accepted_before_and_after_the_subcommand() -> None:
+    parser = build_parser()
+    before = parser.parse_args(["--json", "--verbose", "--config", "/x.yaml", "list"])
+    after = parser.parse_args(["list", "--json", "--verbose", "--config", "/x.yaml"])
+    for ns in (before, after):
+        assert (ns.json, ns.verbose, ns.config) == (True, True, "/x.yaml")
+
+
+def test_global_flag_after_the_subcommand_wins_over_before() -> None:
+    ns = build_parser().parse_args(["--config", "a", "list", "--config", "b"])
+    assert ns.config == "b"
+
+
+def test_verbose_with_quiet_is_accepted(capsys: pytest.CaptureFixture[str]) -> None:
+    assert run_cli(capsys, "--verbose", "--quiet", "list").code == 1
+
+
+def test_decision_id_limit(capsys: pytest.CaptureFixture[str]) -> None:
+    def argv(n: int) -> list[str]:
+        return ["run", "p", *[a for i in range(n) for a in ("--decision-id", f"d{i}")]]
+
+    assert run_cli(capsys, "--json", *argv(32)).code == 1
+    assert run_cli(capsys, "--json", *argv(33)).code == 2
+
+
+def test_timeout_text_is_kept_as_given() -> None:
+    parser = build_parser()
+    one = parser.parse_args(["run", "p", "--timeout", "1h"])
+    sixty = parser.parse_args(["run", "p", "--timeout", "60m"])
+    assert one.timeout == sixty.timeout
+    assert (one.timeout_text, sixty.timeout_text) == ("1h", "60m")
+    assert parser.parse_args(["wait", "rr-aaaa", "--timeout", "90s"]).timeout_text == "90s"
+    assert parser.parse_args(["run", "p"]).timeout_text is None
+
+
+@pytest.mark.parametrize("command", ["list", "export"])
+@pytest.mark.parametrize("stamp", ["0001-01-01T00:00:00+05:00", "9999-12-31T23:59:59-05:00"])
+def test_since_overflow_is_a_usage_error(
+    capsys: pytest.CaptureFixture[str], command: str, stamp: str
 ) -> None:
-    for argv in (
-        ["--json", "--verbose", "--config", "/x.yaml", "list"],
-        ["list", "--json", "--verbose", "--config", "/x.yaml"],
-    ):
-        assert run_cli(capsys, *argv).code == 1
+    res = run_cli(capsys, "--json", command, "--since", stamp)
+    assert res.code == 2
+    assert res.envelope()["error"]["code"] == "usage"
 
 
-def test_verbose_and_quiet_conflict(capsys: pytest.CaptureFixture[str]) -> None:
-    assert run_cli(capsys, "--verbose", "--quiet", "list").code == 2
+def _boom(args: object) -> int:
+    raise RuntimeError("SECRET message")
+
+
+def test_unexpected_exception_is_an_internal_envelope(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setitem(cli._HANDLERS, "list", _boom)
+    res = run_cli(capsys, "--json", "list")
+    assert res.code == 1
+    validate_against("cli/error.json", res.envelope())
+    assert res.envelope()["error"]["code"] == "internal"
+    assert res.err.count("\n") == 1
+    assert "SECRET" not in res.err + res.out
+
+
+def test_unexpected_exception_verbose_names_type_and_location(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setitem(cli._HANDLERS, "list", _boom)
+    res = run_cli(capsys, "--json", "--verbose", "list")
+    assert res.code == 1
+    assert json.loads(res.out)["error"]["code"] == "internal"
+    lines = res.err.splitlines()
+    assert len(lines) == 2
+    assert "RuntimeError" in lines[1] and "test_cli.py:" in lines[1]
+    assert "SECRET" not in res.err
+
+
+def test_keyboard_interrupt_returns_130_without_traceback(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def interrupt(args: object) -> int:
+        raise KeyboardInterrupt
+
+    monkeypatch.setitem(cli._HANDLERS, "list", interrupt)
+    res = run_cli(capsys, "list")
+    assert res.code == 130
+    assert "Traceback" not in res.err
+
+
+class _BrokenStdout:
+    def write(self, text: str) -> int:
+        raise BrokenPipeError
+
+    def flush(self) -> None:
+        raise BrokenPipeError
+
+    def fileno(self) -> int:
+        raise OSError
+
+
+def test_broken_stdout_keeps_the_exit_code(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(cli, "_silence_stdout", lambda: None)
+    monkeypatch.setattr(cli.sys, "stdout", _BrokenStdout())
+    assert main(["--json", "list"]) == 1
 
 
 def test_main_sets_umask_077(capsys: pytest.CaptureFixture[str]) -> None:

@@ -80,3 +80,16 @@ def test_since_takes_duration_or_rfc3339() -> None:
 def test_since_rejects_other_text(text: str) -> None:
     with pytest.raises(DurationError):
         parse_since(text)
+
+
+def test_leading_zeros_do_not_count_toward_the_digit_cap() -> None:
+    assert parse_duration("0000000000000001s") == dt.timedelta(seconds=1)
+    assert parse_duration("0" * 30 + "s") == dt.timedelta(0)
+    with pytest.raises(DurationError):
+        parse_duration("0" * 30 + "9" * 16 + "s")
+
+
+@pytest.mark.parametrize("stamp", ["0001-01-01T00:00:00+05:00", "9999-12-31T23:59:59-05:00"])
+def test_since_timestamp_overflow_is_a_duration_error(stamp: str) -> None:
+    with pytest.raises(DurationError):
+        parse_since(stamp)
