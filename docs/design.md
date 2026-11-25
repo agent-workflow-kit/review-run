@@ -96,6 +96,7 @@ Minimum sibling versions: review-run needs claude-session and agent-spawn releas
 | `launch` | builds agent-spawn arguments, the per-phase signal handling ([Signals](interface.md#signals)), result handling |
 | `finalize` | the finalize steps, session-claim validation, normalization, meta derivation, teardown |
 | `store` | SQLite (WAL, additive migrations), run directory, leases |
+| `procid` | process identity (PID plus boot id and start time from `/proc`) for leases and runner checks |
 | `hooks` | hook execution and payload building |
 | `audit` | `audit.jsonl`, `log.jsonl`, `export` |
 | `runs` | `resume`, `wait`, the refresh of `show`, `cancel`, `reconcile` (finalization by another process, expiry, the label recovery, outbox redelivery), `prune`, `cron` |

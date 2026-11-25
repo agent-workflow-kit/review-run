@@ -142,3 +142,16 @@ def test_write_private_file_replaces_a_symlink_without_following(tmp_path: Path)
     assert victim.read_text() == "keep"
     assert not link.is_symlink()
     assert link.read_bytes() == b"new"
+
+
+def test_a_racing_creator_is_not_a_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    target = tmp_path / "state"
+    real_mkdir = os.mkdir
+
+    def racing_mkdir(path: str | os.PathLike[str], mode: int = 0o777) -> None:
+        real_mkdir(path, mode)  # the other process wins ...
+        raise FileExistsError(path)  # ... and ours finds it there
+
+    monkeypatch.setattr(os, "mkdir", racing_mkdir)
+    ensure_private_dir(target)
+    assert mode(target) == 0o700
