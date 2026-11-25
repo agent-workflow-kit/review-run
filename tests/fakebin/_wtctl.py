@@ -9,8 +9,11 @@ Worktree (non-throwaway) creation, ``status``, ``show`` and the rest exit 99.
 
 from __future__ import annotations
 
+import calendar
 import os
+import re
 import shutil
+import time
 from typing import Any
 
 from tests.fakebin._common import (
@@ -26,14 +29,12 @@ from tests.fakebin._common import (
     apply_step,
     base32_id,
     decision_check,
-    duration_check,
     error_out,
     fake_dir,
     flag,
     iso,
     label_check,
     next_step,
-    positive_int_check,
     run_tool,
     sha_check,
 )
@@ -55,9 +56,21 @@ _GLOBAL = {
 }
 
 
-def _repo_check(value: str) -> str | None:
-    import re
+def _age_check(value: str) -> str | None:
+    """wtctl's DURATION: ``^[1-9][0-9]*[smhdw]$`` (no fractions, no milliseconds)."""
+    return None if re.fullmatch(r"[1-9][0-9]{0,8}[smhdw]", value) else "is not a duration"
 
+
+def _depth_check(value: str) -> str | None:
+    """``--depth`` is an integer >= 0 (``0`` is the full history)."""
+    return None if re.fullmatch(r"[0-9]{1,9}", value) else "is not an integer >= 0"
+
+
+def _age_seconds(value: str) -> int:
+    return int(value[:-1]) * {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}[value[-1]]
+
+
+def _repo_check(value: str) -> str | None:
     return None if re.fullmatch(_REPO[1:-1], value) and "/../" not in value else "is not a repo id"
 
 
@@ -67,7 +80,7 @@ _CREATE = CommandSpec(
         "--repo": flag(takes=True, check=_repo_check),
         "--ref": flag(takes=True, check=sha_check),
         "--source": flag(takes=True, choices=("auto", "local", "remote")),
-        "--depth": flag(takes=True, check=positive_int_check),
+        "--depth": flag(takes=True, check=_depth_check),
         "--label": flag(takes=True, repeat=True, check=label_check),
         "--hook": flag(takes=True, repeat=True),
         "--override-escalation": flag(),
@@ -100,7 +113,7 @@ _LIST = CommandSpec(
         "--label": flag(takes=True, repeat=True, check=label_check),
         "--throwaways": flag(),
         "--worktrees": flag(),
-        "--older-than": flag(takes=True, check=duration_check),
+        "--older-than": flag(takes=True, check=_age_check),
         "--state": flag(
             takes=True,
             repeat=True,
@@ -131,6 +144,7 @@ GRAMMAR = Grammar(
         ).split()
     ),
     mutually_exclusive=(("--throwaways", "--worktrees"), ("--verbose", "--quiet")),
+    duplicates="last_wins",  # plain argparse
 )
 
 _TOMBSTONES = ("gone", "removed", "forgotten")
@@ -264,12 +278,21 @@ def _remove(call: Call, parsed: Parsed) -> Out:
             rec = records.get(target) or next(
                 (r for r in records.values() if r["path"] == target), None
             )
+            if rec is not None and rec["state"] in _TOMBSTONES and rec["path"] == target:
+                rec = None  # only a full id finds a tombstone, never its path
             if rec is None:
                 return error_out(TOOL, 10, {"code": "not_found", "message": "no such record"})
             if rec["state"] in _TOMBSTONES:
                 return error_out(
-                    TOOL, 10, {"code": "not_found", "message": f"the record is {rec['state']}"}
-                )
+                    TOOL,
+                    10,
+                    {"code": "not_found", "message": f"the record is {rec['state']}",
+                     "details": {"state": rec["state"], "removed_at": rec["removed_at"]}},
+                )  # fmt: skip
+            if not parsed.has("--dry-run") and any(
+                parsed.has(f) for f in ("--force", "--merged-head", "--keep-branch", "--holder")
+            ):
+                raise Usage("--merged-head, --holder, --force and --keep-branch are for worktrees")
             if not parsed.has("--dry-run"):
                 rec["state"] = "removed"
                 rec["removed_at"] = iso()
@@ -302,6 +325,9 @@ def _list(call: Call, parsed: Parsed) -> Out:
             records = list(state.get("wtctl", {"records": {}})["records"].values())
         wanted = set(parsed.all("--state"))
         want_labels = parsed.all("--label")
+        older = (
+            _age_seconds(parsed.get("--older-than") or "") if parsed.has("--older-than") else None
+        )
         kept = []
         for rec in records:
             if parsed.has("--throwaways") and rec["object_type"] != "throwaway":
@@ -316,6 +342,12 @@ def _list(call: Call, parsed: Parsed) -> Out:
                 continue
             if any(lab not in rec["labels"] for lab in want_labels):
                 continue
+            if (
+                older is not None
+                and calendar.timegm(time.strptime(rec["created"], "%Y-%m-%dT%H:%M:%SZ"))
+                > time.time() - older
+            ):
+                continue  # ``--older-than`` compares ``created``
             kept.append(rec)
         kept.sort(key=lambda r: (r["created"], r["id"]), reverse=True)
         return Out(doc={"records": kept, "foreign": []})
