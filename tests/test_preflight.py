@@ -775,27 +775,48 @@ def test_an_unsafe_state_root_stops_before_the_resolve_step(
     assert list(real.iterdir()) == []
 
 
+def real_store_dir(tmp_path: Path) -> Path:
+    """A real state dir holding a valid store at the current schema, so that opening it
+    would succeed (and could migrate or touch it) if the root safety check were skipped."""
+    real = tmp_path / "real"
+    real.mkdir()
+    Store.open(real).close()
+    assert (real / "state.db").is_file()
+    return real
+
+
+def snapshot(real: Path) -> tuple[bytes, int, list[str]]:
+    db = real / "state.db"
+    return db.read_bytes(), db.stat().st_mtime_ns, sorted(p.name for p in real.iterdir())
+
+
 def test_a_missing_tool_beats_an_unsafe_state_root(
     fakebin: FakeBin, routed: Routed, plugin: Path, tmp_path: Path, root: Path
 ) -> None:
-    real = tmp_path / "real"
-    real.mkdir()
+    real = real_store_dir(tmp_path)
+    before = snapshot(real)
     root.symlink_to(real)
     routed.missing.add("pr-comment")
     err = fails(pre.plan_run, request(previous="rr-aaaa"), config_of(tmp_path), root)
     assert (err.reason, err.tool) == ("tool_missing", "pr-comment")
-    assert list(real.iterdir()) == []  # the store was never opened or migrated
+    assert snapshot(real) == before  # the store was never opened or migrated
 
 
 def test_an_unknown_previous_under_an_unsafe_state_root_is_state_unsafe(
-    fakebin: FakeBin, routed: Routed, plugin: Path, tmp_path: Path, root: Path
+    fakebin: FakeBin,
+    routed: Routed,
+    plugin: Path,
+    tmp_path: Path,
+    root: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    real = tmp_path / "real"
-    real.mkdir()
+    real = real_store_dir(tmp_path)
+    before = snapshot(real)
     root.symlink_to(real)
+    forbid_store_open(monkeypatch)
     err = fails(pre.plan_run, request(previous="rr-aaaa"), config_of(tmp_path), root)
     assert err.reason == "state_unsafe"
-    assert list(real.iterdir()) == []
+    assert snapshot(real) == before
 
 
 def test_a_malformed_previous_under_an_unsafe_state_root_is_still_usage(
@@ -806,14 +827,22 @@ def test_a_malformed_previous_under_an_unsafe_state_root_is_still_usage(
     assert err.exit_code == 2 and routed.calls == []
 
 
+def forbid_store_open(monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom(*args: Any, **kw: Any) -> Any:
+        raise AssertionError("Store.open was called under an unsafe state root")
+
+    monkeypatch.setattr(pre.Store, "open", boom)
+
+
 def test_check_previous_does_not_open_a_store_under_an_unsafe_root(
-    tmp_path: Path, root: Path
+    tmp_path: Path, root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    real = tmp_path / "real"
-    real.mkdir()
+    real = real_store_dir(tmp_path)
+    before = snapshot(real)
     root.symlink_to(real)
+    forbid_store_open(monkeypatch)
     assert fails(pre.check_previous, root, "rr-aaaa").reason == "state_unsafe"
-    assert list(real.iterdir()) == []
+    assert snapshot(real) == before
 
 
 @pytest.mark.parametrize(
