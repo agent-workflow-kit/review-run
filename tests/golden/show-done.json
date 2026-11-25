@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "run_id": "rr-aaaaaaaa",
+  "pr": "host/o/r#1",
+  "repo": "host/o/r",
+  "state": "done",
+  "phase": null,
+  "reason": null,
+  "exit_code": 0,
+  "mode": "headless",
+  "skill": "review-run:review-pr",
+  "labels": [
+    "team=a",
+    "team=a"
+  ],
+  "previous_run": null,
+  "agent_id": "ag-aaaaaaaa",
+  "csession_id": "cs-aaaaaaaa",
+  "draft_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+  "anchor": {
+    "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "base_ref": "main",
+    "base_sha": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "merge_base_sha": null
+  },
+  "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "created_at": "2026-01-01T12:00:01.000Z",
+  "escalated_at": null,
+  "cancel_requested_at": null,
+  "finished_at": "2026-01-01T12:00:01.000Z",
+  "artifact": {
+    "path": "/state/runs/rr-aaaaaaaa/review.json",
+    "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "size": 1234,
+    "original_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+  },
+  "summary": {
+    "verdict": "comment",
+    "severity_counts": {
+      "blocker": 0,
+      "major": 1,
+      "minor": 2,
+      "nit": 0,
+      "info": 0,
+      "unspecified": 0
+    },
+    "risk": "medium",
+    "coverage_status": "full",
+    "code_run_status": "skipped",
+    "code_run_reason": "sandbox_unavailable",
+    "skipped_files": 0,
+    "normalized_count": 1,
+    "head_moved": false
+  },
+  "failure": null,
+  "warnings": [],
+  "teardown": "done"
+}

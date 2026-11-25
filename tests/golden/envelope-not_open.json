@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": "refused",
+    "message": "closed message",
+    "reason": "not_open"
+  }
+}
