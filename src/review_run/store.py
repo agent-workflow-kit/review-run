@@ -523,7 +523,9 @@ class Store:
         assert run is not None
         return run
 
-    def get_run(self, run_id: str) -> Run | None:
+    def get_run(self, run_id: str, *, tolerant: bool = False) -> Run | None:
+        """The run, or None. ``tolerant`` (read paths only) turns a JSON column that does not
+        decode into None instead of raising, so one corrupt row cannot break ``list``."""
         # Named columns only: a newer schema may have added more (additive migrations).
         names = [f.name for f in fields(Run) if f.name != "labels"]
         row = self._conn.execute(
@@ -532,7 +534,14 @@ class Store:
         ).fetchone()
         if row is None:
             return None
-        values = {n: _decode(n, v) for n, v in zip(names, row, strict=True)}
+        values: dict[str, Any] = {}
+        for n, v in zip(names, row, strict=True):
+            try:
+                values[n] = _decode(n, v)
+            except (ValueError, TypeError):
+                if not tolerant:
+                    raise
+                values[n] = None
         labels = tuple(
             f"{k}={v}"
             for k, v in self._conn.execute(
@@ -540,6 +549,65 @@ class Store:
             )
         )
         return Run(labels=labels, **values)
+
+    def list_run_ids(
+        self,
+        *,
+        states: Sequence[str] = (),
+        pr: str | None = None,
+        repo: str | None = None,
+        labels: Sequence[str] = (),
+        head: str | None = None,
+        since: str | None = None,
+        limit: int = 100,
+    ) -> tuple[list[str], bool]:
+        """Run ids newest first (``created_at`` descending, then run id), filters ANDed.
+
+        ``labels`` entries are ``k=v`` (exact pair) or ``k`` (any value); ``head`` matches
+        ``head_sha`` or the anchor's head; ``since`` is a ``format_time`` string. Read-only.
+        Returns the ids and whether more than ``limit`` matched.
+        """
+        where: list[str] = []
+        args: list[Any] = []
+        if states:
+            where.append(f"state IN ({', '.join('?' for _ in states)})")
+            args.extend(states)
+        if pr is not None:
+            where.append("pr = ?")
+            args.append(pr)
+        if repo is not None:
+            where.append("repo = ?")
+            args.append(repo)
+        for label in labels:
+            key, eq, value = label.partition("=")
+            if eq:
+                where.append(
+                    "EXISTS (SELECT 1 FROM labels l WHERE l.run_id = runs.run_id"
+                    " AND l.key = ? AND l.value = ?)"
+                )
+                args.extend((key, value))
+            else:
+                where.append(
+                    "EXISTS (SELECT 1 FROM labels l WHERE l.run_id = runs.run_id AND l.key = ?)"
+                )
+                args.append(key)
+        if head is not None:
+            # CASE is lazy: json_extract never sees a malformed anchor.
+            where.append(
+                "(head_sha = ? OR CASE WHEN json_valid(anchor)"
+                " THEN json_extract(anchor, '$.head_sha') END = ?)"
+            )
+            args.extend((head, head))
+        if since is not None:
+            where.append("created_at >= ?")
+            args.append(since)
+        clause = f" WHERE {' AND '.join(where)}" if where else ""
+        rows = self._conn.execute(
+            f"SELECT run_id FROM runs{clause} ORDER BY created_at DESC, run_id LIMIT ?",  # noqa: S608
+            (*args, limit + 1),
+        ).fetchall()
+        ids = [str(r[0]) for r in rows]
+        return ids[:limit], len(ids) > limit
 
     def update_fields(self, run_id: str, expect: Expect, /, **fields: Any) -> bool:
         """Set ``FREE_COLUMNS`` on a run whose key still equals ``expect`` (one compare-and-set).

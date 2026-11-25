@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": "usage",
+    "message": "closed message",
+    "reason": "previous_mismatch"
+  }
+}
