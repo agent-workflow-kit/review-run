@@ -3,9 +3,10 @@
 Files are opened ``O_NONBLOCK`` (a FIFO never blocks), must be regular, at most
 ``MAX_FILE_BYTES``, owned by the user and not writable by others or a foreign group (checked on
 the opened descriptor, so a symlink to a good file is followed and a link to a bad one is
-refused). "Not writable" means not by others and not by a group other than the user's own
-primary group: on a private-group system (umask 002) the user's own files are group-writable
-and still fine.
+refused). "Not writable" means not by others and not by a group that others can be in: a
+group-writable file is accepted only when its group is the user's effective group and that
+group is private (no other member, no other account with it as primary group), so a
+private-group system (umask 002) still works.
 
 Anchors, aliases (no expansion bombs), explicit tags, merge keys, non-string keys and duplicate
 keys are refused. Failure messages hold a position (line and column) and never the input text,
@@ -14,7 +15,9 @@ because a parser message would quote it.
 
 from __future__ import annotations
 
+import grp
 import os
+import pwd
 import re
 import stat
 from pathlib import Path
@@ -89,9 +92,33 @@ for _tag, _pattern, _first in (
     )
 
 
+def private_group(gid: int) -> bool:
+    """``gid`` is the user's effective group and nobody else is in it: no other member in the
+    group database and no other account with it as primary group."""
+    if gid != os.getegid():
+        return False
+    try:
+        me = pwd.getpwuid(os.geteuid()).pw_name
+    except KeyError:
+        return False
+    try:
+        members = grp.getgrgid(gid).gr_mem
+    except KeyError:
+        members = []
+    if any(member != me for member in members):
+        return False
+    try:
+        accounts = pwd.getpwall()
+    except Exception:  # noqa: BLE001 (an unreadable account database cannot prove privacy)
+        return False
+    return not any(entry.pw_gid == gid and entry.pw_uid != os.geteuid() for entry in accounts)
+
+
 def writable_by_others(info: os.stat_result) -> bool:
-    """Writable by anyone but the owner: others, or a group that is not the user's own."""
-    return bool(info.st_mode & 0o002 or (info.st_mode & 0o020 and info.st_gid != os.getegid()))
+    """Writable by anyone but the owner: others, or a group that is not the user's private one."""
+    if info.st_mode & 0o002:
+        return True
+    return bool(info.st_mode & 0o020 and not private_group(info.st_gid))
 
 
 def read_private_file(path: Path) -> bytes:

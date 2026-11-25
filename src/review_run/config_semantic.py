@@ -14,6 +14,7 @@ import os
 import pwd
 import re
 import stat
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Final
 
@@ -44,6 +45,28 @@ def env_name_refusal(name: str) -> str | None:
     return None
 
 
+# -- shared helpers -----------------------------------------------------------------------------
+
+
+def home_dir(env: Mapping[str, str] | None = None) -> str:
+    """The home directory: ``HOME`` of ``env`` (the process environment when None) when it is
+    absolute, else the account's."""
+    if env is None:
+        return os.path.expanduser("~")
+    value = env.get("HOME", "")
+    if value.startswith("/"):
+        return value
+    try:
+        return pwd.getpwuid(os.geteuid()).pw_dir
+    except KeyError:
+        return os.path.expanduser("~")
+
+
+def has_control_char(text: str, *, allow: str = "") -> bool:
+    """A C0 control character (NUL included) or DEL, except those named in ``allow``."""
+    return any((ord(ch) < 0x20 or ord(ch) == 0x7F) and ch not in allow for ch in text)
+
+
 # -- guidelines_file ----------------------------------------------------------------------------
 
 GUIDELINES_MAX_BYTES: Final = 64 * 1024
@@ -53,10 +76,10 @@ class GuidelinesError(ValueError):
     """The guidelines file cannot be used; the message never names the path or its content."""
 
 
-def expand_guidelines_path(text: str) -> str:
+def expand_guidelines_path(text: str, env: Mapping[str, str] | None = None) -> str:
     """``~/x`` becomes the home directory plus ``x``; anything else must already be absolute.
     ``..`` components are refused."""
-    path = os.path.join(os.path.expanduser("~"), text[2:]) if text.startswith("~/") else text
+    path = os.path.join(home_dir(env), text[2:]) if text.startswith("~/") else text
     if not os.path.isabs(path) or "\x00" in path or ".." in path.split("/"):
         raise GuidelinesError("must be an absolute path without '..'")
     return path
@@ -97,6 +120,38 @@ def read_guidelines_file(path: str) -> str:
     return text
 
 
+# -- permission_profile -------------------------------------------------------------------------
+
+PROFILE_MAX_BYTES: Final = 256 * 1024
+
+
+def permission_profile_refusal(path: str) -> str | None:
+    """Why ``path`` cannot be the permission profile, or None: an absolute path to a regular file
+    the user owns, not writable by others, opened without following a final symlink, at most
+    256 KiB. A fixed text, never the path."""
+    if "\x00" in path or not os.path.isabs(path):
+        return "must be an absolute path"
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except OSError:
+        return "cannot be opened (missing, a symlink or unreadable)"
+    try:
+        info = os.fstat(fd)
+    except OSError:
+        return "cannot be read"
+    finally:
+        os.close(fd)
+    if not stat.S_ISREG(info.st_mode):
+        return "not a regular file"
+    if info.st_uid != os.geteuid():
+        return "not owned by you"
+    if writable_by_others(info):
+        return "writable by group or others"
+    if info.st_size > PROFILE_MAX_BYTES:
+        return "larger than 256 KiB"
+    return None
+
+
 # -- plugin_dirs --------------------------------------------------------------------------------
 
 PLACEHOLDERS: Final = (".claude", ".mcp.json", "CLAUDE.md", "CLAUDE.local.md")
@@ -110,7 +165,7 @@ def _plugin_name(root: str) -> str:
     try:
         data = read_private_file(Path(root, ".claude-plugin", "plugin.json"))
         document = json.loads(data.decode("utf-8"))
-    except (ConfigFileError, ValueError):
+    except (ConfigFileError, ValueError, RecursionError):
         raise ValueError("its .claude-plugin/plugin.json cannot be read as JSON") from None
     name = document.get("name") if isinstance(document, dict) else None
     if not isinstance(name, str) or _PLUGIN_NAME_RE.fullmatch(name) is None:
@@ -147,7 +202,7 @@ def check_plugin_dirs(paths: list[str]) -> tuple[list[str], list[Problem]]:
             except ValueError as exc:
                 problems.append((index, str(exc)))
                 continue
-            if name == RESERVED_PLUGIN:
+            if name.casefold() == RESERVED_PLUGIN:
                 problems.append((index, "a plugin cannot be named review-run"))
             elif name in names:
                 problems.append((index, "another entry has the same plugin name"))
@@ -181,8 +236,8 @@ def _inside(path: str, base: str) -> bool:
     return path == base or path.startswith(base.rstrip("/") + "/")
 
 
-def _homes() -> set[str]:
-    homes = {os.path.realpath(os.path.expanduser("~"))}
+def _homes(env: Mapping[str, str] | None = None) -> set[str]:
+    homes = {os.path.realpath(home_dir(env))}
     try:
         homes.add(os.path.realpath(pwd.getpwuid(os.geteuid()).pw_dir))
     except KeyError:
@@ -190,40 +245,42 @@ def _homes() -> set[str]:
     return homes
 
 
-def _xdg(name: str) -> str | None:
-    value = os.environ.get(name, "")
+def _xdg(name: str, env: Mapping[str, str] | None = None) -> str | None:
+    value = (os.environ if env is None else env).get(name, "")
     return os.path.realpath(value) if value.startswith("/") else None
 
 
-def _credential_locations(homes: set[str]) -> set[str]:
+def _credential_locations(homes: set[str], env: Mapping[str, str] | None) -> set[str]:
     raw: set[str] = set()
     for home in homes:
         raw.update(os.path.join(home, p) for p in _CREDENTIAL_HOME_PATHS)
         for pattern in _CREDENTIAL_GLOBS:
             raw.update(glob.glob(os.path.join(glob.escape(home), pattern)))
     for name in ("XDG_CONFIG_HOME", "XDG_STATE_HOME"):
-        if (value := _xdg(name)) is not None:
+        if (value := _xdg(name, env)) is not None:
             raw.add(value)
-    if (data := _xdg("XDG_DATA_HOME")) is not None:
+    if (data := _xdg("XDG_DATA_HOME", env)) is not None:
         raw.add(os.path.join(data, "keyrings"))
     return raw | {os.path.realpath(p) for p in raw}
 
 
-def _state_dir() -> str:
-    state = _xdg("XDG_STATE_HOME") or os.path.join(
-        os.path.realpath(os.path.expanduser("~")), ".local/state"
+def _state_dir(env: Mapping[str, str] | None = None) -> str:
+    state = _xdg("XDG_STATE_HOME", env) or os.path.join(
+        os.path.realpath(home_dir(env)), ".local/state"
     )
     return os.path.join(state, "review-run")
 
 
-def _bind_refusal(given: str, real: str, homes: set[str], credentials: set[str]) -> str | None:
+def _bind_refusal(
+    given: str, real: str, homes: set[str], credentials: set[str], state: str
+) -> str | None:
     if real == "/" or any(_inside(h, real) for h in homes):
         return "the home directory and its ancestors are refused"
     if real in ("/mnt", "/media", "/root") or _WSL_DRIVE_RE.match(real):
         return "a system or drive-mount location is refused"
     if any(_inside(real, p) for p in _SYSTEM_PREFIXES):
         return "a system location is refused"
-    if _inside(_state_dir(), real):
+    if _inside(state, real):
         return "an ancestor of a tool's state directory is refused"
     if any(_inside(real, c) or _inside(c, real) for c in credentials):
         return "a credential location, or a directory holding one, is refused (narrow it)"
@@ -234,10 +291,13 @@ def _bind_refusal(given: str, real: str, homes: set[str], credentials: set[str])
     return None
 
 
-def check_ro_binds(paths: list[str]) -> tuple[list[str], list[Problem]]:
+def check_ro_binds(
+    paths: list[str], env: Mapping[str, str] | None = None
+) -> tuple[list[str], list[Problem]]:
     """The realpaths of ``paths`` (duplicates collapsed) and the problems found, by index."""
-    homes = _homes()
-    credentials = _credential_locations(homes)
+    homes = _homes(env)
+    credentials = _credential_locations(homes, env)
+    state = _state_dir(env)
     real: list[str] = []
     problems: list[Problem] = []
     for index, path in enumerate(paths):
@@ -245,7 +305,7 @@ def check_ro_binds(paths: list[str]) -> tuple[list[str], list[Problem]]:
             problems.append((index, "must be an absolute path"))
             continue
         resolved = os.path.realpath(path)
-        if (reason := _bind_refusal(path, resolved, homes, credentials)) is not None:
+        if (reason := _bind_refusal(path, resolved, homes, credentials, state)) is not None:
             problems.append((index, reason))
         elif not os.path.isdir(resolved):
             problems.append((index, "must be an existing directory"))

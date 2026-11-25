@@ -19,7 +19,7 @@ from review_run.config import (
     schema_issues,
 )
 from review_run.errors import ReviewRunError
-from tests.config_helpers import config_dir, load, write_dropin, write_main
+from tests.config_helpers import base_env, config_dir, load, write_dropin, write_main
 from tests.conftest import SCHEMAS, validate_against
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -63,7 +63,7 @@ def test_example_validates_and_equals_the_defaults() -> None:
     example = ROOT / "config.example.yaml"
     document = yaml.safe_load(example.read_text(encoding="utf-8"))
     assert schema_issues(document, "example") == []
-    resolved = load_config(example, {}).resolve().values
+    resolved = load_config(example, base_env()).resolve().values
     expected = defaults()
     expected["run_pr_code"] = None
     assert resolved == expected
@@ -106,7 +106,7 @@ def test_drop_ins_merge_in_lexical_order_after_the_main_file() -> None:
     )
     write_dropin("20-b.yaml", "model: b\nlimits:\n  max_files: 3\n")
     write_dropin("10-a.yaml", "model: a\nsetting_sources: [local, project]\n")
-    values = load_config(None, {}).resolve().values
+    values = load_config(None, base_env()).resolve().values
     assert values["model"] == "b"
     assert values["limits"] == {**defaults()["limits"], "max_files": 3, "max_total_bytes": 5}
     assert values["setting_sources"] == ["local", "project"]  # lists are replaced
@@ -118,7 +118,7 @@ def test_hook_lists_append_across_files() -> None:
         "a.yaml",
         "hooks:\n  post-run:\n    - cmd: two\n      async: true\n  pre-run:\n    - cmd: p\n",
     )
-    hooks = load_config(None, {}).resolve().values["hooks"]
+    hooks = load_config(None, base_env()).resolve().values["hooks"]
     assert [h["cmd"] for h in hooks["post-run"]] == ["one", "two"]
     assert [h["cmd"] for h in hooks["pre-run"]] == ["p"]
 
@@ -128,7 +128,7 @@ def test_drop_ins_without_a_main_file_and_ignored_names() -> None:
     write_dropin("b.yml", "model: yml\n")
     write_dropin(".c.yaml", "model: hidden\n")
     write_dropin("d.yaml.bak", "model: bak\n")
-    assert load_config(None, {}).resolve().values["model"] == "a"
+    assert load_config(None, base_env()).resolve().values["model"] == "a"
 
 
 def test_repos_merge_across_files() -> None:
@@ -136,16 +136,16 @@ def test_repos_merge_across_files() -> None:
     write_dropin(
         "a.yaml", f"repos:\n  {REPO}:\n    model: x\n    limits:\n      max_total_bytes: 7\n"
     )
-    values = load_config(None, {}).resolve(REPO).values
+    values = load_config(None, base_env()).resolve(REPO).values
     assert (values["nits"], values["model"]) == (True, "x")
     assert values["limits"]["max_files"] == 5
     assert values["limits"]["max_total_bytes"] == 7
 
 
 def test_explicit_config_must_exist_and_default_may_be_absent() -> None:
-    assert load_config(None, {}).resolve().values["mode"] == "headless"
+    assert load_config(None, base_env()).resolve().values["mode"] == "headless"
     with pytest.raises(ReviewRunError) as info:
-        load_config(config_dir() / "nope.yaml", {})
+        load_config(config_dir() / "nope.yaml", base_env())
     assert info.value.code == "config_invalid"
 
 
@@ -176,10 +176,10 @@ def test_non_utf8_and_oversized_files_are_refused() -> None:
     path = write_main("")
     path.write_bytes(b"model: \xff\xfe\n")
     with pytest.raises(ReviewRunError):
-        load_config(None, {})
+        load_config(None, base_env())
     path.write_bytes(b"# " + b"x" * (300 * 1024))
     with pytest.raises(ReviewRunError):
-        load_config(None, {})
+        load_config(None, base_env())
 
 
 def test_yaml_1_2_scalars() -> None:
@@ -194,20 +194,20 @@ def test_fifo_and_directory_drop_ins_are_refused_without_blocking() -> None:
     directory.mkdir()
     os.mkfifo(directory / "a.yaml")
     with pytest.raises(ReviewRunError):
-        load_config(None, {})
+        load_config(None, base_env())
 
 
 def test_directory_named_like_a_drop_in_is_refused() -> None:
     (config_dir() / "config.d" / "a.yaml").mkdir(parents=True)
     with pytest.raises(ReviewRunError):
-        load_config(None, {})
+        load_config(None, base_env())
 
 
 def test_symlinked_config_file_to_an_owned_file_is_followed() -> None:
     target = config_dir() / "real.yaml"
     target.write_text("model: linked\n", encoding="utf-8")
     (config_dir() / "config.yaml").symlink_to(target)
-    assert load_config(None, {}).resolve().values["model"] == "linked"
+    assert load_config(None, base_env()).resolve().values["model"] == "linked"
 
 
 def test_broken_symlink_drop_in_is_refused() -> None:
@@ -215,21 +215,21 @@ def test_broken_symlink_drop_in_is_refused() -> None:
     directory.mkdir()
     (directory / "a.yaml").symlink_to(config_dir() / "missing")
     with pytest.raises(ReviewRunError):
-        load_config(None, {})
+        load_config(None, base_env())
 
 
 def test_group_or_world_writable_files_and_directories_are_refused() -> None:
     path = write_main("model: a\n")
     path.chmod(0o666)
     with pytest.raises(ReviewRunError) as info:
-        load_config(None, {})
+        load_config(None, base_env())
     assert info.value.code == "config_invalid"
     path.chmod(0o664)  # the user's own group is fine (private-group systems, umask 002)
-    assert load_config(None, {}).resolve().values["model"] == "a"
+    assert load_config(None, base_env()).resolve().values["model"] == "a"
     config_dir().joinpath("config.d").mkdir()
     config_dir().joinpath("config.d").chmod(0o777)
     with pytest.raises(ReviewRunError):
-        load_config(None, {})
+        load_config(None, base_env())
 
 
 # -- schema errors name the key, never the value ------------------------------------------------
@@ -298,7 +298,7 @@ def test_error_message_names_the_file_and_several_keys() -> None:
 def test_a_drop_in_error_names_the_drop_in() -> None:
     write_dropin("50-x.yaml", "sandbox: bad\n")
     with pytest.raises(ReviewRunError) as info:
-        load_config(None, {})
+        load_config(None, base_env())
     assert "50-x.yaml" in info.value.message
 
 
@@ -311,14 +311,14 @@ def test_pattern_dollar_does_not_match_a_trailing_newline() -> None:
 
 def test_check_config_reports_every_issue() -> None:
     write_main("sandbox: x\nnits: 3\nmodel: ''\n")
-    result = check_config(None, {})
+    result = check_config(None, base_env())
     assert result.config is None
     assert [i.key for i in result.issues] == ["model", "nits", "sandbox"]
     assert all(i.problem and i.source for i in result.issues)
 
 
 def test_check_config_success_has_no_issues() -> None:
-    result = check_config(None, {})
+    result = check_config(None, base_env())
     assert result.issues == []
     assert result.config is not None
 
@@ -351,7 +351,6 @@ def test_env_overrides_the_file() -> None:
         ("RETENTION", "2d", "2d"),
         ("ESCALATION_TTL", "null", None),
         ("ESCALATION_TTL", "1h", "1h"),
-        ("PERMISSION_PROFILE", "/etc/profile.json", "/etc/profile.json"),
     ],
 )
 def test_env_parses_each_scalar_type(name: str, value: str, expected: object) -> None:
@@ -427,7 +426,7 @@ def precedence_config() -> Config:
         "model: file\nnits: false\n"
         f"repos:\n  {REPO}:\n    model: repo\n    limits:\n      max_files: 7\n"
     )
-    return load_config(None, {"REVIEW_RUN_MODEL": "env", "REVIEW_RUN_NITS": "true"})
+    return load_config(None, {**base_env(), "REVIEW_RUN_MODEL": "env", "REVIEW_RUN_NITS": "true"})
 
 
 def test_precedence_default_file_env_repo_flag() -> None:
@@ -447,14 +446,14 @@ def test_precedence_default_file_env_repo_flag() -> None:
 
 def test_file_beats_default_and_env_beats_file() -> None:
     write_main("sandbox: preferred\nmodel: file\n")
-    resolved = load_config(None, {"REVIEW_RUN_MODEL": "env"}).resolve()
+    resolved = load_config(None, {**base_env(), "REVIEW_RUN_MODEL": "env"}).resolve()
     assert (resolved.values["sandbox"], resolved.origins["sandbox"]) == ("preferred", "config")
     assert (resolved.values["model"], resolved.origins["model"]) == ("env", "env")
 
 
 def test_a_repo_beats_a_global_environment_setting() -> None:
     write_main(f"repos:\n  {REPO}:\n    sandbox: required\n")
-    cfg = load_config(None, {"REVIEW_RUN_SANDBOX": "off"})
+    cfg = load_config(None, {**base_env(), "REVIEW_RUN_SANDBOX": "off"})
     assert cfg.resolve().values["sandbox"] == "off"
     assert cfg.resolve(REPO).values["sandbox"] == "required"
 
@@ -471,7 +470,7 @@ def test_limits_merge_key_by_key_with_origins() -> None:
     write_main(
         f"limits:\n  max_total_bytes: 9\nrepos:\n  {REPO}:\n    limits:\n      max_files: 7\n"
     )
-    cfg = load_config(None, {})
+    cfg = load_config(None, base_env())
     resolved = cfg.resolve(REPO, {"limits": {"max_file_bytes": 11}})
     assert resolved.values["limits"] == {
         **defaults()["limits"],
@@ -499,7 +498,7 @@ def test_repo_lookup_is_exact() -> None:
 
 def test_run_pr_code_is_per_repo_with_defaults_filled() -> None:
     write_main(f"repos:\n  {REPO}:\n    run_pr_code:\n      command: [npm, test]\n")
-    cfg = load_config(None, {})
+    cfg = load_config(None, base_env())
     assert cfg.resolve().values["run_pr_code"] is None
     code = cfg.resolve(REPO).values["run_pr_code"]
     assert code == {
@@ -516,7 +515,7 @@ def test_run_pr_code_is_per_repo_with_defaults_filled() -> None:
 
 def test_repo_lists_replace_global_lists() -> None:
     write_main(f"setting_sources: [user]\nrepos:\n  {REPO}:\n    setting_sources: []\n")
-    assert load_config(None, {}).resolve(REPO).values["setting_sources"] == []
+    assert load_config(None, base_env()).resolve(REPO).values["setting_sources"] == []
 
 
 def test_a_flag_value_is_validated() -> None:
@@ -526,8 +525,9 @@ def test_a_flag_value_is_validated() -> None:
             cfg.resolve(None, flags)
         assert info.value.code == "usage"
         assert "sk-live-123" not in json.dumps(info.value.envelope())
-    with pytest.raises(ValueError):
+    with pytest.raises(ReviewRunError) as info:
         cfg.resolve(None, {"nope": 1})
+    assert info.value.code == "usage"
 
 
 def test_resolve_returns_independent_copies() -> None:

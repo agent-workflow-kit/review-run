@@ -11,7 +11,7 @@ import pytest
 from review_run.config import load_config, read_guidelines_file
 from review_run.config_semantic import env_name_refusal
 from review_run.errors import ReviewRunError
-from tests.config_helpers import load, write_main
+from tests.config_helpers import base_env, load, write_main
 
 REPO = "github.com/example-org/example-repo"
 
@@ -19,7 +19,7 @@ REPO = "github.com/example-org/example-repo"
 def keys_of(text: str) -> list[str]:
     write_main(text)
     with pytest.raises(ReviewRunError) as info:
-        load_config(None, {})
+        load_config(None, base_env())
     assert info.value.code == "config_invalid"
     assert info.value.details is not None
     return [info.value.details["key"]]
@@ -73,7 +73,7 @@ def test_env_allow_and_env_allowlist_refuse_credential_names(name: str) -> None:
 def test_refusal_message_never_echoes_the_name() -> None:
     write_main("env_allowlist: [MY_SECRET_NAME_XYZ]\n")
     with pytest.raises(ReviewRunError) as info:
-        load_config(None, {})
+        load_config(None, base_env())
     assert "MY_SECRET_NAME_XYZ" not in json.dumps(info.value.envelope())
 
 
@@ -155,7 +155,7 @@ def test_guidelines_file_with_dotdot_or_other_user_tilde_is_refused() -> None:
 def test_guidelines_error_never_echoes_the_path() -> None:
     write_main("guidelines_file: ~/very-private-name.md\n")
     with pytest.raises(ReviewRunError) as info:
-        load_config(None, {})
+        load_config(None, base_env())
     assert "very-private-name" not in json.dumps(info.value.envelope())
 
 
@@ -245,7 +245,7 @@ def test_plugin_dir_must_be_a_directory_with_placeholders_and_a_name() -> None:
 def test_plugin_errors_never_echo_the_path() -> None:
     write_main(f"plugin_dirs: [{Path.home() / 'private-thing'}]\n")
     with pytest.raises(ReviewRunError) as info:
-        load_config(None, {})
+        load_config(None, base_env())
     assert "private-thing" not in json.dumps(info.value.envelope())
 
 
@@ -391,5 +391,5 @@ def test_ro_binds_errors_name_only_the_index() -> None:
     assert keys_of(binds(d, Path.home() / ".ssh")) == [ro_key(1)]
     write_main(binds(Path.home() / ".ssh-private-thing"))
     with pytest.raises(ReviewRunError) as info:
-        load_config(None, {})
+        load_config(None, base_env())
     assert "private-thing" not in json.dumps(info.value.envelope())

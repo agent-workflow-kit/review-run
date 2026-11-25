@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final
 
-from jsonschema import Draft202012Validator
+from jsonschema import Draft202012Validator, validators
 
 from . import config_semantic as sem
 from .config_semantic import read_guidelines_file as read_guidelines_file
@@ -47,6 +47,7 @@ _NESTED: Final = ("limits", "me", "hooks")  # layered key by key
 _KEY_PART_MAX: Final = 64
 _ENV_INT_RE: Final = re.compile(r"(?:0|[1-9][0-9]{0,8})", re.ASCII)
 _FILE_KEY: Final = "(file)"
+_PATH_VARS: Final = ("HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_DATA_HOME")
 
 
 # -- schema ------------------------------------------------------------------------------------
@@ -91,9 +92,39 @@ def _schema() -> dict[str, Any]:
     return _python_anchors(document)
 
 
+def _is_integer(_checker: Any, instance: object) -> bool:
+    """JSON Schema counts 2000.0 as an integer; a config integer must be an int (not a bool)."""
+    return isinstance(instance, int) and not isinstance(instance, bool)
+
+
+_Validator: Final = validators.extend(
+    Draft202012Validator,
+    type_checker=Draft202012Validator.TYPE_CHECKER.redefine("integer", _is_integer),
+)
+
+
+def _without_required(node: Any) -> Any:
+    """An in-memory copy of a schema with every ``required`` list removed (a drop-in may set
+    part of an entry; the merged document is validated against the full schema)."""
+    if isinstance(node, dict):
+        return {
+            key: _without_required(value)
+            for key, value in node.items()
+            if not (key == "required" and isinstance(value, list))
+        }
+    if isinstance(node, list):
+        return [_without_required(item) for item in node]
+    return node
+
+
 @functools.cache
 def _validator() -> Draft202012Validator:
-    return Draft202012Validator(_schema())
+    return _Validator(_schema())
+
+
+@functools.cache
+def _partial_validator() -> Draft202012Validator:
+    return _Validator(_without_required(_schema()))
 
 
 def _deref(node: dict[str, Any]) -> dict[str, Any]:
@@ -188,7 +219,7 @@ def _schema_errors(
             for extra in error.instance:
                 if extra in known or any(p.search(str(extra)) for p in patterns):
                     continue
-                found.append((*_extra(path, str(extra)),))
+                found.append(_extra(path, str(extra)))
         elif keyword == "required" and isinstance(error.instance, dict):
             for name in error.validator_value:
                 if name not in error.instance:
@@ -198,7 +229,15 @@ def _schema_errors(
     return found
 
 
+_ECHOABLE_KEY_RE: Final = re.compile(r"[a-z_][a-z0-9_.-]{0,40}", re.ASCII)
+
+
 def _extra(path: tuple[object, ...], name: str) -> tuple[tuple[object, ...], str]:
+    """An unknown key: named only when it looks like a key name (it could be a pasted secret);
+    otherwise the parent is reported without the name."""
+    if _ECHOABLE_KEY_RE.fullmatch(name) is None:
+        what = "an invalid repo id" if path == ("repos",) else "an unknown key"
+        return path, f"contains {what}"
     where = (*path, name)
     if path == ("repos",):
         return where, "is not a valid repo id (host/<full project path>)"
@@ -211,10 +250,12 @@ def _extra(path: tuple[object, ...], name: str) -> tuple[tuple[object, ...], str
 
 def schema_issues(document: object, source: str) -> list[Issue]:
     """The schema problems of ``document`` (a whole config, or any subset of its keys)."""
-    return sorted(
-        Issue(_key(parts), problem, source)
-        for parts, problem in _schema_errors(_validator(), document)
-    )
+    return _issues(_validator(), document, source)
+
+
+def _issues(validator: Draft202012Validator, document: object, source: str) -> list[Issue]:
+    errors = _schema_errors(validator, document)
+    return sorted(Issue(_key(parts), problem, source) for parts, problem in errors)
 
 
 # -- semantic checks and normalization -----------------------------------------------------------
@@ -233,7 +274,7 @@ def _positive(text: object, *, allow_zero: bool = False) -> str | None:
 
 
 def _normalize_scope(
-    scope: dict[str, Any], path: tuple[object, ...]
+    scope: dict[str, Any], path: tuple[object, ...], env: Mapping[str, str] | None = None
 ) -> tuple[dict[str, Any], _ItemProblems]:
     """A schema-valid global or per-repo mapping with its semantic checks applied; paths and
     ``~`` are normalized (plugin and bind realpaths, the expanded guidelines path)."""
@@ -251,10 +292,19 @@ def _normalize_scope(
             add((name,), why)
     if isinstance(out.get("guidelines_file"), str):
         try:
-            out["guidelines_file"] = sem.expand_guidelines_path(out["guidelines_file"])
+            out["guidelines_file"] = sem.expand_guidelines_path(out["guidelines_file"], env)
             sem.read_guidelines_file(out["guidelines_file"])
         except sem.GuidelinesError as exc:
             add(("guidelines_file",), str(exc))
+    if isinstance(out.get("permission_profile"), str):
+        if (why := sem.permission_profile_refusal(out["permission_profile"])) is not None:
+            add(("permission_profile",), why)
+    model = out.get("model")
+    if isinstance(model, str):
+        if sem.has_control_char(model):
+            add(("model",), "must not contain control characters")
+        elif model.startswith("-"):
+            add(("model",), "must not start with '-'")
     if isinstance(out.get("plugin_dirs"), list):
         out["plugin_dirs"], found = sem.check_plugin_dirs(out["plugin_dirs"])
         for index, why in found:
@@ -264,13 +314,18 @@ def _normalize_scope(
         for index, entry in enumerate(entries):
             if (why := _positive(entry.get("timeout"))) is not None:
                 add(("hooks", hook, index, "timeout"), why)
+            if sem.has_control_char(entry.get("cmd", ""), allow="\n\t"):
+                add(("hooks", hook, index, "cmd"), "must not contain control characters")
     code = out.get("run_pr_code")
     if isinstance(code, dict):
         if (why := _positive(code.get("timeout"))) is not None:
             add(("run_pr_code", "timeout"), why)
+        for index, arg in enumerate(code.get("command") or []):
+            if sem.has_control_char(arg):
+                add(("run_pr_code", "command", index), "must not contain control characters")
         _check_env_names(code.get("env_allow"), ("run_pr_code", "env_allow"), add)
         if isinstance(code.get("ro_binds"), list):
-            code["ro_binds"], found = sem.check_ro_binds(code["ro_binds"])
+            code["ro_binds"], found = sem.check_ro_binds(code["ro_binds"], env)
             for index, why in found:
                 add(("run_pr_code", "ro_binds", index), why)
     return out, problems
@@ -284,13 +339,13 @@ def _check_env_names(names: object, where: tuple[object, ...], add: Any) -> None
 
 
 def _normalize_document(
-    document: dict[str, Any], source: str
+    document: dict[str, Any], source: str, env: Mapping[str, str] | None = None
 ) -> tuple[dict[str, Any], list[Issue]]:
     """Semantic checks of a merged file document: the global scope and every repo entry."""
-    out, problems = _normalize_scope({k: v for k, v in document.items() if k != "repos"}, ())
+    out, problems = _normalize_scope({k: v for k, v in document.items() if k != "repos"}, (), env)
     repos: dict[str, Any] = {}
     for repo_id, entry in document.get("repos", {}).items():
-        repos[repo_id], found = _normalize_scope(entry, ("repos", repo_id))
+        repos[repo_id], found = _normalize_scope(entry, ("repos", repo_id), env)
         problems.extend(found)
     out["repos"] = repos
     return out, sorted(Issue(_key(parts), why, source) for parts, why in problems)
@@ -352,7 +407,7 @@ def _env_layer(env: Mapping[str, str]) -> tuple[dict[str, Any], list[Issue]]:
         if found:
             issues.extend(Issue(name, i.problem, "environment") for i in found[:1])
             continue
-        normalized, semantic = _normalize_scope({key: value}, ())
+        normalized, semantic = _normalize_scope({key: value}, (), env)
         if semantic:
             issues.extend(Issue(name, i[1], "environment") for i in semantic[:1])
             continue
@@ -363,10 +418,11 @@ def _env_layer(env: Mapping[str, str]) -> tuple[dict[str, Any], list[Issue]]:
 # -- files ---------------------------------------------------------------------------------------
 
 
-def default_config_path() -> Path:
-    """``$XDG_CONFIG_HOME/review-run/config.yaml`` (when absolute), else ``~/.config/...``."""
-    xdg = os.environ.get("XDG_CONFIG_HOME", "")
-    base = Path(xdg) if xdg.startswith("/") else Path(os.path.expanduser("~")) / ".config"
+def default_config_path(env: Mapping[str, str] | None = None) -> Path:
+    """``$XDG_CONFIG_HOME/review-run/config.yaml`` (when absolute), else ``~/.config/...``;
+    the variables come from ``env`` (the process environment when None)."""
+    xdg = (os.environ if env is None else env).get("XDG_CONFIG_HOME", "")
+    base = Path(xdg) if xdg.startswith("/") else Path(sem.home_dir(env)) / ".config"
     return base / "review-run" / "config.yaml"
 
 
@@ -388,8 +444,10 @@ def _display(path: Path) -> str:
     return printable(str(path))
 
 
-def _discover(explicit: Path | None, issues: list[Issue]) -> list[Path]:
-    path = explicit if explicit is not None else default_config_path()
+def _discover(
+    explicit: Path | None, issues: list[Issue], env: Mapping[str, str] | None
+) -> list[Path]:
+    path = explicit if explicit is not None else default_config_path(env)
     files: list[Path] = []
     if explicit is not None or os.path.lexists(path):
         files.append(path)
@@ -430,14 +488,21 @@ class Config:
     file: dict[str, Any]
     env: dict[str, Any]
     files: tuple[Path, ...] = field(default=())
+    # the path variables (HOME, XDG_*) the config was loaded with; flags are normalized with them
+    environ: Mapping[str, str] | None = field(default=None, repr=False, compare=False)
 
     def resolve(self, repo: str | None = None, flags: Mapping[str, Any] | None = None) -> Resolved:
         """The effective values: defaults, config files, environment, ``repos.<repo>`` (the exact
         canonical id), then ``flags`` (only the keys the user gave; ``None`` is a value).
 
-        Raises ``usage`` naming the key when a flag value is invalid.
+        Raises ``usage`` naming the key when a flag value is invalid, ``flags`` is not a mapping
+        or ``repo`` is not a non-empty string.
         """
-        flag_layer = self._flag_layer(flags or {})
+        if repo is not None and (not isinstance(repo, str) or not repo):
+            raise ReviewRunError("usage", "the repo must be a non-empty string or absent")
+        if flags is not None and not isinstance(flags, Mapping):
+            raise ReviewRunError("usage", "flags must be a mapping")
+        flag_layer = self._flag_layer({} if flags is None else flags)
         values = defaults()
         values["run_pr_code"] = None
         origins: dict[str, str] = {}
@@ -450,16 +515,18 @@ class Config:
         _apply(values, origins, flag_layer, "flag")
         return Resolved(values, origins)
 
-    @staticmethod
-    def _flag_layer(flags: Mapping[str, Any]) -> dict[str, Any]:
+    def _flag_layer(self, flags: Mapping[str, Any]) -> dict[str, Any]:
         allowed = set(_schema()["properties"]) - {"repos"}
-        unknown = set(flags) - allowed
-        if unknown:
-            raise ValueError(f"not a config key: {sorted(unknown)}")
+        for name in flags:
+            if not isinstance(name, str) or name not in allowed:
+                key = _part(name)
+                raise ReviewRunError(
+                    "usage", f"flag for {key}: is not a config key", details={"key": key}
+                )
         layer = copy.deepcopy(dict(flags))
         found = [(i.key, i.problem) for i in schema_issues(layer, "flag")]
         if not found:
-            layer, problems = _normalize_scope(layer, ())
+            layer, problems = _normalize_scope(layer, (), self.environ)
             found = [(_key(parts), why) for parts, why in problems]
         if found:
             key, problem = found[0]
@@ -509,7 +576,7 @@ def check_config(explicit: Path | None = None, env: Mapping[str, str] | None = N
     """
     environment = os.environ if env is None else env
     issues: list[Issue] = []
-    files = _discover(explicit, issues)
+    files = _discover(explicit, issues, environment)
     merged: dict[str, Any] = {}
     total = 0
     for path in files:
@@ -523,7 +590,7 @@ def check_config(explicit: Path | None = None, env: Mapping[str, str] | None = N
         except ConfigFileError as exc:
             issues.append(Issue(_FILE_KEY, str(exc), name))
             continue
-        found = schema_issues(document, name)
+        found = _issues(_partial_validator(), document, name)
         issues.extend(found)
         if not found:
             merged = merge(merged, document)
@@ -533,11 +600,12 @@ def check_config(explicit: Path | None = None, env: Mapping[str, str] | None = N
         issues.extend(schema_issues(merged, "merged config"))
     normalized: dict[str, Any] = {}
     if not issues:
-        normalized, semantic = _normalize_document(merged, "config")
+        normalized, semantic = _normalize_document(merged, "config", environment)
         issues.extend(semantic)
     if issues:
         return CheckResult(None, sorted(set(issues)))
-    return CheckResult(Config(normalized, env_layer, tuple(files)), [])
+    paths = {k: environment[k] for k in _PATH_VARS if k in environment}
+    return CheckResult(Config(normalized, env_layer, tuple(files), paths), [])
 
 
 def load_config(explicit: Path | None = None, env: Mapping[str, str] | None = None) -> Config:
