@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": "failed",
+    "message": "closed message",
+    "reason": "tool_too_old"
+  }
+}

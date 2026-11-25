@@ -42,7 +42,7 @@ Implements [interface.md](interface.md) and [design.md](design.md). Issues are e
 | `hooks` | 2 | hook execution and payloads |
 | `plugin/` | 2 | bundled `review-pr` skill and permission profile |
 | `runs` | 3 | `resume`, `wait`, the refresh of `show`, `cancel`, `reconcile` (finalization by another process, expiry, the label recovery, outbox redelivery), `prune`, `cron` |
-| `coderun` | 4 | throwaway, sandboxed runner, output descriptor, removal (output through `sanitize`) |
+| `coderun` | 4 | throwaway, sandboxed runner, output descriptor, removal (output through `sanitizer`) |
 
 ## Stage 0: Scaffold, config, store, gateway, sanitizer
 
