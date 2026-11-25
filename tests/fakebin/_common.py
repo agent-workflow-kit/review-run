@@ -153,8 +153,13 @@ class Grammar:
 
     ``commands`` maps a command path (``("show",)``, ``("draft", "new")``) to its spec;
     ``global_flags`` are accepted before and after the command unless ``global_after_only``;
-    ``duplicates`` is ``"error"`` (a repeated scalar flag exits 2) or ``"same_ok"`` (the same
-    value twice is accepted, a different one is an error).
+    ``duplicates`` is ``"error"`` (a repeated scalar flag exits 2), ``"same_ok"`` (the same value
+    twice is accepted, a different one is an error) or ``"last_wins"`` (plain argparse: the last
+    value wins).
+
+    ``--`` is rejected everywhere on purpose: review-run never emits it and no real tool needs it,
+    so a fake that refuses it catches a caller that starts passing it (stricter than the real
+    tools by design).
     """
 
     tool: str
@@ -232,7 +237,7 @@ def parse(grammar: Grammar, argv: list[str]) -> Parsed:
                     raise Usage(f"{name} takes no value")
                 value = "true"
             seen = flags.get(name)
-            if seen is not None and not fl.repeat:
+            if seen is not None and not fl.repeat and grammar.duplicates != "last_wins":
                 if grammar.duplicates == "error" or seen[-1] != value:
                     raise Usage(f"{name} given more than once")
             flags.setdefault(name, []).append(value)
@@ -357,7 +362,15 @@ class Out:
 
 
 class Call:
-    """The process-wide record of this call and the way out of it."""
+    """The process-wide record of this call and the way out of it.
+
+    The signal handlers are installed (with the signals blocked) before the ``start`` record is
+    logged, and the signals stay blocked until the call is ``arm``ed (by ``apply_step``, once the
+    tool has set ``on_signal``): a test that signals as soon as it sees the ``start`` record always
+    reaches the tool's own handler.
+    """
+
+    SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
 
     def __init__(self, tool: str, argv: list[str]):
         self.tool = tool
@@ -365,6 +378,13 @@ class Call:
         self.id = uuid.uuid4().hex
         self.stdin_text: str | None = None
         self.done = False
+        self.on_signal: Callable[[int], Out | None] = lambda signum: None
+        self.before_finish: Callable[[Out], None] = lambda out: None
+        #: exit code by signal number, where the real tool differs from 128+N
+        self.signal_exit: dict[int, int] = {}
+        signal.pthread_sigmask(signal.SIG_BLOCK, self.SIGNALS)
+        for signum in self.SIGNALS:
+            signal.signal(signum, self._signal)
         self._log(
             {
                 "ev": "start",
@@ -379,11 +399,14 @@ class Call:
                 "ts": time.time(),
             }
         )
-        self.on_signal: Callable[[int], Out | None] = lambda signum: None
-        self.before_finish: Callable[[Out], None] = lambda out: None
-        signal.signal(signal.SIGTERM, self._signal)
-        signal.signal(signal.SIGINT, self._signal)
-        signal.signal(signal.SIGHUP, self._signal)
+
+    def arm(self) -> None:
+        """Deliver the signals held back since the start (idempotent)."""
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, self.SIGNALS)
+
+    def set_command(self, words: tuple[str, ...]) -> None:
+        """Record the command words the fake parsed (``draft new``), whatever flags came first."""
+        self._log({"ev": "parsed", "id": self.id, "command": list(words)})
 
     @staticmethod
     def _log(record: dict[str, Any]) -> None:
@@ -404,7 +427,7 @@ class Call:
         """A signal ends the call by that signal's exit code (128+N) unless the tool says more."""
         out = self.on_signal(signum)
         if out is None:
-            out = Out(exit=128 + signum, schema=None)
+            out = Out(exit=self.signal_exit.get(signum, 128 + signum), schema=None)
         self.finish(out, signaled=signum)
 
     def finish(self, out: Out, *, signaled: int | None = None) -> NoReturn:
@@ -493,6 +516,7 @@ def apply_step(
     schema: str | None,
 ) -> Out:
     """Turn a scenario step (or nothing) into the call's output."""
+    call.arm()
     if step is None:
         out = default()
         out.schema = out.schema if out.schema is not None or out.text is not None else schema
@@ -565,6 +589,7 @@ def run_tool(
             call.finish(Out(text=f"usage: {tool} ... (fake help)\n"))
         try:
             parsed = parse(grammar, argv)
+            call.set_command(parsed.command)
         except Usage as exc:
             call.finish(usage_out(tool, exc, json_mode=json_requested(argv)))
         except Unimplemented as exc:

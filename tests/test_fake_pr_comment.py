@@ -219,6 +219,22 @@ def test_global_flags_go_anywhere_including_between_draft_and_subcommand(fakebin
     )
 
 
+def test_a_different_scalar_value_twice_is_an_error(fakebin: FakeBin) -> None:
+    code, doc, _ = run(
+        fakebin, "draft", "new", PR, "--json", "--actor", "auto:x", "--actor", "auto:y"
+    )
+    assert code == 2 and doc["error"]["code"] == "usage"
+
+
+def test_draft_new_on_an_unknown_host_is_forgectls_refusal(fakebin: FakeBin) -> None:
+    fakebin.configure("pr-comment", hosts=["gitlab.com"])
+    code, doc, _ = run(fakebin, "draft", "new", PR, "--json")
+    err = doc["error"]
+    assert code == 20 and err["code"] == "refused" and err["reason"] == "unknown_host"
+    assert err["lower_error"]["reason"] == "unknown_host"
+    assert fakebin.state().get("_drafts", 0) == 0  # nothing was drafted
+
+
 def test_posting_commands_are_not_emulated(fakebin: FakeBin) -> None:
     assert run(fakebin, "review", PR, "--json")[0] == 99
 

@@ -29,7 +29,7 @@ import sqlite3
 import stat
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Any, Self
@@ -269,6 +269,23 @@ def _decode(column: str, value: Any) -> Any:
     return value
 
 
+MAX_TOLERANT_JSON = 1024 * 1024  # a JSON column longer than this is not decoded on a read path
+
+
+def _decode_tolerant(column: str, value: Any) -> Any:
+    """``_decode`` for read paths: too long, too deeply nested or not JSON gives None."""
+    if column in JSON_COLUMNS and isinstance(value, str | bytes) and len(value) > MAX_TOLERANT_JSON:
+        return None
+    try:
+        return _decode(column, value)
+    except (ValueError, TypeError, RecursionError):
+        return None
+
+
+def _lenient_text(raw: bytes) -> str:
+    return raw.decode("utf-8", errors="replace")
+
+
 # ---------------------------------------------------------------- state root
 
 
@@ -444,6 +461,16 @@ class Store:
                     return candidate
         raise ReviewRunError("internal", "no free run id after repeated collisions")
 
+    @contextmanager
+    def _lenient(self) -> Iterator[None]:
+        """Read TEXT columns with invalid UTF-8 as replacement characters, not an error."""
+        previous = self._conn.text_factory
+        self._conn.text_factory = _lenient_text
+        try:
+            yield
+        finally:
+            self._conn.text_factory = previous
+
     def resolve_run_id(self, ref: str) -> str:
         """Resolve a run id or a unique prefix of at least 4 characters (``rr-`` optional).
 
@@ -459,10 +486,11 @@ class Store:
                 f"a run id prefix needs at least {MIN_PREFIX} characters",
                 details={"min": MIN_PREFIX},
             )
-        rows = self._conn.execute(
-            "SELECT run_id FROM runs WHERE substr(run_id, 4, ?) = ? ORDER BY run_id LIMIT ?",
-            (len(body), body, MAX_MATCHES_LISTED + 1),
-        ).fetchall()
+        with self._lenient():
+            rows = self._conn.execute(
+                "SELECT run_id FROM runs WHERE substr(run_id, 4, ?) = ? ORDER BY run_id LIMIT ?",
+                (len(body), body, MAX_MATCHES_LISTED + 1),
+            ).fetchall()
         matches = [str(r[0]) for r in rows]
         if not matches:
             raise ReviewRunError("not_found", "no such run")
@@ -523,23 +551,84 @@ class Store:
         assert run is not None
         return run
 
-    def get_run(self, run_id: str) -> Run | None:
+    def get_run(self, run_id: str, *, tolerant: bool = False) -> Run | None:
+        """The run, or None. ``tolerant`` (read paths only) turns a JSON column that does not
+        decode (or is too long or too deeply nested) into None, and invalid UTF-8 in text into
+        replacement characters, so one corrupt row cannot break ``list``."""
         # Named columns only: a newer schema may have added more (additive migrations).
         names = [f.name for f in fields(Run) if f.name != "labels"]
-        row = self._conn.execute(
-            f"SELECT {', '.join(names)} FROM runs WHERE run_id = ?",  # noqa: S608 (closed names)
-            (run_id,),
-        ).fetchone()
-        if row is None:
-            return None
-        values = {n: _decode(n, v) for n, v in zip(names, row, strict=True)}
-        labels = tuple(
-            f"{k}={v}"
-            for k, v in self._conn.execute(
+        sql = f"SELECT {', '.join(names)} FROM runs WHERE run_id = ?"  # noqa: S608 (closed names)
+        with self._lenient() if tolerant else nullcontext():
+            row = self._conn.execute(sql, (run_id,)).fetchone()
+            if row is None:
+                return None
+            label_rows = self._conn.execute(
                 "SELECT key, value FROM labels WHERE run_id = ? ORDER BY position", (run_id,)
-            )
-        )
+            ).fetchall()
+        decode = _decode_tolerant if tolerant else _decode
+        values = {n: decode(n, v) for n, v in zip(names, row, strict=True)}
+        labels = tuple(f"{k}={v}" for k, v in label_rows)
         return Run(labels=labels, **values)
+
+    def list_run_ids(
+        self,
+        *,
+        states: Sequence[str] = (),
+        pr: str | None = None,
+        repo: str | None = None,
+        labels: Sequence[str] = (),
+        head: str | None = None,
+        since: str | None = None,
+        limit: int = 100,
+    ) -> tuple[list[str], bool]:
+        """Run ids newest first (``created_at`` descending, then run id), filters ANDed.
+
+        ``labels`` entries are ``k=v`` (exact pair) or ``k`` (any value); ``head`` matches
+        ``head_sha`` or the anchor's head; ``since`` is a ``format_time`` string. Read-only.
+        Returns the ids and whether more than ``limit`` matched.
+        """
+        where: list[str] = []
+        args: list[Any] = []
+        if states:
+            where.append(f"state IN ({', '.join('?' for _ in states)})")
+            args.extend(states)
+        if pr is not None:
+            where.append("pr = ?")
+            args.append(pr)
+        if repo is not None:
+            where.append("repo = ?")
+            args.append(repo)
+        for label in labels:
+            key, eq, value = label.partition("=")
+            if eq:
+                where.append(
+                    "EXISTS (SELECT 1 FROM labels l WHERE l.run_id = runs.run_id"
+                    " AND l.key = ? AND l.value = ?)"
+                )
+                args.extend((key, value))
+            else:
+                where.append(
+                    "EXISTS (SELECT 1 FROM labels l WHERE l.run_id = runs.run_id AND l.key = ?)"
+                )
+                args.append(key)
+        if head is not None:
+            # CASE is lazy: json_extract never sees a malformed anchor.
+            where.append(
+                "(head_sha = ? OR CASE WHEN json_valid(anchor)"
+                " THEN json_extract(anchor, '$.head_sha') END = ?)"
+            )
+            args.extend((head, head))
+        if since is not None:
+            where.append("created_at >= ?")
+            args.append(since)
+        clause = f" WHERE {' AND '.join(where)}" if where else ""
+        with self._lenient():
+            rows = self._conn.execute(
+                f"SELECT run_id FROM runs{clause} ORDER BY created_at DESC, run_id LIMIT ?",  # noqa: S608
+                (*args, limit + 1),
+            ).fetchall()
+        ids = [str(r[0]) for r in rows]
+        return ids[:limit], len(ids) > limit
 
     def update_fields(self, run_id: str, expect: Expect, /, **fields: Any) -> bool:
         """Set ``FREE_COLUMNS`` on a run whose key still equals ``expect`` (one compare-and-set).

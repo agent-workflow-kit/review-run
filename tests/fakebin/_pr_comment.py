@@ -220,10 +220,21 @@ def _check(call: Call, parsed: Parsed, cfg: dict[str, Any]) -> Out:
     return apply_step(TOOL, step, default, call, schema=f"{TOOL}/cli/draft-check.json")
 
 
+def _unknown_host() -> Out:
+    lower = {"code": "refused", "reason": "unknown_host", "message": "unknown host",
+             "details": None}  # fmt: skip
+    return error_out(TOOL, 20, {"code": "refused", "message": "unknown host",
+                                "reason": "unknown_host", "details": None,
+                                "lower_error": lower})  # fmt: skip
+
+
 def _new(call: Call, parsed: Parsed, cfg: dict[str, Any]) -> Out:
     if parsed.has("--expect-plan"):
         raise Usage("--expect-plan applies to posting commands only")
-    host, path, number, _ = parse_pr(parsed.args[0], cfg.get("hosts", ["github.com", "gitlab.com"]))
+    hosts = cfg.get("hosts", ["github.com", "gitlab.com"])
+    host, path, number, _ = parse_pr(parsed.args[0], hosts)
+    if host not in hosts:  # forgectl's unknown_host (exit 20), passed through as the real tool does
+        return _unknown_host()
     pr = f"{host}/{path}#{number}"
     event = parsed.get("--event", "comment")
     assert event is not None

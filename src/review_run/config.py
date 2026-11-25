@@ -37,6 +37,7 @@ from .config_yaml import (
 )
 from .durations import DurationError, parse_duration
 from .errors import ReviewRunError, printable
+from .schema_anchors import python_anchors
 
 ENV_PREFIX: Final = "REVIEW_RUN_"
 MAX_DROP_INS: Final = 256
@@ -61,35 +62,10 @@ def _schema_file() -> Path:
     raise FileNotFoundError("schemas/config.json")
 
 
-def _python_anchors(node: Any) -> Any:
-    """Python's ``$`` also matches before a trailing newline (ECMA's does not): a trailing ``$``
-    of every pattern becomes ``\\Z`` in the in-memory copy so ``"PATH\\n"`` cannot pass."""
-    if isinstance(node, dict):
-        out: dict[str, Any] = {}
-        for key, value in node.items():
-            if key == "pattern" and isinstance(value, str):
-                value = _anchor(value)
-            elif key == "patternProperties" and isinstance(value, dict):
-                value = {_anchor(k): _python_anchors(v) for k, v in value.items()}
-            else:
-                value = _python_anchors(value)
-            out[key] = value
-        return out
-    if isinstance(node, list):
-        return [_python_anchors(item) for item in node]
-    return node
-
-
-def _anchor(pattern: str) -> str:
-    if pattern.endswith("$") and not pattern.endswith("\\$"):
-        return pattern[:-1] + r"\Z"
-    return pattern
-
-
 @functools.cache
 def _schema() -> dict[str, Any]:
     document = json.loads(_schema_file().read_text(encoding="utf-8"))
-    return _python_anchors(document)
+    return python_anchors(document)
 
 
 def _is_integer(_checker: Any, instance: object) -> bool:

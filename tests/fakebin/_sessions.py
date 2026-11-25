@@ -12,6 +12,7 @@ A run's *plan* says how it ends (a scenario sets it, see ``tests/fake_scenarios.
      "summary": "...",              # report.summary (done)
      "artifact_text": "...",        # frozen artifact content (written under the session dir)
      "artifact": {...} | None,      # explicit artifact object (wins), or None for no artifact
+     "pending": False,              # parked launch: agent ``launching``, run never adopted
      "implicit": False,
      "result_lines": [...],         # lines of the headless result file (init object by default)
      "result_path": "default" | "none" | "missing",
@@ -27,7 +28,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from tests.fakebin._common import base32_id, fake_dir, iso
+from tests.fakebin._common import base32_id, fake_dir, iso, read_json
 
 #: outcome -> (exit code, final claude-session state, default end_reason, phase)
 OUTCOMES: dict[str, tuple[int, str, str, str]] = {
@@ -71,6 +72,15 @@ def session_dir(csession_id: str) -> Path:
     return fake_dir() / "sessions" / csession_id
 
 
+def peek_session_dir(agent_id: str | None) -> str:
+    """The session directory of ``agent_id``, or of the agent the next launch will create."""
+    state = read_json(fake_dir() / "state.json", {})
+    rec = agents(state).get(agent_id) if agent_id else None
+    if rec is not None:
+        return str(session_dir(rec["csession_id"]))
+    return str(session_dir(base32_id("cs-", f"session-{state.get('_agent_n', 0) + 1}")))
+
+
 def resolved_plan(plan: dict[str, Any] | None) -> dict[str, Any]:
     merged = {**DEFAULT_PLAN, **(plan or {})}
     if merged["outcome"] not in OUTCOMES:
@@ -91,7 +101,7 @@ def new_agent(
     rec = {
         "agent_id": agent_id,
         "csession_id": csession_id,
-        "status": "live",
+        "status": "launching" if plan.get("pending") else "live",
         "settings": settings,
         "run": 1,
         "runs": [new_run(1, plan, settings["mode"], now)],
@@ -243,6 +253,8 @@ def cs_state(rec: dict[str, Any]) -> tuple[str, str | None, str | None]:
     run = last_run(rec)
     if run["final"]:
         return run["outcome"]["state"], None, None
+    if is_pending(run):
+        return "starting", None, None
     return "working", "working", None
 
 
@@ -291,6 +303,11 @@ def agent_doc(rec: dict[str, Any]) -> dict[str, Any]:
         "torn_down_at": rec["torn_down_at"],
         "warnings": [],
     }
+
+
+def is_pending(run: dict[str, Any]) -> bool:
+    """A run created but never adopted (a parked launch): no wrapper, no session phase yet."""
+    return not run["final"] and bool(run["plan"].get("pending"))
 
 
 def is_live(rec: dict[str, Any]) -> bool:

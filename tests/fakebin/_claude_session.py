@@ -9,6 +9,7 @@ whose ``csession_id`` it is given, ``forget`` refuses a live or pending session 
 from __future__ import annotations
 
 import re
+import time
 from typing import Any
 
 from tests.fakebin import _sessions as sess
@@ -27,12 +28,17 @@ from tests.fakebin._common import (
     flag,
     iso,
     next_step,
-    positive_int_check,
     run_tool,
 )
 
 TOOL = "claude-session"
 _ID = re.compile(r"cs-[a-z2-7]{8}")
+
+
+def run_check(value: str) -> str | None:
+    """``status --run`` is a plain integer; a run that does not exist (``0``) exits 10."""
+    return None if re.fullmatch(r"[0-9]{1,9}", value) else "is not a run number"
+
 
 _GLOBAL = {
     "--json": flag(),
@@ -48,7 +54,7 @@ GRAMMAR = Grammar(
     global_flags=_GLOBAL,
     commands={
         ("status",): CommandSpec(
-            flags={"--run": flag(takes=True, check=positive_int_check)}, min_args=1, max_args=1
+            flags={"--run": flag(takes=True, check=run_check)}, min_args=1, max_args=1
         ),  # fmt: skip
         ("forget",): CommandSpec(
             flags={
@@ -69,6 +75,7 @@ GRAMMAR = Grammar(
         ).split()
     ),
     global_before_command=frozenset({"--version", "--help"}) | frozenset(),
+    duplicates="last_wins",  # plain argparse
 )
 
 
@@ -84,9 +91,11 @@ def _status_doc(rec: dict[str, Any], run: dict[str, Any]) -> dict[str, Any]:
     s = rec["settings"]
     final = run["final"]
     o = run["outcome"] or {}
-    state, activity, _ = (o["state"], None, None) if final else ("working", "working", None)
+    pending = sess.is_pending(run)
+    state, activity, _ = (o["state"], None, None) if final else sess.cs_state(rec)
     needs = "escalation" if final and o.get("outcome") == "needs-input" else None
-    phase = o.get("phase", "session")
+    phase = "launch" if pending else o.get("phase", "session")
+    expires = iso(time.time() + 3600) if pending else None
     now = iso()
     mode = run["mode"]
     run_doc = {
@@ -105,8 +114,8 @@ def _status_doc(rec: dict[str, Any], run: dict[str, Any]) -> dict[str, Any]:
         "permission_profile": None,
         "decision_ids": [],
         "input_files": list(s.get("input_names", [])),
-        "pending": False,
-        "expires_at": None,
+        "pending": pending,
+        "expires_at": expires,
         "started_at": None if phase == "launch" else run["started_at"],
         "session_started_at": None if phase == "launch" else run["started_at"],
         "ended_at": run["ended_at"],
@@ -116,10 +125,10 @@ def _status_doc(rec: dict[str, Any], run: dict[str, Any]) -> dict[str, Any]:
         "stop_requested_at": None,
         "warnings": list(o.get("warnings", [])),
         "state_since": run["ended_at"] or run["started_at"],
-        "wrapper_pid": None if final else 424243,
-        "wrapper_alive": not final,
-        "child_pid": None if final else 424244,
-        "child_alive": not final,
+        "wrapper_pid": None if final or pending else 424243,
+        "wrapper_alive": not final and not pending,
+        "child_pid": None if final or pending else 424244,
+        "child_alive": not final and not pending,
         "backstop_used": False,
         "report": o.get("report"),
         "outcome": o.get("outcome"),
@@ -149,8 +158,8 @@ def _status_doc(rec: dict[str, Any], run: dict[str, Any]) -> dict[str, Any]:
         "repo": s.get("repo"),
         "mode": mode,
         "current_run": rec["run"],
-        "pending": False,
-        "expires_at": None,
+        "pending": pending,
+        "expires_at": expires,
         "updated_at": rec["updated"],
         "csession_dir": str(sess.session_dir(rec["csession_id"])),
         "claude_session_id": None if phase == "launch" else f"claude-{rec['csession_id']}",

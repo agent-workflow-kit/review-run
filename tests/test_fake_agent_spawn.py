@@ -15,7 +15,6 @@ from typing import Any
 import pytest
 
 from review_run.gateway import CallTimeout
-from tests.fake_scenarios import OUTCOME_ROWS
 from tests.fakebin._sessions import OUTCOMES
 from tests.fakes import FakeBin
 
@@ -70,12 +69,24 @@ def test_launch_without_wait_returns_a_live_agent_and_no_run(fakebin: FakeBin, i
     assert json.loads(inputs["result"].read_text()) == doc
 
 
-@pytest.mark.parametrize("outcome", [o for o in OUTCOME_ROWS if OUTCOMES[o][3] == "session"])
-def test_wait_ends_the_run_as_the_table_says(fakebin: FakeBin, inputs: Any, outcome: str) -> None:
+#: docs/interface.md (launch mapping table): outcome -> exit code, written out, not read back
+#: from the fake's own table.
+WAIT_EXIT_CODES = {"done": 0, "blocked": 13, "needs-input": 13, "exited-unreported": 14,
+                   "killed": 15, "timeout": 16, "lost": 17, "failed": 18}  # fmt: skip
+
+
+def test_every_session_phase_outcome_row_has_a_literal_exit_code() -> None:
+    assert sorted(WAIT_EXIT_CODES) == sorted(o for o in OUTCOMES if OUTCOMES[o][3] == "session")
+    assert all(OUTCOMES[o][0] == code for o, code in WAIT_EXIT_CODES.items())
+
+
+@pytest.mark.parametrize(("outcome", "expected"), sorted(WAIT_EXIT_CODES.items()))
+def test_wait_ends_the_run_as_the_table_says(
+    fakebin: FakeBin, inputs: Any, outcome: str, expected: int
+) -> None:
     fakebin.use("agent-spawn", "outcome", outcome=outcome)
     agent = aid(launch(fakebin, inputs))
     code, doc, _ = run(fakebin, "agent-spawn", "wait", agent, "--json")
-    expected = OUTCOMES[outcome][0]
     assert code == expected and doc["exit_code"] == expected and doc["outcome"] == outcome
     assert doc["phase"] == "session" and doc["run"]["run"] == 1 and doc["timed_out"] is False
     assert doc["agent"]["status"] == "parked"
@@ -386,15 +397,16 @@ def test_a_usage_error_still_writes_the_result_file(fakebin: FakeBin, inputs: An
     assert json.loads(inputs["result"].read_text())["error"]["code"] == "usage"
 
 
-def test_a_relative_result_file_is_refused(fakebin: FakeBin, inputs: Any) -> None:
-    code, doc, _ = run(fakebin, "agent-spawn", "launch", "--result-file", "x.json", "--json")
-    assert code == 2 and doc["error"]["code"] == "usage"
+def test_a_relative_result_file_is_resolved_against_the_cwd(fakebin: FakeBin, inputs: Any) -> None:
+    code, doc, _ = run(fakebin, "agent-spawn", *launch_argv(inputs, "--result-file", "rel.json"))
+    assert code == 0  # the last --result-file wins, and a relative path is accepted
+    assert json.loads((fakebin.dir / "rel.json").read_text()) == doc  # cwd is the fake's dir
 
 
 def test_launch_hang_is_ended_by_the_gateway_timeout(fakebin: FakeBin, inputs: Any) -> None:
     fakebin.use("agent-spawn", "hang")
     with pytest.raises(CallTimeout):
-        fakebin.run("agent-spawn", *launch_argv(inputs), timeout=0.6)
+        fakebin.run("agent-spawn", *launch_argv(inputs), timeout=5)  # the start record is logged
     assert not fakebin.calls("agent-spawn")[0].finished
 
 
@@ -402,48 +414,14 @@ def test_wait_hang_is_ended_by_the_gateway_timeout(fakebin: FakeBin, inputs: Any
     agent = aid(launch(fakebin, inputs))
     fakebin.use("agent-spawn", "hang", command="wait")
     with pytest.raises(CallTimeout):
-        fakebin.run("agent-spawn", "wait", agent, "--json", timeout=0.6)
+        fakebin.run("agent-spawn", "wait", agent, "--json", timeout=5)
+    assert not fakebin.calls("agent-spawn", "wait")[0].finished
 
 
 def _start_and_signal(fb: FakeBin, argv: list[str], signum: int) -> subprocess.Popen[bytes]:
-    proc = subprocess.Popen(
-        [fb.argv0("agent-spawn"), *argv], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        env=fb.env(), start_new_session=True,
-    )  # fmt: skip
-    deadline = time.monotonic() + 10
-    while not fb.all_calls() and time.monotonic() < deadline:
-        time.sleep(0.05)
-    time.sleep(0.2)
-    os.kill(proc.pid, signum)  # the PID we launched
-    return proc
-
-
-def test_sigterm_on_a_hanging_launch_prints_the_interrupted_envelope(
-    fakebin: FakeBin, inputs: Any
-) -> None:
-    fakebin.use("agent-spawn", "hang")
-    proc = _start_and_signal(fakebin, launch_argv(inputs), signal.SIGTERM)
-    out, _ = proc.communicate(timeout=10)
-    assert proc.returncode == 143
-    doc = json.loads(out)
-    assert doc["error"]["code"] == "launch_failed" and doc["error"]["details"] == {
-        "cause": "interrupted"
-    }
-    assert json.loads(inputs["result"].read_text()) == doc
-
-
-def test_sigint_on_a_hanging_wait_prints_nothing(fakebin: FakeBin, inputs: Any) -> None:
-    agent = aid(launch(fakebin, inputs))
-    fakebin.use("agent-spawn", "hang", command="wait")
-    n_before = len(fakebin.all_calls())
-    proc = _start_and_signal_after(fakebin, ["wait", agent, "--json"], signal.SIGINT, n_before)
-    out, _ = proc.communicate(timeout=10)
-    assert proc.returncode == 130 and out == b""
-
-
-def _start_and_signal_after(
-    fb: FakeBin, argv: list[str], signum: int, n: int
-) -> subprocess.Popen[bytes]:
+    """Start the fake and signal it as soon as its ``start`` record exists (no sleep: the fake
+    installs its handlers before it logs the record and holds the signal until it is ready)."""
+    n = len(fb.all_calls())
     proc = subprocess.Popen(
         [fb.argv0("agent-spawn"), *argv], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         env=fb.env(), start_new_session=True,
@@ -451,9 +429,83 @@ def _start_and_signal_after(
     deadline = time.monotonic() + 10
     while len(fb.all_calls()) <= n and time.monotonic() < deadline:
         time.sleep(0.05)
-    time.sleep(0.2)
-    os.kill(proc.pid, signum)
+    os.kill(proc.pid, signum)  # the PID we launched
     return proc
+
+
+@pytest.mark.parametrize(
+    ("signum", "code"), [(signal.SIGTERM, 143), (signal.SIGHUP, 130), (signal.SIGINT, 130)]
+)
+def test_a_signaled_launch_prints_the_interrupted_envelope(
+    fakebin: FakeBin, inputs: Any, signum: int, code: int
+) -> None:
+    """interface.md, Signals: a launcher before any supervisor exits 143 (SIGTERM) or 130."""
+    fakebin.use("agent-spawn", "hang")
+    proc = _start_and_signal(fakebin, launch_argv(inputs), signum)
+    out, _ = proc.communicate(timeout=10)
+    assert proc.returncode == code
+    doc = json.loads(out)
+    assert doc["error"]["code"] == "launch_failed" and doc["error"]["details"] == {
+        "cause": "interrupted"
+    }
+    assert json.loads(inputs["result"].read_text()) == doc
+
+
+@pytest.mark.parametrize(
+    ("signum", "code"), [(signal.SIGTERM, 143), (signal.SIGHUP, 130), (signal.SIGINT, 130)]
+)
+def test_a_signaled_resume_exits_like_a_launch(
+    fakebin: FakeBin, inputs: Any, signum: int, code: int
+) -> None:
+    fakebin.use("agent-spawn", "outcome", outcome="needs-input")
+    agent = aid(launch(fakebin, inputs))
+    run(fakebin, "agent-spawn", "wait", agent, "--json")
+    fakebin.use("agent-spawn", "hang", command="resume")
+    proc = _start_and_signal(fakebin, ["resume", agent, *RESUME,
+                                       "--prompt-file", str(inputs["prompt"])], signum)  # fmt: skip
+    out, _ = proc.communicate(timeout=10)
+    assert proc.returncode == code and json.loads(out)["error"]["details"] == {
+        "cause": "interrupted"
+    }
+
+
+@pytest.mark.parametrize(
+    ("signum", "code"), [(signal.SIGTERM, 143), (signal.SIGHUP, 130), (signal.SIGINT, 130)]
+)
+def test_a_signaled_wait_prints_nothing(
+    fakebin: FakeBin, inputs: Any, signum: int, code: int
+) -> None:
+    agent = aid(launch(fakebin, inputs))
+    fakebin.use("agent-spawn", "hang", command="wait")
+    proc = _start_and_signal(fakebin, ["wait", agent, "--json"], signum)
+    out, _ = proc.communicate(timeout=10)
+    assert proc.returncode == code and out == b""
+
+
+def test_the_gateway_timeout_signal_reaches_the_handler_of_a_hanging_wait(
+    fakebin: FakeBin, inputs: Any
+) -> None:
+    """A SIGTERM held back until the call is ready is delivered, not lost."""
+    agent = aid(launch(fakebin, inputs))
+    fakebin.use("agent-spawn", "hang", command="wait")
+    proc = _start_and_signal(fakebin, ["wait", agent, "--json"], signal.SIGTERM)
+    proc.communicate(timeout=10)
+    assert fakebin.calls("agent-spawn", "wait")[0].signal == signal.SIGTERM
+
+
+@pytest.mark.parametrize("command", ["launch", "wait"])
+def test_garbage_stdout_is_passed_through_and_writes_no_result_file(
+    fakebin: FakeBin, inputs: Any, command: str
+) -> None:
+    agent = aid(launch(fakebin, inputs)) if command == "wait" else None
+    fakebin.script("agent-spawn", command, {"stdout_raw": "{bad"})
+    argv = launch_argv(inputs) if agent is None else ["wait", agent, "--json"]
+    inputs["result"].unlink(missing_ok=True)
+    result = fakebin.run("agent-spawn", *argv)
+    assert result.stdout == "{bad" and result.returncode == 0
+    assert not inputs["result"].exists()  # a raw step is not a JSON document
+    if agent is None:
+        assert fakebin.state().get("agents", {}) == {}
 
 
 def test_the_launch_environment_reaches_the_fake(fakebin: FakeBin, inputs: Any) -> None:
@@ -496,7 +548,6 @@ def test_the_launch_environment_reaches_the_fake(fakebin: FakeBin, inputs: Any) 
         ["--input-file", "/nonexistent-input-file"],
         ["--repo", "NOT A REPO"],
         ["extra-positional"],
-        ["--json"],  # given twice
     ],
 )
 def test_launch_rejects_what_the_real_tool_rejects(
@@ -548,3 +599,133 @@ def test_dry_run_ok_scenario_and_wait_error_scenarios(fakebin: FakeBin, inputs: 
     assert code == 12 and doc["error"]["code"] == "failed"
     fakebin.use("agent-spawn", "wait_not_found")
     assert run(fakebin, "agent-spawn", "wait", agent, "--json")[0] == 10
+
+
+# ---- argparse semantics and the launch usage checks (interface.md, Launch order step 1) ------
+
+
+def test_a_repeated_scalar_flag_keeps_the_last_value(fakebin: FakeBin, inputs: Any) -> None:
+    doc = launch(fakebin, inputs, "--name", "first", "--name", "second")
+    assert doc["agent"]["name"] == "second"
+    assert run(fakebin, "agent-spawn", "list", "--json", "--json")[0] == 0
+
+
+@pytest.mark.parametrize("extra", [["--timeout", "none"], ["--timeout", "10m"],
+                                   ["--prompt-file", "-"]])  # fmt: skip
+def test_launch_accepts_what_the_real_tool_accepts(
+    fakebin: FakeBin, inputs: Any, extra: list[str]
+) -> None:
+    assert run(fakebin, "agent-spawn", *launch_argv(inputs, *extra))[0] == 0
+
+
+def test_a_headless_launch_needs_a_skill_or_a_prompt(fakebin: FakeBin, inputs: Any) -> None:
+    for argv in (["launch", "--mode", "headless", "--json"],
+                 ["launch", "--mode", "headless", "--kind", "review", "--json"]):  # fmt: skip
+        code, doc, _ = run(fakebin, "agent-spawn", *argv)
+        assert code == 2 and doc["error"]["code"] == "usage"
+    for argv in (["launch", "--mode", "headless", "--skill", "a:b", "--json"],
+                 ["launch", "--mode", "headless", "--prompt", "hi", "--json"],
+                 ["launch", "--mode", "interactive", "--json"]):  # fmt: skip
+        assert run(fakebin, "agent-spawn", *argv)[0] == 0, argv
+
+
+def test_input_file_names_are_checked(fakebin: FakeBin, inputs: Any, tmp_path: Path) -> None:
+    bad = tmp_path / "bad name.txt"
+    bad.write_text("x")
+    other = tmp_path / "other"
+    other.mkdir()
+    twin = other / inputs["patch"].name
+    twin.write_text("y")
+    long = tmp_path / ("a" * 129)
+    long.write_text("z")
+    for path in (bad, twin, long):
+        code, doc, _ = run(fakebin, "agent-spawn", *launch_argv(inputs, "--input-file", str(path)))
+        assert code == 2 and doc["error"]["code"] == "usage", path
+    ok = tmp_path / ("a" * 128)
+    ok.write_text("z")
+    assert run(fakebin, "agent-spawn", *launch_argv(inputs, "--input-file", str(ok)))[0] == 0
+
+
+def test_at_most_64_distinct_labels(fakebin: FakeBin, inputs: Any) -> None:
+    def labels(n: int) -> list[str]:
+        return [x for i in range(n) for x in ("--label", f"k{i}=v")]
+
+    # launch_argv already carries two labels
+    assert run(fakebin, "agent-spawn", *launch_argv(inputs, *labels(62)))[0] == 0
+    code, doc, _ = run(fakebin, "agent-spawn", *launch_argv(inputs, *labels(63)))
+    assert code == 2 and doc["error"]["code"] == "usage"
+    # a repeated pair counts once
+    assert run(fakebin, "agent-spawn", *launch_argv(inputs, *labels(62), *labels(62)))[0] == 0
+
+
+def test_at_most_32_decision_ids(fakebin: FakeBin, inputs: Any) -> None:
+    def ids(n: int) -> list[str]:
+        return [x for i in range(n) for x in ("--decision-id", f"d{i}")]
+
+    assert run(fakebin, "agent-spawn", *launch_argv(inputs, *ids(32)))[0] == 0
+    code, doc, _ = run(fakebin, "agent-spawn", *launch_argv(inputs, *ids(33)))
+    assert code == 2 and doc["error"]["code"] == "usage"
+    assert run(fakebin, "agent-spawn", "list", *ids(33), "--json")[0] == 2
+
+
+def test_a_third_party_result_file_may_not_lie_in_the_cwd_or_the_session_dir(
+    fakebin: FakeBin, inputs: Any, tmp_path: Path
+) -> None:
+    from tests.fakebin._common import base32_id
+
+    work = tmp_path / "work"
+    work.mkdir()
+    session = fakebin.dir / "sessions" / base32_id("cs-", "session-1")
+    for argv in (("--cwd", str(work), "--result-file", str(work / "r.json")),
+                 ("--result-file", str(session / "r.json"))):  # fmt: skip
+        code, doc, _ = run(fakebin, "agent-spawn", *launch_argv(inputs, *argv))
+        assert code == 2 and doc["error"]["code"] == "usage", argv
+        assert not (work / "r.json").exists() and not (session / "r.json").exists()
+        assert fakebin.state().get("agents", {}) == {}
+    # a trusted run (not a review kind) is not subject to the rule
+    trusted = ("--kind", "implement", "--cwd", str(work), "--result-file", str(work / "r.json"))
+    assert run(fakebin, "agent-spawn", *launch_argv(inputs, *trusted))[0] == 0
+    assert (work / "r.json").exists()
+
+
+# ---- a parked launch: agent launching, run pending ---------------------------------------------
+
+
+def test_a_pending_launch_is_live_to_teardown_and_forget(fakebin: FakeBin, inputs: Any) -> None:
+    fakebin.use("agent-spawn", "pending")
+    doc = launch(fakebin, inputs)
+    agent, csid = aid(doc), doc["agent"]["csession_id"]
+    assert doc["agent"]["status"] == "launching" and doc["agent"]["session_state"] == "starting"
+    _, shown, _ = run(fakebin, "agent-spawn", "show", agent, "--json")
+    assert shown["agent"]["status"] == "launching"
+    # claude-session reports the pending run
+    _, st, _ = run(fakebin, "claude-session", "status", csid, "--json")
+    assert st["pending"] is True and st["expires_at"] and st["live"] is True
+    assert st["run"]["pending"] is True and st["run"]["phase"] == "launch"
+    # teardown, its dry run and forget are all refused
+    code, err, _ = run(fakebin, "agent-spawn", "teardown", agent, "--json")
+    assert code == 20 and err["error"]["reason"] == "live"
+    code, dry, _ = run(fakebin, "agent-spawn", "teardown", agent, "--dry-run", "--json")
+    assert code == 20 and dry["would_refuse"] == "live"
+    code, err, _ = run(fakebin, "claude-session", "forget", csid, "--json")
+    assert code == 20 and err["error"]["reason"] == "live"
+    assert run(fakebin, "claude-session", "status", csid, "--json")[0] == 0  # still there
+    # stopping ends the run; then both are allowed
+    assert run(fakebin, "agent-spawn", "stop", agent, "--json")[0] == 0
+    assert run(fakebin, "agent-spawn", "teardown", agent, "--json")[0] == 0
+
+
+def test_show_and_wait_of_a_torn_down_agent_report_the_tombstone(
+    fakebin: FakeBin, inputs: Any
+) -> None:
+    """agent-spawn's show of a torn-down full id exits 0 (status torn_down) and wait returns the
+    last outcome; only an unknown id exits 10 (docs/interface.md treats both as agent_gone)."""
+    fakebin.use("agent-spawn", "outcome", outcome="blocked")
+    agent = aid(launch(fakebin, inputs))
+    run(fakebin, "agent-spawn", "wait", agent, "--json")
+    assert run(fakebin, "agent-spawn", "teardown", agent, "--json")[0] == 0
+    code, doc, _ = run(fakebin, "agent-spawn", "show", agent, "--json")
+    assert code == 0 and doc["agent"]["status"] == "torn_down"
+    code, doc, _ = run(fakebin, "agent-spawn", "wait", agent, "--json")
+    assert code == 13 and doc["agent"]["status"] == "torn_down" and doc["outcome"] == "blocked"
+    assert run(fakebin, "agent-spawn", "show", "ag-aaaaaaaa", "--json")[0] == 10

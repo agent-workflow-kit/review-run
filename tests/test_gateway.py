@@ -191,6 +191,9 @@ def test_the_module_function_uses_the_installed_gateway() -> None:
         def run(self, argv: Any, **kw: Any) -> CompletedRun:
             return CompletedRun(tuple(argv), 7, "stub", "")
 
+        def spawn_detached(self, argv: Any, **kw: Any) -> Any:
+            raise NotImplementedError
+
     previous = gw.set_gateway(Stub())
     try:
         assert gw.run(["x"], timeout=1).stdout == "stub"

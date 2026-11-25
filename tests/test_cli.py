@@ -12,16 +12,15 @@ from tests.helpers import run_cli
 COMMANDS: list[list[str]] = [
     ["resume", "rr-aaaa", "--prompt-file", "-"],
     ["wait", "rr-aaaa"],
-    ["list"],
-    ["show", "rr-aaaa"],
     ["reconcile"],
     ["prune"],
     ["cancel", "rr-aaaa"],
     ["cron", "install"],
     ["cron", "uninstall"],
 ]
-# `export` is implemented (tests/test_audit.py) and `run` has its own tests
-# (tests/test_preflight.py: its checks reach sibling tools); the others are stubs of later issues.
+# `export` (tests/test_audit.py), `list` and `show` (tests/test_runs.py) are implemented and
+# `run` has its own tests (tests/test_preflight.py: its checks reach sibling tools); the others
+# are stubs of later issues.
 
 
 def test_version_prints_version_and_exits_zero(capsys: pytest.CaptureFixture[str]) -> None:
@@ -98,7 +97,7 @@ def test_every_command_is_a_stub_exiting_1_with_internal_envelope(
 
 
 def test_stub_human_mode_prints_one_line_to_stderr(capsys: pytest.CaptureFixture[str]) -> None:
-    res = run_cli(capsys, "list")
+    res = run_cli(capsys, "wait", "rr-aaaa")
     assert res.code == 1
     assert res.out == ""
     assert res.err.startswith("review-run: internal: ")
@@ -118,7 +117,7 @@ def test_global_flag_after_the_subcommand_wins_over_before() -> None:
 
 
 def test_verbose_with_quiet_is_accepted(capsys: pytest.CaptureFixture[str]) -> None:
-    assert run_cli(capsys, "--verbose", "--quiet", "list").code == 1
+    assert run_cli(capsys, "--verbose", "--quiet", "list").code == 0
 
 
 def test_decision_id_limit(capsys: pytest.CaptureFixture[str]) -> None:
@@ -246,8 +245,6 @@ def test_main_sets_umask_077(capsys: pytest.CaptureFixture[str]) -> None:
         ["wait", "rr-aaaa", "--timeout", "5m"],
         ["prune", "--older-than", "0"],
         ["prune", "--older-than", "30d"],
-        ["list", "--since", "2h"],
-        ["list", "--since", "2026-03-10T10:00:00Z"],
     ],
 )
 def test_valid_durations_reach_the_stub(
@@ -318,8 +315,13 @@ def test_usage_envelope_golden(capsys: pytest.CaptureFixture[str]) -> None:
     check_golden("usage.json", "cli/error.json", res.envelope())
 
 
+@pytest.mark.parametrize("since", ["2h", "2026-03-10T10:00:00Z"])
+def test_valid_since_values_reach_list(capsys: pytest.CaptureFixture[str], since: str) -> None:
+    assert run_cli(capsys, "--json", "list", "--since", since).code == 0
+
+
 def test_internal_envelope_golden(capsys: pytest.CaptureFixture[str]) -> None:
-    res = run_cli(capsys, "--json", "list")
+    res = run_cli(capsys, "--json", "wait", "rr-aaaa")
     assert res.code == 1
     check_golden("internal.json", "cli/error.json", res.envelope())
 
