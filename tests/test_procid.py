@@ -59,3 +59,15 @@ def test_comm_with_parentheses_and_spaces_is_parsed() -> None:
 
     line = "123 (a) b (c d) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 777 23 24"
     assert parse_start_ticks(line) == "777"
+
+
+def test_parse_accepts_ascii_digits_only() -> None:
+    for bad in ("\u00b2:boot:1", "\uff11:boot:1", "1:boot:\u0661", "1:boot:\u00b2"):
+        assert ProcIdentity.parse(bad) is None
+
+
+def test_parse_start_ticks_rejects_non_ascii_digits() -> None:
+    from review_run.procid import parse_start_ticks
+
+    fields = " ".join(["S"] + ["0"] * 18 + ["\u00b2"])
+    assert parse_start_ticks(f"1 (x) {fields}") is None

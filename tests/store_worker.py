@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 
 from review_run import procid
-from review_run.store import Expect, Store, lease_name
+from review_run.store import Expect, Lease, Store, lease_name
 
 KEY = Expect("running", "prefetch", None)
 
@@ -38,7 +38,8 @@ def main() -> None:
         with Store.open(root) as store:
             wait_for(go)
             if mode == "finalize":
-                out["won"] = store.begin_finalize(run_id, KEY)
+                lease = Lease(lease_name(run_id), args[1], procid.current(), "")
+                out["won"] = store.begin_finalize(run_id, KEY, lease=lease)
             else:
                 out["won"] = store.request_cancel(
                     run_id, KEY, actor=f"w{out['pid']}", exit_code=143

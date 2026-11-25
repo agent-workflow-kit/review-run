@@ -13,9 +13,11 @@ from review_run import procid
 from review_run.errors import ReviewRunError
 from review_run.store import (
     Expect,
+    Lease,
     NewEvent,
     NewRun,
     Store,
+    _cas,
     default_state_root,
     generate_run_id,
     is_run_id,
@@ -64,6 +66,17 @@ def new_run(store: Store, **kw: object) -> str:
         )
     )
     return run_id
+
+
+def run_lease(store: Store, run_id: str) -> Lease:
+    """The run's lease: taken now, or (when this test already holds it) read back."""
+    taken = store.acquire_lease(lease_name(run_id))
+    if taken is not None:
+        return taken
+    row = store._conn.execute(  # noqa: SLF001
+        "SELECT token FROM leases WHERE name = ?", (lease_name(run_id),)
+    ).fetchone()
+    return Lease(lease_name(run_id), row[0], procid.current(), "")
 
 
 # ------------------------------------------------------------------ state root and file modes
@@ -530,14 +543,14 @@ def test_advance_phase(store: Store) -> None:
 
 def finalizing(store: Store, run_id: str) -> Expect:
     key = Expect("running", "prefetch", None)
-    assert store.begin_finalize(run_id, key)
+    assert store.begin_finalize(run_id, key, lease=run_lease(store, run_id))
     return Expect("running", "finalize", None)
 
 
 def test_finalize_and_cancel_exclude_each_other_finalize_first(store: Store) -> None:
     run_id = new_run(store)
     key = Expect("running", "prefetch", None)
-    assert store.begin_finalize(run_id, key)
+    assert store.begin_finalize(run_id, key, lease=run_lease(store, run_id))
     assert not store.request_cancel(run_id, key, actor="a", exit_code=143)
     fin = Expect("running", "finalize", None)
     assert not store.request_cancel(run_id, fin, actor="a", exit_code=143)  # never in finalize
@@ -549,7 +562,7 @@ def test_finalize_and_cancel_exclude_each_other_cancel_first(store: Store, clock
     run_id = new_run(store)
     key = Expect("running", "prefetch", None)
     assert store.request_cancel(run_id, key, actor="human:me", exit_code=130)
-    assert not store.begin_finalize(run_id, key)
+    assert not store.begin_finalize(run_id, key, lease=run_lease(store, run_id))
     assert not store.request_cancel(run_id, key, actor="again", exit_code=143)  # once
     run = store.get_run(run_id)
     assert run is not None
@@ -678,14 +691,14 @@ def test_escalate_then_resume_then_revert_restores_the_record(store: Store) -> N
         13,
     )
     assert esc.escalated_at and esc.finished_at is None and esc.escalated_run == 1
-    assert store.begin_resume(run_id, esc.key, awaited_run=2)
-    assert not store.begin_resume(run_id, esc.key, awaited_run=2)  # one winner
+    assert store.begin_resume(run_id, esc.key, lease=lease, awaited_run=2)
+    assert not store.begin_resume(run_id, esc.key, lease=lease, awaited_run=2)  # one winner
     running = store.get_run(run_id)
     assert running is not None
     assert (running.state, running.phase, running.awaited_run) == ("running", "session", 2)
     assert (running.reason, running.exit_code, running.escalated_at) == (None, None, None)
     assert running.escalated_run == 1
-    assert store.resume_revert(run_id, awaited_run=2)
+    assert store.resume_revert(run_id, lease=lease, awaited_run=2)
     back = store.get_run(run_id)
     assert back is not None
     assert (back.state, back.phase, back.awaited_run) == ("escalated", None, 1)
@@ -706,11 +719,11 @@ def test_resume_started_clears_the_record(store: Store) -> None:
         exit_code=13,
     )
     esc = store.get_run(run_id)
-    assert esc is not None and store.begin_resume(run_id, esc.key, awaited_run=4)
-    assert store.resume_started(run_id, previous_awaited=4, awaited_run=5)
+    assert esc is not None and store.begin_resume(run_id, esc.key, lease=lease, awaited_run=4)
+    assert store.resume_started(run_id, lease=lease, previous_awaited=4, awaited_run=5)
     run = store.get_run(run_id)
     assert run is not None and run.awaited_run == 5 and run.escalation_reason is None
-    assert not store.resume_revert(run_id, awaited_run=5)  # nothing left to restore
+    assert not store.resume_revert(run_id, lease=lease, awaited_run=5)  # nothing left to restore
 
 
 def test_resume_loses_to_a_recorded_cancellation_and_cancel_loses_to_resume(store: Store) -> None:
@@ -730,15 +743,16 @@ def test_resume_loses_to_a_recorded_cancellation_and_cancel_loses_to_resume(stor
         assert esc is not None
         if cancel_first:
             assert store.request_cancel(run_id, esc.key, actor="a", exit_code=143)
-            assert not store.begin_resume(run_id, esc.key, awaited_run=2)  # exit 20
+            assert not store.begin_resume(run_id, esc.key, lease=lease, awaited_run=2)  # exit 20
         else:
-            assert store.begin_resume(run_id, esc.key, awaited_run=2)
+            assert store.begin_resume(run_id, esc.key, lease=lease, awaited_run=2)
             # the canceler read the escalated key; it lost and must re-read the running row
             assert not store.request_cancel(run_id, esc.key, actor="a", exit_code=143)
             running = store.get_run(run_id)
             assert running is not None
             assert store.request_cancel(run_id, running.key, actor="a", exit_code=143)
-            assert not store.resume_revert(run_id, awaited_run=2)  # the resumer ends it canceled
+            # the resumer ends it canceled
+            assert not store.resume_revert(run_id, lease=lease, awaited_run=2)
         store.release_lease(lease)
 
 
@@ -806,13 +820,13 @@ def test_an_inconclusive_liveness_check_keeps_the_lease(tmp_path: Path, clock: C
         assert s.acquire_lease("x") is not None
 
 
-def test_garbled_holder_text_counts_as_dead(store: Store) -> None:
+def test_garbled_holder_text_keeps_the_lease_until_expiry(store: Store) -> None:
     with store.transaction() as c:
         c.execute(
             "INSERT INTO leases (name, token, holder, acquired_at, expires_at)"
             " VALUES ('x', 't', 'garbage', 'a', '9999-12-31T00:00:00.000Z')"
         )
-    assert store.acquire_lease("x") is not None
+    assert store.acquire_lease("x") is None
 
 
 def test_leases_of_different_names_are_independent(store: Store) -> None:
@@ -829,6 +843,158 @@ def test_begin_finalize_under_a_lost_lease_raises(store: Store, clock: Clock) ->
     clock.advance(301)
     assert store.acquire_lease(name) is not None
     with pytest.raises(ReviewRunError):
-        store.begin_finalize(run_id, Expect("running", "prefetch", None), old)
+        store.begin_finalize(run_id, Expect("running", "prefetch", None), lease=old)
     run = store.get_run(run_id)
     assert run is not None and run.phase == "prefetch"
+
+
+# ------------------------------------------------------------------ round 1 review fixes
+
+
+def finished_run(store: Store) -> tuple[str, Expect]:
+    run_id = new_run(store)
+    lease = run_lease(store, run_id)
+    fin = finalizing(store, run_id)
+    assert store.end_run(run_id, fin, lease=lease, state="done", reason=None, exit_code=0)
+    return run_id, Expect("done", None, None)
+
+
+def test_terminal_runs_are_immutable(store: Store) -> None:
+    run_id, done = finished_run(store)
+    lease = run_lease(store, run_id)
+    with pytest.raises(ValueError):
+        store.end_run(run_id, done, lease=lease, state="failed", reason="canceled", exit_code=143)
+    with pytest.raises(ValueError):
+        store.update_fields(run_id, done, artifact_sha256="changed")
+    with pytest.raises(ValueError):
+        store.advance_phase(run_id, done, "session")
+    run = store.get_run(run_id)
+    assert run is not None and (run.state, run.artifact_sha256) == ("done", None)
+
+
+def test_the_compare_and_set_itself_refuses_a_terminal_row(store: Store) -> None:
+    run_id, _ = finished_run(store)
+    with store.transaction() as conn:
+        # a caller that lies about the key it read still changes nothing
+        assert _cas(conn, run_id, Expect("done", None, None), {"agent_id": "x"}) == 0
+
+
+def test_escalation_yields_to_a_recorded_cancellation(store: Store) -> None:
+    run_id = new_run(store)
+    lease = run_lease(store, run_id)
+    key = Expect("running", "prefetch", None)
+    assert store.request_cancel(run_id, key, actor="a", exit_code=143)
+    assert not store.end_run(
+        run_id, key, lease=lease, state="escalated", reason="needs_input", exit_code=13
+    )
+    run = store.get_run(run_id)
+    assert run is not None and run.state == "running" and run.cancel_requested_at
+    assert store.end_run(run_id, key, lease=lease, state="failed", reason="canceled", exit_code=143)
+
+
+def test_begin_finalize_requires_a_lease(store: Store) -> None:
+    run_id = new_run(store)
+    with pytest.raises(TypeError):
+        store.begin_finalize(run_id, Expect("running", "prefetch", None))  # type: ignore[call-arg]
+
+
+def test_resume_steps_hold_the_run_lease(store: Store) -> None:
+    run_id = new_run(store)
+    lease = run_lease(store, run_id)
+    assert store.end_run(
+        run_id,
+        Expect("running", "prefetch", None),
+        lease=lease,
+        state="escalated",
+        reason="blocked",
+        exit_code=13,
+    )
+    esc = store.get_run(run_id)
+    assert esc is not None
+    forged = Lease(lease_name(run_id), "0" * 32, lease.holder, lease.expires_at)
+    with pytest.raises(ReviewRunError):
+        store.begin_resume(run_id, esc.key, lease=forged, awaited_run=2)
+    with pytest.raises(ReviewRunError):
+        store.resume_started(run_id, lease=forged, previous_awaited=2, awaited_run=3)
+    with pytest.raises(ReviewRunError):
+        store.resume_revert(run_id, lease=forged, awaited_run=2)
+    other = Lease(lease_name("rr-aaaaaaaa"), lease.token, lease.holder, lease.expires_at)
+    with pytest.raises(ValueError):
+        store.begin_resume(run_id, esc.key, lease=other, awaited_run=2)
+    run = store.get_run(run_id)
+    assert run is not None and run.state == "escalated"
+
+
+def test_advance_phase_cannot_leave_finalize(store: Store) -> None:
+    run_id = new_run(store)
+    fin = finalizing(store, run_id)
+    with pytest.raises(ValueError):
+        store.advance_phase(run_id, fin, "session")
+    run = store.get_run(run_id)
+    assert run is not None and run.phase == "finalize"
+
+
+@pytest.mark.parametrize(
+    ("state", "reason", "exit_code"),
+    [
+        ("done", "x", 0),
+        ("done", None, 1),
+        ("done", None, None),
+        ("failed", None, 12),
+        ("failed", "", 12),
+        ("failed", "canceled", None),
+        ("failed", "canceled", "143"),
+        ("escalated", None, 13),
+        ("escalated", "needs_input", True),
+    ],
+)
+def test_end_run_validates_reason_and_exit_code(
+    store: Store, state: str, reason: object, exit_code: object
+) -> None:
+    run_id = new_run(store)
+    lease = run_lease(store, run_id)
+    with pytest.raises(ValueError):
+        store.end_run(
+            run_id,
+            Expect("running", "prefetch", None),
+            lease=lease,
+            state=state,
+            reason=reason,  # type: ignore[arg-type]
+            exit_code=exit_code,  # type: ignore[arg-type]
+        )
+    run = store.get_run(run_id)
+    assert run is not None and run.state == "running"
+
+
+def test_update_fields_with_nothing_to_set_is_refused(store: Store) -> None:
+    run_id = new_run(store)
+    with pytest.raises(ValueError):
+        store.update_fields(run_id, Expect("running", "prefetch", None))
+
+
+def test_acquire_lease_reads_the_clock_inside_the_transaction(tmp_path: Path) -> None:
+    seen: list[bool] = []
+    box: dict[str, Store] = {}
+
+    def now() -> dt.datetime:
+        store = box.get("s")
+        if store is not None:
+            seen.append(store._conn.in_transaction)  # noqa: SLF001
+        return dt.datetime(2026, 1, 1, tzinfo=dt.UTC)
+
+    with Store.open(tmp_path / "state", now=now) as s:
+        box["s"] = s
+        assert s.acquire_lease("x") is not None
+    assert seen and all(seen)
+
+
+def test_a_hostile_holder_text_never_raises_and_keeps_the_lease(store: Store) -> None:
+    for holder in ("\u00b2:a:1", "\uff11\uff12:a:1", "1:a:\u0661"):
+        with store.transaction() as c:
+            c.execute("DELETE FROM leases WHERE name = 'h'")
+            c.execute(
+                "INSERT INTO leases (name, token, holder, acquired_at, expires_at)"
+                " VALUES ('h', 't', ?, 'a', '9999-12-31T00:00:00.000Z')",
+                (holder,),
+            )
+        assert store.acquire_lease("h") is None

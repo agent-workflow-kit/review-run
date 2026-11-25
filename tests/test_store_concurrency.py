@@ -48,6 +48,14 @@ def make_run(root: Path) -> str:
     return run_id
 
 
+def hold_run_lease(root: Path, run_id: str) -> str:
+    """Take the run's lease in this (the test's) process; workers present its token."""
+    with Store.open(root) as store:
+        lease = store.acquire_lease(lease_name(run_id))
+        assert lease is not None
+        return lease.token
+
+
 def wait_file(path: Path, limit: float = 20.0) -> None:
     deadline = time.monotonic() + limit
     while not path.exists():
@@ -65,7 +73,8 @@ def test_concurrent_first_open_migrates_once(tmp_path: Path) -> None:
 def test_exactly_one_finalizer_wins(tmp_path: Path) -> None:
     root, go = tmp_path / "state", tmp_path / "go"
     run_id = make_run(root)
-    procs = [spawn("finalize", root, go, run_id) for _ in range(WORKERS)]
+    token = hold_run_lease(root, run_id)
+    procs = [spawn("finalize", root, go, run_id, token) for _ in range(WORKERS)]
     go.write_text("go")
     wins = [r["won"] for r in collect(procs)]
     assert wins.count(True) == 1
@@ -90,7 +99,8 @@ def test_exactly_one_canceler_wins(tmp_path: Path) -> None:
 def test_finalize_and_cancel_race_has_exactly_one_winner_in_total(tmp_path: Path) -> None:
     root, go = tmp_path / "state", tmp_path / "go"
     run_id = make_run(root)
-    procs = [spawn("finalize", root, go, run_id) for _ in range(3)]
+    token = hold_run_lease(root, run_id)
+    procs = [spawn("finalize", root, go, run_id, token) for _ in range(3)]
     procs += [spawn("cancel", root, go, run_id) for _ in range(3)]
     go.write_text("go")
     results = collect(procs)
@@ -140,7 +150,9 @@ def test_killed_in_the_middle_of_a_transaction_leaves_the_old_state(
         if op == "cancel":
             assert store.request_cancel(run_id, KEY, actor="a", exit_code=143)
         else:
-            assert store.begin_finalize(run_id, KEY)
+            lease = store.acquire_lease(lease_name(run_id))
+            assert lease is not None
+            assert store.begin_finalize(run_id, KEY, lease=lease)
         assert store.schema_version() == 1
 
 

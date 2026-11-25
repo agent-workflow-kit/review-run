@@ -253,7 +253,7 @@ FREE_COLUMNS = frozenset(
         "config_sha256",
     }
 )
-_TERMINAL_STATES = ("done", "failed")
+_LIVE_STATES = ("running", "escalated")  # terminal runs are immutable in the store
 _NON_SESSION_PHASES = ("prefetch", "code_run", "session")
 
 
@@ -545,8 +545,14 @@ class Store:
         """Set ``FREE_COLUMNS`` on a run whose key still equals ``expect`` (one compare-and-set).
 
         Several columns change in one transaction (for example ``agent_id``, ``csession_id`` and
-        ``awaited_run`` at launch). ``False`` when the row no longer has that key.
+        ``awaited_run`` at launch). ``False`` when the row no longer has that key. Terminal runs
+        are immutable: ``expect`` must name a ``running`` or ``escalated`` run, and the update
+        itself refuses other rows.
         """
+        if expect.state not in _LIVE_STATES:
+            raise ValueError("a terminal run cannot change")
+        if not fields:
+            raise ValueError("no fields to set")
         _check_columns(fields, FREE_COLUMNS)
         with self.transaction() as conn:
             return _cas(conn, run_id, expect, fields) == 1
@@ -558,11 +564,13 @@ class Store:
             raise ValueError("advance_phase cannot enter this phase")
         if expect.state != "running":
             raise ValueError("only a running run changes phase")
+        if expect.phase == "finalize":
+            raise ValueError("a run cannot leave finalize")
         _check_columns(fields, FREE_COLUMNS)
         with self.transaction() as conn:
             return _cas(conn, run_id, expect, {**fields, "phase": phase}) == 1
 
-    def begin_finalize(self, run_id: str, expect: Expect, lease: Lease | None = None) -> bool:
+    def begin_finalize(self, run_id: str, expect: Expect, *, lease: Lease) -> bool:
         """Move into phase ``finalize``; succeeds only while no cancellation is recorded."""
         if expect.state != "running" or expect.phase == "finalize":
             raise ValueError("finalize starts from a running run outside finalize")
@@ -597,14 +605,16 @@ class Store:
                 == 1
             )
 
-    def begin_resume(self, run_id: str, expect: Expect, *, awaited_run: int) -> bool:
-        """``escalated`` to ``running`` (phase ``session``) with ``awaited_run`` set.
+    def begin_resume(self, run_id: str, expect: Expect, *, lease: Lease, awaited_run: int) -> bool:
+        """``escalated`` to ``running`` (phase ``session``) with ``awaited_run`` set. The caller
+        holds the run's lease (interface.md, Resume: ``resume`` holds it throughout).
 
         The escalation's reason, exit code and time move to the escalation record. Refused while
         a cancellation is recorded or the row changed since ``expect``."""
         if expect.state != "escalated":
             raise ValueError("resume starts from an escalated run")
         with self.transaction() as conn:
+            _require_lease(conn, lease, run_id)
             moved = conn.execute(
                 "UPDATE runs SET state = 'running', phase = 'session', awaited_run = ?,"
                 " escalation_reason = reason, escalation_exit_code = exit_code,"
@@ -616,9 +626,12 @@ class Store:
             )
             return moved.rowcount == 1
 
-    def resume_started(self, run_id: str, *, previous_awaited: int, awaited_run: int) -> bool:
+    def resume_started(
+        self, run_id: str, *, lease: Lease, previous_awaited: int, awaited_run: int
+    ) -> bool:
         """The resumed session started: set ``awaited_run`` to its run and clear the record."""
         with self.transaction() as conn:
+            _require_lease(conn, lease, run_id)
             cur = conn.execute(
                 "UPDATE runs SET awaited_run = ?, escalation_reason = NULL,"
                 " escalation_exit_code = NULL, escalation_at = NULL,"
@@ -629,13 +642,14 @@ class Store:
             )
             return cur.rowcount == 1
 
-    def resume_revert(self, run_id: str, *, awaited_run: int) -> bool:
+    def resume_revert(self, run_id: str, *, lease: Lease, awaited_run: int) -> bool:
         """The reverse compare-and-set: back to ``escalated`` with the stored escalation values.
 
         ``False`` when the row moved (a recorded cancellation included: the caller then ends the
         run ``canceled`` itself).
         """
         with self.transaction() as conn:
+            _require_lease(conn, lease, run_id)
             cur = conn.execute(
                 "UPDATE runs SET state = 'escalated', phase = NULL,"
                 " awaited_run = escalation_awaited_run, reason = escalation_reason,"
@@ -662,11 +676,29 @@ class Store:
         events: Sequence[NewEvent] = (),
     ) -> bool:
         """The terminal (or ``escalated``) compare-and-set, with its outbox events, in one
-        transaction. The caller must hold the run's lease. ``done`` is refused while a
-        cancellation is recorded. ``False`` when another process already moved the row.
+        transaction. The caller must hold the run's lease. ``done`` and ``escalated`` are
+        refused while a cancellation is recorded (only ``failed`` may end such a run). ``False``
+        when another process already moved the row. ``expect`` must name a ``running`` or
+        ``escalated`` run: terminal runs are immutable.
+
+        ``done`` takes ``reason=None, exit_code=0``; ``failed`` and ``escalated`` take a
+        non-empty ``reason`` and an integer ``exit_code``. Which reason goes with which state is
+        the caller's mapping (#9 and #11 own it); the store checks only the shape.
         """
         if state not in ("done", "failed", "escalated"):
             raise ValueError("end_run ends a run as done, failed or escalated")
+        if expect.state not in _LIVE_STATES:
+            raise ValueError("a terminal run cannot change")
+        if state == "done":
+            if reason is not None or exit_code != 0 or isinstance(exit_code, bool):
+                raise ValueError("a done run has no reason and exit code 0")
+        elif (
+            not isinstance(reason, str)
+            or not reason
+            or not isinstance(exit_code, int)
+            or isinstance(exit_code, bool)
+        ):
+            raise ValueError("a failed or escalated run needs a reason and an integer exit code")
         if lease.name != lease_name(run_id):
             raise ValueError("the lease belongs to another run")
         extra = dict(fields or {})
@@ -685,7 +717,7 @@ class Store:
             sets["finished_at"] = now
         with self.transaction() as conn:
             _require_lease(conn, lease, run_id)
-            if _cas(conn, run_id, expect, sets, no_cancel=(state == "done")) != 1:
+            if _cas(conn, run_id, expect, sets, no_cancel=(state != "failed")) != 1:
                 return False
             for event in events:
                 conn.execute(
@@ -773,14 +805,14 @@ class Store:
         read, keeps it until it expires.
         """
         holder = holder or procid.current()
-        now = self._now()
         with self.transaction() as conn:
+            now = self._now()  # read under the write lock: BEGIN may have waited seconds
             row = conn.execute(
                 "SELECT holder, expires_at FROM leases WHERE name = ?", (name,)
             ).fetchone()
             if row is not None and row[1] > format_time(now):
                 owner = procid.ProcIdentity.parse(row[0])
-                alive = self._is_alive(owner) if owner is not None else False
+                alive = self._is_alive(owner) if owner is not None else None  # unreadable: keep
                 if alive is not False:
                     return None
             lease = Lease(
@@ -834,9 +866,7 @@ def _check_columns(fields: Mapping[str, Any], allowed: frozenset[str]) -> None:
         raise ValueError(f"column not settable here: {bad[0]}")
 
 
-def _require_lease(conn: sqlite3.Connection, lease: Lease | None, run_id: str) -> None:
-    if lease is None:
-        return
+def _require_lease(conn: sqlite3.Connection, lease: Lease, run_id: str) -> None:
     if lease.name != lease_name(run_id):
         raise ValueError("the lease belongs to another run")
     row = conn.execute("SELECT token FROM leases WHERE name = ?", (lease.name,)).fetchone()
@@ -869,7 +899,8 @@ def _cas(
     assignments = ", ".join(f"{column} = ?" for column in sets)
     sql = (
         f"UPDATE runs SET {assignments} WHERE run_id = ? AND state = ? AND phase IS ?"
-        " AND awaited_run IS ?" + (" AND cancel_requested_at IS NULL" if no_cancel else "")
+        " AND awaited_run IS ? AND state IN ('running', 'escalated')"
+        + (" AND cancel_requested_at IS NULL" if no_cancel else "")
     )
     params = [_encode(c, v) for c, v in sets.items()]
     params += [run_id, expect.state, expect.phase, expect.awaited_run]

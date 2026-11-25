@@ -10,10 +10,12 @@ TODO(#11): a macOS identity source (needs the gateway for ``ps``).
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
 _BOOT_ID = Path("/proc/sys/kernel/random/boot_id")
+_DIGITS = re.compile(r"[0-9]+")
 _START_FIELD = 19  # field 22 of /proc/<pid>/stat, counted from the field after the command name
 
 
@@ -29,7 +31,7 @@ class ProcIdentity:
     def parse(cls, text: str) -> ProcIdentity | None:
         pid_s, sep, start = text.partition(":")
         boot, sep2, ticks = start.rpartition(":")
-        if not (sep and sep2 and boot and ticks.isdigit() and pid_s.isdigit()):
+        if not (sep and sep2 and boot and _DIGITS.fullmatch(ticks) and _DIGITS.fullmatch(pid_s)):
             return None
         pid = int(pid_s)
         return cls(pid, start) if pid > 0 else None
@@ -39,7 +41,7 @@ def parse_start_ticks(stat_line: str) -> str | None:
     """The start-time field of a ``/proc/<pid>/stat`` line (the command name may hold anything)."""
     _, sep, rest = stat_line.rpartition(")")
     fields = rest.split()
-    if not sep or len(fields) <= _START_FIELD or not fields[_START_FIELD].isdigit():
+    if not sep or len(fields) <= _START_FIELD or not _DIGITS.fullmatch(fields[_START_FIELD]):
         return None
     return fields[_START_FIELD]
 
