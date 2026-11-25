@@ -35,7 +35,8 @@ Implements [interface.md](interface.md) and [design.md](design.md). Issues are e
 | `store` | 0 | SQLite (WAL, additive migrations), run directory, leases, ids |
 | `sanitizer` | 0 | the sanitizer (used by `prompt`, `coderun` and human output) |
 | `audit` | 0 | `audit.jsonl`, `log.jsonl`, `export` |
-| `prefetch` | 1 | forgectl and `pr-comment draft new` reads, head comparison, manifest, per-file patches, size caps |
+| `prefetch` | 1 | forgectl and `pr-comment draft new` reads, head comparison |
+| `manifest` | 1 | manifest entries, per-file patches, hunk splitting, size caps, the prompt table |
 | `prompt` | 1 | fenced prompt and input files, nonce |
 | `launch` | 2 | agent-spawn arguments, result handling, and the per-phase signal handling (`signals`) |
 | `finalize` | 2 | artifact checks, normalization, meta derivation, teardown |

@@ -67,8 +67,6 @@ _MARKED_CATEGORIES = frozenset({"Cf", "Co", "Cs", "Cn", "Zl", "Zp"})
 # character (a superset of what marking already removed).
 _INVISIBLE_CATEGORIES = frozenset({"Mn", "Me", "Mc", "Cf", "Co", "Cs", "Cn", "Cc", "Zl", "Zp"})
 
-# Only characters outside printable ASCII, TAB and LF can need marking.
-_NEEDS_CHECK = re.compile(r"[^\x20-\x7e\t\n]")
 _MARKER = re.compile(r"<U\+[0-9A-F]{4,6}>")
 _MARKER_MAX_LENGTH = 10  # "<U+10FFFF>"
 _LT_CHAR = re.compile("[" + re.escape(LT_CHARS) + "]")
@@ -98,19 +96,31 @@ def _is_marked(char: str) -> bool:
     )
 
 
+class _MarkTable(dict[int, str]):
+    """A ``str.translate`` table that maps a character to its ``<U+XXXX>`` marker when it is
+    marked (by ``_is_marked`` or because it is in ``extra``) and to itself otherwise. Each
+    character is decided once and cached, so a long run of one character costs one Python call
+    and the rest of the work happens in C."""
+
+    def __init__(self, extra: str) -> None:
+        super().__init__()
+        self._extra = extra
+
+    def __missing__(self, codepoint: int) -> str:
+        char = chr(codepoint)
+        value = _marker(char) if char in self._extra or _is_marked(char) else char
+        if len(self) < _TABLE_LIMIT:
+            self[codepoint] = value
+        return value
+
+
 @lru_cache(maxsize=16)
-def _mark_pattern(extra: str) -> re.Pattern[str]:
-    if not extra:
-        return _NEEDS_CHECK
-    return re.compile(f"{_NEEDS_CHECK.pattern}|[{re.escape(extra)}]")
+def _mark_table(extra: str) -> _MarkTable:
+    return _MarkTable(extra)
 
 
 def _mark(text: str, extra: str) -> str:
-    def replace(match: re.Match[str]) -> str:
-        char = match.group()
-        return _marker(char) if char in extra or _is_marked(char) else char
-
-    return _mark_pattern(extra).sub(replace, text)
+    return text.translate(_mark_table(extra))
 
 
 def _to_str(data: str | bytes | bytearray | memoryview) -> str:

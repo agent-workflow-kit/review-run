@@ -89,7 +89,8 @@ Minimum sibling versions: review-run needs claude-session and agent-spawn releas
 | `cli` | argparse subcommands, global flags, exit-code mapping |
 | `config` | YAML, drop-ins, env, per-repo overrides, validation (PyYAML, jsonschema against `schemas/config.json`) |
 | `gateway` | every subprocess: forgectl, pr-comment, agent-spawn, claude-session, wtctl, bwrap, the `/proc` scan, each with a per-call timeout; the single seam for fakes |
-| `prefetch` | the reads, head comparison, manifest and per-file patch building, size caps |
+| `prefetch` | the reads and the head comparison, then the call to `manifest` |
+| `manifest` | the diff to manifest entries and per-file inputs: section parsing, hunk splitting, size caps, the prompt table (a pure function) |
 | `sanitizer` | the sanitizer (used by `prompt`, `coderun` and human output) |
 | `prompt` | fenced prompt and input files, nonce |
 | `coderun` | throwaway, sandboxed runner, output descriptor, removal (output goes through the sanitizer) |
