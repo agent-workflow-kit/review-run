@@ -305,7 +305,7 @@ def _report(err: ReviewRunError, *, as_json: bool) -> int:
     if as_json:
         try:
             print(json.dumps(err.envelope(), ensure_ascii=True))
-        except OSError:
+        except (OSError, ValueError):
             _silence_stdout()
     return err.exit_code
 
@@ -346,10 +346,12 @@ def main(argv: list[str] | None = None) -> int:
     apply_umask()
     argv = list(sys.argv[1:] if argv is None else argv)
     code = _dispatch(argv)
-    try:
-        sys.stdout.flush()
-    except OSError:
-        _silence_stdout()
+    out = sys.stdout
+    if out is not None:
+        try:
+            out.flush()
+        except (OSError, ValueError):
+            _silence_stdout()
     return code
 
 

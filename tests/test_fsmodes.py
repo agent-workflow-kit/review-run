@@ -134,6 +134,12 @@ def test_write_private_file_replaces_atomically_with_0600(tmp_path: Path) -> Non
     assert sorted(p.name for p in directory.iterdir()) == ["f"]
 
 
+def test_write_private_file_accepts_a_max_length_multibyte_name(tmp_path: Path) -> None:
+    target = tmp_path / ("\u754c" * 85)  # 255 bytes
+    write_private_file(target, b"x")
+    assert target.read_bytes() == b"x"
+
+
 def test_write_private_file_replaces_a_symlink_without_following(tmp_path: Path) -> None:
     victim = tmp_path / "victim"
     victim.write_text("keep")

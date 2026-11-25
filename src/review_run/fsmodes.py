@@ -11,6 +11,7 @@ import errno
 import os
 import secrets
 import stat
+import sys
 from pathlib import Path
 
 from .errors import ReviewRunError
@@ -97,9 +98,10 @@ def write_private_file(path: Path | str, data: bytes) -> None:
     target; a symlink at the target is replaced, never followed.
     """
     target = Path(path)
-    tmp = target.with_name(
-        f".{target.name[:_TMP_NAME_MAX]}.{os.getpid()}.{secrets.token_hex(4)}.tmp"
+    stem = os.fsencode(target.name)[:_TMP_NAME_MAX].decode(
+        sys.getfilesystemencoding(), errors="ignore"
     )
+    tmp = target.with_name(f".{stem}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
     try:
         create_private_file(tmp, data, fsync=True)
         os.replace(tmp, target)

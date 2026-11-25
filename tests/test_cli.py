@@ -209,6 +209,25 @@ def test_broken_stdout_keeps_the_exit_code(
     assert main(["--json", "list"]) == 1
 
 
+class _ClosedStdout:
+    def write(self, text: str) -> int:
+        raise ValueError("I/O operation on closed file.")
+
+    def flush(self) -> None:
+        raise ValueError("I/O operation on closed file.")
+
+
+def test_missing_stdout_keeps_the_exit_code(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cli.sys, "stdout", None)
+    assert main(["--json", "list"]) == 1
+
+
+def test_closed_stdout_keeps_the_exit_code(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cli, "_silence_stdout", lambda: None)
+    monkeypatch.setattr(cli.sys, "stdout", _ClosedStdout())
+    assert main(["--json", "list"]) == 1
+
+
 def test_main_sets_umask_077(capsys: pytest.CaptureFixture[str]) -> None:
     import os
 
