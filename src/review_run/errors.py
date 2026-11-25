@@ -25,6 +25,11 @@ class ExitCode(enum.IntEnum):
     VETOED = 11
     FAILED = 12
     ESCALATED = 13
+    UNREPORTED = 14
+    KILLED = 15
+    TIMEOUT = 16
+    LOST = 17
+    SESSION_FAILED = 18
     REFUSED = 20
     AMBIGUOUS = 21
     ARTIFACT = 22
