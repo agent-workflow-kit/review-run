@@ -1,0 +1,375 @@
+{
+  "x-pinned-from": {
+    "sibling": "pr-comment",
+    "version": "0.39.0",
+    "source": "schemas/review-draft.json"
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "pr-comment/review-draft.json",
+  "title": "pr-comment review draft",
+  "description": "Every text field is untrusted, agent-generated text. A draft file is at most 16 MiB; text fields at most 64 KiB of UTF-8 each. Checks a schema cannot express (unique ids, start_line < line, byte caps) are made by pr-comment and draft check.",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "enum": [
+        1
+      ],
+      "description": "pr-comment refuses any version it does not know (exit 2 unsupported_draft_version)."
+    },
+    "draft_id": {
+      "$ref": "defs.json#/$defs/draft_id"
+    },
+    "pr": {
+      "$ref": "defs.json#/$defs/pr",
+      "description": "host/<full project path>#N. Compared with forgectl show's pr (host and path in ASCII lowercase); a different PR that is not the same pr_id exits 2 draft_pr_mismatch."
+    },
+    "anchor": {
+      "type": "object",
+      "properties": {
+        "head_sha": {
+          "$ref": "defs.json#/$defs/sha",
+          "description": "The head the findings' lines refer to."
+        },
+        "base_ref": {
+          "$ref": "defs.json#/$defs/base_ref",
+          "description": "Untrusted: the base branch name the draft was written against."
+        },
+        "base_sha": {
+          "oneOf": [
+            {
+              "$ref": "defs.json#/$defs/sha"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The base branch tip at drafting time; informational."
+        },
+        "merge_base_sha": {
+          "oneOf": [
+            {
+              "$ref": "defs.json#/$defs/sha"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "forgectl diff --json merge_base_sha at drafting time; used for left-side findings on re-anchor."
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "head_sha",
+        "base_ref",
+        "base_sha",
+        "merge_base_sha"
+      ]
+    },
+    "event": {
+      "enum": [
+        "comment",
+        "request_changes"
+      ],
+      "description": "approve is never a draft event; see review --approve."
+    },
+    "body": {
+      "type": "string",
+      "x-untrusted": true,
+      "description": "Untrusted: the review's summary text; may be empty.",
+      "maxLength": 65536
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "$ref": "defs.json#/$defs/finding_id"
+          },
+          "path": {
+            "type": "string",
+            "x-untrusted": true,
+            "description": "Untrusted: the path as forgectl files or diff prints it at the anchor head; head-side for both sides. One line (pr-comment matches the whole string); at most 4096 bytes and not only whitespace, checked by pr-comment.",
+            "minLength": 1,
+            "maxLength": 4096,
+            "pattern": "^[^\\n\\r\\u000b\\u000c\\u001c-\\u001e\\u0085\\u2028\\u2029]*$"
+          },
+          "line": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 1,
+            "maximum": 2147483647,
+            "description": "1-based. null makes a file-level finding, which always goes to the review body."
+          },
+          "start_line": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2147483647,
+            "description": "start_line < line, same side; checked by pr-comment, not by this schema."
+          },
+          "side": {
+            "$ref": "defs.json#/$defs/side",
+            "default": "right",
+            "description": "right: the head's version; left: the base's version at the merge-base."
+          },
+          "severity": {
+            "enum": [
+              "blocker",
+              "major",
+              "minor",
+              "nit",
+              "info"
+            ]
+          },
+          "title": {
+            "type": "string",
+            "x-untrusted": true,
+            "description": "Untrusted: one line of short text for the bold prefix; trimmed, and an empty title counts as absent.",
+            "maxLength": 256,
+            "pattern": "^[^\\n\\r\\u000b\\u000c\\u001c-\\u001e\\u0085\\u2028\\u2029]*$"
+          },
+          "body": {
+            "type": "string",
+            "x-untrusted": true,
+            "description": "Untrusted: the finding's text; at most 64 KiB of UTF-8, checked by pr-comment (maxLength counts code points). Must hold a character that is not blank (blank, after Text pipeline step 1: whitespace as Python str.isspace, or a character forgectl's Sanitizing marks as invisible such as U+200B, U+FEFF, U+3164 and U+2800, where the unassigned (Cn) part follows the Unicode tables of the running Python; the same rule as the comment and reply body file), checked by pr-comment.",
+            "minLength": 1,
+            "maxLength": 65536
+          },
+          "suggestion": {
+            "type": "object",
+            "properties": {
+              "lines": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "x-untrusted": true,
+                  "description": "Untrusted: one raw replacement line: no line terminator or other forgectl separator (pr-comment matches the whole string).",
+                  "pattern": "^[^\\n\\r\\u000b\\u000c\\u001c-\\u001e\\u0085\\u2028\\u2029]*$"
+                },
+                "minItems": 0,
+                "description": "Replacement code for start_line..line, one string per line; [] suggests deleting the range. The whole suggestion is at most 64 KiB, checked by pr-comment."
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "lines"
+            ],
+            "description": "Only on side right with a line."
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "path",
+          "line",
+          "body"
+        ],
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "line": {
+                  "const": null
+                }
+              },
+              "required": [
+                "line"
+              ]
+            },
+            "then": {
+              "properties": {
+                "start_line": false,
+                "side": false,
+                "suggestion": false
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "side": {
+                  "const": "left"
+                }
+              },
+              "required": [
+                "side"
+              ]
+            },
+            "then": {
+              "properties": {
+                "suggestion": false
+              }
+            }
+          }
+        ]
+      },
+      "maxItems": 500,
+      "description": "Finding ids are unique across findings and unanchored; checked by pr-comment, not by this schema. At most 200 findings may have a line (they become inline comments, and forgectl accepts at most 200 per review): draft check refuses more with a fixed message, and the review exits 2 usage when more than 200 would be posted inline; this schema does not express it."
+    },
+    "unanchored": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "finding": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "$ref": "defs.json#/$defs/finding_id"
+              },
+              "path": {
+                "type": "string",
+                "x-untrusted": true,
+                "description": "Untrusted: the path as forgectl files or diff prints it at the anchor head; head-side for both sides. One line (pr-comment matches the whole string); at most 4096 bytes and not only whitespace, checked by pr-comment.",
+                "minLength": 1,
+                "maxLength": 4096,
+                "pattern": "^[^\\n\\r\\u000b\\u000c\\u001c-\\u001e\\u0085\\u2028\\u2029]*$"
+              },
+              "line": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 1,
+                "maximum": 2147483647,
+                "description": "1-based. null makes a file-level finding, which always goes to the review body."
+              },
+              "start_line": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 2147483647,
+                "description": "start_line < line, same side; checked by pr-comment, not by this schema."
+              },
+              "side": {
+                "$ref": "defs.json#/$defs/side",
+                "default": "right",
+                "description": "right: the head's version; left: the base's version at the merge-base."
+              },
+              "severity": {
+                "enum": [
+                  "blocker",
+                  "major",
+                  "minor",
+                  "nit",
+                  "info"
+                ]
+              },
+              "title": {
+                "type": "string",
+                "x-untrusted": true,
+                "description": "Untrusted: one line of short text for the bold prefix; trimmed, and an empty title counts as absent.",
+                "maxLength": 256,
+                "pattern": "^[^\\n\\r\\u000b\\u000c\\u001c-\\u001e\\u0085\\u2028\\u2029]*$"
+              },
+              "body": {
+                "type": "string",
+                "x-untrusted": true,
+                "description": "Untrusted: the finding's text; at most 64 KiB of UTF-8, checked by pr-comment (maxLength counts code points). Must hold a character that is not blank (blank, after Text pipeline step 1: whitespace as Python str.isspace, or a character forgectl's Sanitizing marks as invisible such as U+200B, U+FEFF, U+3164 and U+2800, where the unassigned (Cn) part follows the Unicode tables of the running Python; the same rule as the comment and reply body file), checked by pr-comment.",
+                "minLength": 1,
+                "maxLength": 65536
+              },
+              "suggestion": {
+                "type": "object",
+                "properties": {
+                  "lines": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "x-untrusted": true,
+                      "description": "Untrusted: one raw replacement line: no line terminator or other forgectl separator (pr-comment matches the whole string).",
+                      "pattern": "^[^\\n\\r\\u000b\\u000c\\u001c-\\u001e\\u0085\\u2028\\u2029]*$"
+                    },
+                    "minItems": 0,
+                    "description": "Replacement code for start_line..line, one string per line; [] suggests deleting the range. The whole suggestion is at most 64 KiB, checked by pr-comment."
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "lines"
+                ],
+                "description": "Only on side right with a line."
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "path",
+              "line",
+              "body"
+            ],
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "line": {
+                      "const": null
+                    }
+                  },
+                  "required": [
+                    "line"
+                  ]
+                },
+                "then": {
+                  "properties": {
+                    "start_line": false,
+                    "side": false,
+                    "suggestion": false
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "side": {
+                      "const": "left"
+                    }
+                  },
+                  "required": [
+                    "side"
+                  ]
+                },
+                "then": {
+                  "properties": {
+                    "suggestion": false
+                  }
+                }
+              }
+            ]
+          },
+          "head_sha": {
+            "$ref": "defs.json#/$defs/sha",
+            "description": "The head the finding's lines refer to."
+          },
+          "reason": {
+            "$ref": "defs.json#/$defs/moved_reason"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "finding",
+          "head_sha",
+          "reason"
+        ]
+      },
+      "maxItems": 500,
+      "description": "Optional: findings that could not be anchored, with the anchor they last had and their moved reason. Never anchored or mapped to the diff, but checked like any finding (shape, caps and rules; ids unique across both lists); always rendered in the body's 'Findings that could not be anchored' section. At most 500 together with findings, checked by pr-comment."
+    },
+    "meta": {
+      "type": "object",
+      "x-untrusted": true,
+      "description": "Untrusted: free-form producer data; pr-comment ignores it. The only place extra properties are allowed."
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "draft_id",
+    "pr",
+    "anchor",
+    "event",
+    "body",
+    "findings"
+  ]
+}
