@@ -9,12 +9,15 @@
 * Each child's PID is recorded at launch (with a pidfd where the kernel has one, which pins the
   process identity). At teardown exactly those children are killed: through the live handle (and
   its process group) while the leader is unreaped; for a reaped leader the group only if some live
-  process in ``/proc`` is still in it (it keeps the id reserved). Nothing is found by name or
-  pattern. A child that survives fails the test, naming its PID.
+  process in ``/proc`` is still in it (it keeps the id reserved). Accepted residual: that check
+  could match an unrelated process that reused the pid and called setsid after every real member
+  died (needs pid wraparound; no cheap sound fix). Nothing is found by name or pattern. A child
+  that survives fails the test, naming its PID.
 """
 
 from __future__ import annotations
 
+import inspect
 import os
 import pty
 import signal
@@ -160,10 +163,12 @@ def proc_tracker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Pr
     class GuardedPopen(real_popen):  # type: ignore[misc, valid-type]
         def __init__(self, args: Any, *a: Any, **kw: Any) -> None:
             argv0 = args if isinstance(args, (str, bytes, os.PathLike)) else args[0]
-            if kw.get("shell"):
+            # Bind like the real Popen so positional shell/executable cannot slip past.
+            bound = inspect.signature(real_popen).bind(args, *a, **kw).arguments
+            if bound.get("shell"):
                 raise RealProgramRefused("shell=True is never allowed")
-            # ``executable`` replaces argv[0] as the program that runs: keyword or 3rd positional.
-            if kw.get("executable") is not None or (len(a) >= 2 and a[1] is not None):
+            # ``executable`` replaces argv[0] as the program that runs.
+            if bound.get("executable") is not None:
                 raise RealProgramRefused("the executable argument is never allowed")
             tracker.check(os.fsdecode(argv0))
             super().__init__(args, *a, **kw)

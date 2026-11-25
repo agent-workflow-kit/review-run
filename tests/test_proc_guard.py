@@ -30,6 +30,19 @@ def test_the_positional_executable_is_refused() -> None:
         subprocess.Popen([PY, "-c", "pass"], -1, _real_binary())
 
 
+def test_the_positional_shell_is_refused(tmp_path: Path) -> None:
+    marker = tmp_path / "ran"
+    with pytest.raises(RealProgramRefused):
+        # args, bufsize, executable, stdin, stdout, stderr, preexec_fn, close_fds, shell
+        subprocess.Popen(f"touch {marker}", 0, None, None, None, None, None, True, True)
+    assert not marker.exists()
+
+
+def test_the_positional_executable_with_other_positionals_is_refused(tmp_path: Path) -> None:
+    with pytest.raises(RealProgramRefused):
+        subprocess.Popen([PY, "-c", "pass"], 0, _real_binary(), None, None, None)
+
+
 def test_a_symlink_to_a_real_program_is_refused(tmp_path: Path) -> None:
     link = tmp_path / "innocent"
     link.symlink_to(_real_binary())
