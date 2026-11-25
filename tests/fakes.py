@@ -172,6 +172,14 @@ class FakeBin:
         path = self.dir / "state.json"
         return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
 
+    def seed_state(self, data: dict[str, Any]) -> None:
+        """Deep-merge ``data`` into ``state.json`` (e.g. backdate a wtctl record's ``created``)."""
+        from tests.fakebin._common import deep_merge
+
+        (self.dir / "state.json").write_text(
+            json.dumps(deep_merge(self.state(), data)), encoding="utf-8"
+        )
+
     # ---- running -----------------------------------------------------------------------------
 
     def run(

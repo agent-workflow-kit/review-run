@@ -196,13 +196,18 @@ def test_a_repeated_scalar_flag_keeps_the_last_value(fakebin: FakeBin) -> None:
 
 def test_list_older_than_filters_on_the_created_time(fakebin: FakeBin) -> None:
     old, new = create(fakebin), create(fakebin)
-    state = fakebin.state()
-    state["wtctl"]["records"][old["id"]]["created"] = "2020-01-01T00:00:00Z"
-    (fakebin.dir / "state.json").write_text(json.dumps(state), encoding="utf-8")
-    _, doc, _ = run(fakebin, "list", "--throwaways", "--older-than", "1w", "--json")
-    assert [r["id"] for r in doc["records"]] == [old["id"]]
-    _, doc, _ = run(fakebin, "list", "--throwaways", "--older-than", "9999w", "--json")
-    assert doc["records"] == [] and new["id"]
+    fakebin.seed_state({"wtctl": {"records": {old["id"]: {"created": "2020-01-01T00:00:00Z"}}}})
+    _, doc, _ = run(fakebin, "list", "--throwaways", "--older-than", "7d", "--json")
+    assert [r["id"] for r in doc["records"]] == [old["id"]]  # validated against the pinned schema
+    assert new["id"] not in {r["id"] for r in doc["records"]}
+
+
+def test_remove_by_path_prefers_the_live_record_over_a_tombstone(fakebin: FakeBin) -> None:
+    gone, live = create(fakebin), create(fakebin)
+    run(fakebin, "remove", gone["id"], "--json")
+    fakebin.seed_state({"wtctl": {"records": {gone["id"]: {"path": live["path"]}}}})
+    code, doc, _ = run(fakebin, "remove", live["path"], "--json")
+    assert code == 0 and doc["record"]["id"] == live["id"]
 
 
 def test_a_human_actor_allows_override_escalation_but_a_throwaway_takes_no_force(

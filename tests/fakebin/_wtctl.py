@@ -276,10 +276,11 @@ def _remove(call: Call, parsed: Parsed) -> Out:
         with State() as state:
             records = state.setdefault("wtctl", {"records": {}, "n": 0})["records"]
             rec = records.get(target) or next(
-                (r for r in records.values() if r["path"] == target), None
-            )
-            if rec is not None and rec["state"] in _TOMBSTONES and rec["path"] == target:
-                rec = None  # only a full id finds a tombstone, never its path
+                (r for r in records.values()
+                 if r["path"] == target and r["state"] not in _TOMBSTONES),
+                None,
+            )  # fmt: skip
+            # only a full id finds a tombstone, never its path (the lookup skips them)
             if rec is None:
                 return error_out(TOOL, 10, {"code": "not_found", "message": "no such record"})
             if rec["state"] in _TOMBSTONES:
