@@ -12,9 +12,11 @@ from collections.abc import Callable
 from typing import Any, NoReturn
 
 from . import __version__
+from .audit import export_lines
 from .durations import DurationError, parse_duration, parse_since
 from .errors import PROG, ExitCode, ReviewRunError, printable
 from .fsmodes import apply_umask
+from .store import default_state_root
 
 DESCRIPTION = "Run a review skill on a pull request and store the resulting review draft."
 STATES = ("running", "done", "escalated", "failed")
@@ -260,6 +262,18 @@ def _stub(name: str) -> Handler:
     return handler
 
 
+def _export(args: argparse.Namespace) -> int:
+    """Print audit (or log) records as JSONL lines, no envelope."""
+    # TODO(#6): the state root comes from config (--config, state_dir) once config lands.
+    root = default_state_root()
+    try:
+        for line in export_lines(root, log=args.log, since=args.since):
+            sys.stdout.buffer.write(line)
+    except BrokenPipeError:
+        _silence_stdout()
+    return 0
+
+
 # Each command is replaced by its owning issue's implementation.
 _HANDLERS: dict[str, Handler] = {
     "run": _stub("run"),  # TODO(#16): run order and settings; #18 launch; #24 outcome mapping
@@ -271,7 +285,7 @@ _HANDLERS: dict[str, Handler] = {
     "prune": _stub("prune"),  # TODO(#37): prune
     "cancel": _stub("cancel"),  # TODO(#26): cancel
     "cron": _stub("cron"),  # TODO(#38): cron install and uninstall
-    "export": _stub("export"),  # TODO(#9): export
+    "export": _export,
 }
 
 

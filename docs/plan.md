@@ -33,7 +33,7 @@ Implements [interface.md](interface.md) and [design.md](design.md). Issues are e
 | `config` | 0 | YAML, drop-ins, env, per-repo overrides, validation |
 | `gateway` | 0 | the only place that spawns processes |
 | `store` | 0 | SQLite (WAL, additive migrations), run directory, leases, ids |
-| `sanitize` | 0 | the sanitizer (used by `prompt`, `coderun` and human output) |
+| `sanitizer` | 0 | the sanitizer (used by `prompt`, `coderun` and human output) |
 | `audit` | 0 | `audit.jsonl`, `log.jsonl`, `export` |
 | `prefetch` | 1 | forgectl and `pr-comment draft new` reads, head comparison, manifest, per-file patches, size caps |
 | `prompt` | 1 | fenced prompt and input files, nonce |
