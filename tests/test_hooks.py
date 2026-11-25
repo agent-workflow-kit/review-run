@@ -67,11 +67,45 @@ def test_flag_entries_split_at_the_first_equals_and_keep_the_rest() -> None:
     assert spec.cmd == "FOO=bar baz"
 
 
-@pytest.mark.parametrize(
-    "bad", ["", "nope", "unknown=cmd", "post-run=", "post-run=a\x00b", "post-run=a\x01b", "=x"]
-)
-def test_invalid_stored_entries_are_skipped(bad: str) -> None:
-    assert hooks.specs_for("post-run", None, [bad]) == []
+BAD_ENTRIES = ["", "nope", "unknown=cmd", "post-run=", "post-run=a\x00b", "post-run=a\x01b", "=x"]
+
+
+@pytest.mark.parametrize("bad", BAD_ENTRIES)
+def test_invalid_stored_entries_fail_closed_as_an_invalid_spec(bad: str) -> None:
+    for hook in hooks.HOOK_NAMES:
+        (found,) = hooks.specs_for(hook, None, [bad])
+        assert found.invalid
+
+
+@pytest.mark.parametrize("bad", BAD_ENTRIES)
+def test_add_flag_hooks_rejects_invalid_entries_without_echoing_them(bad: str) -> None:
+    with pytest.raises(ReviewRunError) as info:
+        hooks.add_flag_hooks([], ["post-run=ok", bad])
+    assert info.value.code == "usage"
+
+
+def test_a_rejected_hook_entry_is_never_echoed() -> None:
+    with pytest.raises(ReviewRunError) as info:
+        hooks.add_flag_hooks([], [f"{MARKER}=cmd"])
+    assert MARKER not in str(info.value) and MARKER not in repr(info.value.__dict__)
+
+
+def test_an_invalid_stored_entry_vetoes_pre_run_and_runs_nothing(
+    fake_gateway: FakeGateway,
+) -> None:
+    fake_gateway.script(SH, ok())
+    result = run_pre(hooks.specs_for("pre-run", None, ["pre-run=gate", "bogus"]))
+    assert result.outcome == "veto"
+    assert [c.argv for c in fake_gateway.calls] == [(SH, "-c", "gate")]  # first ran, then the veto
+    fake_gateway.calls.clear()
+    assert run_pre(hooks.specs_for("pre-run", None, ["bogus", "pre-run=gate"])).outcome == "veto"
+    assert fake_gateway.calls == []
+
+
+def test_an_invalid_spec_is_an_invalid_result_and_never_runs(fake_gateway: FakeGateway) -> None:
+    result = hooks.run_spec(hooks.HookSpec("", invalid=True), "post-run", {}, env={})
+    assert result.code == "invalid" and not result.ok
+    assert fake_gateway.calls == []
 
 
 def test_entries_may_hold_newlines_and_tabs() -> None:
@@ -79,14 +113,15 @@ def test_entries_may_hold_newlines_and_tabs() -> None:
     assert spec.cmd == "echo a\n\techo b"
 
 
-def test_a_bad_stored_value_type_is_skipped() -> None:
-    assert hooks.specs_for("post-run", None, [None, 3, ["post-run=x"]]) == []  # type: ignore[list-item]
+def test_a_bad_stored_value_type_fails_closed() -> None:
+    got = hooks.specs_for("post-run", None, [None, 3, ["post-run=x"]])  # type: ignore[list-item]
+    assert [g.invalid for g in got] == [True, True, True]
 
 
 def test_add_flag_hooks_keeps_an_identical_entry_once_in_order() -> None:
     stored = hooks.add_flag_hooks(["post-run=a", "pre-run=b"], ["post-run=a", "post-run=c"])
     assert stored == ["post-run=a", "pre-run=b", "post-run=c"]
-    assert hooks.add_flag_hooks([], ["x=1", "x=1"]) == ["x=1"]
+    assert hooks.add_flag_hooks([], ["post-run=1", "post-run=1"]) == ["post-run=1"]
 
 
 def test_event_ids() -> None:
@@ -480,6 +515,11 @@ def test_the_pre_run_payload_is_validated_before_any_hook_runs(
 # -- the human-only override ---------------------------------------------------------------
 
 
+def test_the_resulting_actor_must_be_human_even_on_a_tty() -> None:
+    with pytest.raises(ReviewRunError):
+        hooks.require_human_override(Caller("auto:ci", "flag", True))
+
+
 def test_the_override_needs_a_human_actor() -> None:
     hooks.require_human_override(Caller("human:alice", "flag", False))
     hooks.require_human_override(Caller("human:bob", "tty", True))
@@ -491,3 +531,100 @@ def test_the_override_needs_a_human_actor() -> None:
             hooks.require_human_override(caller)
         assert info.value.code == "usage"
         assert info.value.exit_code == 2
+
+
+# -- run_spec OSError, nested stdout, ids, shared grammar, audit record -------------------
+
+
+@pytest.mark.parametrize("exc", [OSError(28, "no space"), RuntimeError("can't start new thread")])
+def test_an_oserror_or_runtimeerror_from_the_gateway_is_a_failed_attempt(
+    fake_gateway: FakeGateway, exc: OSError | RuntimeError
+) -> None:
+    fake_gateway.script(SH, exc)
+    assert hooks.run_spec(spec(), "post-run", {}, env={}).code == "error"
+    fake_gateway.script(SH, exc)
+    assert hooks.run_spec(spec("bg", 5.0, True), "post-run", {}, env={}).code == "error"
+
+
+@pytest.mark.parametrize(("code", "outcome"), [(1, "veto"), (13, "escalate"), (0, "continue")])
+def test_deeply_nested_stdout_is_no_decision_id_and_never_crashes(
+    fake_gateway: FakeGateway, code: int, outcome: str
+) -> None:
+    script_pre(fake_gateway, stdout_script("[" * 60000, code))
+    result = run_pre([spec()])
+    assert result.outcome == outcome and result.decision_ids == ()
+
+
+def test_the_decision_id_grammar_is_the_one_shared_with_the_cli() -> None:
+    from review_run import cli, errors
+
+    assert cli._DECISION_ID_RE is errors.DECISION_ID_RE  # noqa: SLF001
+    assert hooks.MAX_DECISION_IDS == errors.MAX_DECISION_IDS == cli.MAX_DECISION_IDS
+
+
+def test_the_event_id_of_a_payload_must_belong_to_its_run_and_hook() -> None:
+    common: dict[str, Any] = dict(
+        run_id=RUN, repo=REPO, labels=[], pr=PR, agent_id=None, actor="auto:unknown",
+        decision_ids=[], warnings=[],
+    )  # fmt: skip
+    with pytest.raises(ValueError):
+        hooks.post_run_payload(
+            **common, event_id="rr-zzzzzzzz-post-run-1", state="failed", reason="timeout",
+            exit_code=12, draft_id=None, anchor_head_sha=None,
+        )  # fmt: skip
+    with pytest.raises(ValueError):
+        hooks.post_run_payload(
+            **common, event_id=f"{RUN}-post-run-2", state="failed", reason="timeout",
+            exit_code=12, draft_id=None, anchor_head_sha=None,
+        )  # fmt: skip
+    with pytest.raises(ValueError):
+        hooks.post_escalate_payload(
+            **{**common, "agent_id": "ag-abcdefgh"},
+            event_id=f"{RUN}-post-run-1", reason="needs_input", session_sandbox="required",
+        )  # fmt: skip
+    hooks.post_escalate_payload(
+        **{**common, "agent_id": "ag-abcdefgh"},
+        event_id=f"{RUN}-post-escalate-3",
+        reason="needs_input",
+        session_sandbox="required",
+    )  # fmt: skip
+
+
+AUDIT_INPUTS: dict[str, Any] = {
+    "head_sha": SHA,
+    "config_sha256": "b" * 64,
+    "skill": "review-run:review-pr",
+    "previous_run": None,
+    "permission_profile_sha256": "b" * 64,
+    "session_sandbox": "required",
+    "setting_sources": [],
+    "plugin_dirs_sha256": None,
+    "override_escalation": False,
+}
+
+
+@pytest.mark.parametrize(
+    ("outcome", "status", "exit_code"), [("veto", "vetoed", 11), ("escalate", "escalated", 13)]
+)
+def test_pre_run_audit_record_matches_the_audit_schema(
+    outcome: str, status: str, exit_code: int
+) -> None:
+    from tests.conftest import validate_against
+
+    caller = Caller("human:alice", "flag", True, ("d-1",), ("team=core",))
+    result = hooks.PreRunResult(outcome, "pre-run", ("d-1", "gate:2"))  # type: ignore[arg-type]
+    record = hooks.pre_run_audit_record(caller, result, RUN, PR, AUDIT_INPUTS)
+    validate_against("audit.json", record)
+    assert record["action"] == "run"
+    assert record["result"] == {"status": status, "reason": None, "exit_code": exit_code}
+    assert record["target"] == {"run_id": RUN, "pr": PR}
+    assert record["decision_id"] == ["d-1", "gate:2"]
+    assert record["labels"] == ["team=core"]
+    assert record["event_id"] is None
+
+
+def test_pre_run_audit_record_refuses_a_continue_outcome() -> None:
+    with pytest.raises(ValueError):
+        hooks.pre_run_audit_record(
+            Caller("human:a", "flag", True), hooks.PreRunResult("continue"), RUN, PR, AUDIT_INPUTS
+        )

@@ -24,13 +24,16 @@ Interface: ``docs/interface.md`` section Hooks (normative). Rules kept here:
 Seams: ``run`` (#11) calls ``run_pre_run`` and stores ``hooks.add_flag_hooks`` output with the run;
 the code that ends or escalates a run builds the payloads here into ``NewEvent`` rows and calls
 ``deliver_pending`` right after the commit; ``reconcile`` (#11) calls it for the redelivery pass and
-reports ``stuck_audit``. An ``async`` entry's timeout is enforced by a watchdog thread that lives
-only as long as this process (a documented residual of detaching).
+reports ``stuck_audit``. An ``async`` entry's timeout is enforced by the gateway's supervisor
+process, which outlives this one (a hook that exits leaving background descendants gives those no
+timeout: a documented residual). An invalid stored ``--hook`` entry is never skipped: ``pre-run``
+vetoes and a post hook counts a failed attempt (fail closed).
 TODO(#11): wire the CLI and the finalize paths to these functions.
 """
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import math
 import os
@@ -42,9 +45,10 @@ from pathlib import Path
 from typing import Any, Final, Literal
 
 from . import gateway
-from .audit import AuditWriter, Caller, LogWriter, flush_outbox
+from .audit import AuditWriter, Caller, LogWriter, flush_outbox, make_audit_record
 from .durations import DurationError, parse_duration
-from .errors import ReviewRunError
+from .errors import DECISION_ID_RE, MAX_DECISION_IDS, ReviewRunError
+from .schema_anchors import python_anchors
 from .store import Store
 
 HOOK_NAMES: Final = ("pre-run", "post-run", "post-escalate")
@@ -55,7 +59,6 @@ MAX_ATTEMPTS: Final = 5
 ESCALATE_EXIT: Final = 13
 SHELL: Final = ("/bin/sh", "-c")
 MAX_DECISION_STDOUT: Final = 64 * 1024
-MAX_DECISION_IDS: Final = 32
 MIN_LEASE_SECONDS: Final = 300
 LEASE_SLACK_SECONDS: Final = 60
 
@@ -67,7 +70,6 @@ _OWN_ENV: Final = (
 )
 _RUN_ID_RE: Final = re.compile(r"rr-[a-z2-7]{8}\Z")
 _EVENT_ID_RE: Final = re.compile(r"[A-Za-z0-9_-]{8,64}\Z")
-_DECISION_ID_RE: Final = re.compile(r"[A-Za-z0-9._:@/-]{1,128}\Z")
 
 
 # -- specs ---------------------------------------------------------------------------------
@@ -80,6 +82,9 @@ class HookSpec:
     cmd: str
     timeout: float = DEFAULT_TIMEOUT_S
     is_async: bool = False
+    #: A stored entry that could not be read: it never runs; ``pre-run`` vetoes and a post hook
+    #: counts a failed attempt.
+    invalid: bool = False
 
 
 def _clean_cmd(cmd: object) -> str | None:
@@ -113,24 +118,42 @@ def specs_for(
 ) -> list[HookSpec]:
     """The entries of ``hook``: the config's list in order, then the run's stored ``--hook``
     entries (``NAME=CMD``, split at the first ``=``; always synchronous with the default
-    timeout). An invalid entry is skipped, never run."""
+    timeout). An invalid config entry is skipped (config validation refuses it at load). A stored
+    entry that is not ``NAME=CMD`` with a known name and a clean command fails closed: it becomes
+    an ``invalid`` spec in every hook's list, never run and never silently dropped."""
     out: list[HookSpec] = []
     for entry in (config_hooks or {}).get(hook) or []:
         if (found := _config_spec(hook, entry)) is not None:
             out.append(found)
     for item in stored:
-        if not isinstance(item, str):
-            continue
-        name, sep, cmd = item.partition("=")
-        if sep and name == hook and (clean := _clean_cmd(cmd)) is not None:
-            out.append(HookSpec(clean))
+        parsed = _stored_entry(item)
+        if parsed is None:
+            out.append(HookSpec("", invalid=True))
+        elif parsed[0] == hook:
+            out.append(HookSpec(parsed[1]))
     return out
 
 
+def _stored_entry(item: object) -> tuple[str, str] | None:
+    if not isinstance(item, str):
+        return None
+    name, sep, cmd = item.partition("=")
+    clean = _clean_cmd(cmd)
+    if not sep or name not in HOOK_NAMES or clean is None:
+        return None
+    return name, clean
+
+
 def add_flag_hooks(stored: Sequence[str], new: Iterable[str]) -> list[str]:
-    """``stored`` plus ``new`` in order, an identical entry kept once."""
+    """``stored`` plus ``new`` in order, an identical entry kept once. A ``--hook`` entry that is
+    not ``NAME=CMD`` with a hook name and a clean command is a usage error (exit 2); the entry's
+    text is never echoed."""
     out = list(stored)
     for item in new:
+        if _stored_entry(item) is None:
+            raise ReviewRunError(
+                "usage", "invalid --hook entry: expected NAME=CMD with a hook name"
+            )
         if item not in out:
             out.append(item)
     return out
@@ -185,22 +208,6 @@ def _schemas_dir() -> Path:
     raise FileNotFoundError("schemas/defs.json")
 
 
-def _python_anchors(node: Any) -> Any:
-    """A pattern's trailing ``$`` matches before a final newline in Python; ``\\Z`` does not."""
-    if isinstance(node, dict):
-        return {
-            k: (
-                v[:-1] + r"\Z"
-                if k == "pattern" and isinstance(v, str) and v.endswith("$")
-                else _python_anchors(v)
-            )
-            for k, v in node.items()
-        }
-    if isinstance(node, list):
-        return [_python_anchors(v) for v in node]
-    return node
-
-
 @cache
 def _validators() -> dict[str, Any]:
     from jsonschema import Draft202012Validator
@@ -210,7 +217,7 @@ def _validators() -> dict[str, Any]:
     registry: Registry[Any] = Registry()
     docs: dict[str, Any] = {}
     for path in sorted(root.rglob("*.json")):
-        doc = _python_anchors(json.loads(path.read_text(encoding="utf-8")))
+        doc = python_anchors(json.loads(path.read_text(encoding="utf-8")))
         registry = registry.with_resource(doc["$id"], Resource.from_contents(doc))
         docs[str(path.relative_to(root))] = doc
     return {
@@ -230,6 +237,15 @@ def validate_payload(hook: str, payload: Mapping[str, Any]) -> None:
     if errors:
         where = "/".join(str(p) for p in errors[0].absolute_path) or "(root)"
         raise ValueError(f"the {hook} payload does not match its schema at {where}")
+
+
+def _check_event_id(hook: str, run_id: str, event_id: str) -> None:
+    prefix = f"{run_id}-{hook}-"
+    number = event_id[len(prefix) :] if event_id.startswith(prefix) else ""
+    if not number.isascii() or not number.isdigit() or int(number) < 1:
+        raise ValueError("the event id does not belong to this run and hook")
+    if hook == "post-run" and number != "1":
+        raise ValueError("the event id does not belong to this run and hook")
 
 
 def _common(
@@ -329,6 +345,7 @@ def post_run_payload(
     """The ``post-run`` payload. ``summary`` is the run's ``summary`` object: only the six
     fields the schema names are taken from it (never ``risk_reasons`` or any text). The ``done``
     only fields are dropped for a ``failed`` run."""
+    _check_event_id("post-run", run_id, event_id)
     payload = _common("post-run", run_id, repo, labels, actor, decision_ids)
     payload.update(
         event_id=event_id,
@@ -369,6 +386,7 @@ def post_escalate_payload(
     session_sandbox: str,
     warnings: Sequence[str],
 ) -> dict[str, Any]:
+    _check_event_id("post-escalate", run_id, event_id)
     payload = _common("post-escalate", run_id, repo, labels, actor, decision_ids)
     payload.update(
         event_id=event_id,
@@ -407,6 +425,8 @@ def run_spec(
 ) -> EntryResult:
     """Run one entry with ``payload`` as JSON on stdin. A synchronous entry is ok when it exits
     0; an ``async`` one when it started (it cannot be observed after that)."""
+    if spec.invalid:
+        return EntryResult(False, "invalid")
     argv = [*shell, spec.cmd]
     stdin = json.dumps(payload, separators=(",", ":"), ensure_ascii=True)
     try:
@@ -428,6 +448,8 @@ def run_spec(
         return EntryResult(False, "error")
     except ValueError:
         return EntryResult(False, "invalid")
+    except (OSError, RuntimeError):  # e.g. no thread, no space for the stdin file
+        return EntryResult(False, "error")
     if done.returncode == 0:
         return EntryResult(True, "ok", 0, done.stdout)
     return EntryResult(False, "exit", done.returncode, done.stdout)
@@ -449,13 +471,13 @@ def _decision_ids(stdout: str) -> list[str]:
         return []
     try:
         doc = json.loads(stdout.strip())
-    except ValueError:
+    except (ValueError, RecursionError):  # deeply nested stdout is not a decision id
         return []
     if not isinstance(doc, dict):
         return []
     value = doc.get("decision_id")
     items = value if isinstance(value, list) else [value]
-    return [i for i in items if isinstance(i, str) and _DECISION_ID_RE.match(i)]
+    return [i for i in items if isinstance(i, str) and DECISION_ID_RE.fullmatch(i)]
 
 
 def run_pre_run(
@@ -498,9 +520,45 @@ def run_pre_run(
     return PreRunResult("escalate", "pre-run", tuple(ids))
 
 
+def pre_run_audit_record(
+    caller: Caller,
+    result: PreRunResult,
+    run_id: str,
+    pr: str,
+    inputs: Mapping[str, Any],
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """The audit ``run`` record of a vetoed or escalated attempt (no run record exists): result
+    ``vetoed`` with exit 11 or ``escalated`` with exit 13, target the reserved ``run_id`` and
+    ``pr``. The hook's decision ids are added to the caller's (deduplicated, at most
+    ``MAX_DECISION_IDS``). ``inputs`` is the record's ``inputs`` object (``schemas/audit.json``);
+    ``kwargs`` go to ``make_audit_record`` (``attempt_id``, ``ts``, ``now``). A ``continue`` outcome
+    has no such record (``ValueError``)."""
+    if result.outcome == "veto":
+        status, exit_code = "vetoed", 11
+    elif result.outcome == "escalate":
+        status, exit_code = "escalated", ESCALATE_EXIT
+    else:
+        raise ValueError("only a veto or an escalation has a pre-run audit record")
+    ids = list(caller.decision_ids)
+    for item in result.decision_ids:
+        if item not in ids and len(ids) < MAX_DECISION_IDS:
+            ids.append(item)
+    return make_audit_record(
+        "run",
+        caller=dataclasses.replace(caller, decision_ids=tuple(ids[:MAX_DECISION_IDS])),
+        run_id=run_id,
+        pr=pr,
+        inputs=inputs,
+        result={"status": status, "reason": None, "exit_code": exit_code},
+        **kwargs,
+    )
+
+
 def require_human_override(caller: Caller) -> None:
-    """``run --override-escalation`` is human-only: the actor must be ``human:<name>`` (given by
-    ``--actor`` or derived from a TTY). Otherwise a usage error (exit 2)."""
+    """``run --override-escalation`` is human-only: the resulting actor must be ``human:<name>``
+    (``--actor human:<name>``, or derived from a TTY when no ``--actor`` is given; a TTY with
+    ``--actor auto:<name>`` is refused). Otherwise a usage error (exit 2)."""
     if not caller.actor.startswith("human:"):
         raise ReviewRunError(
             "usage", "--override-escalation needs a human actor (a TTY or --actor human:<name>)"
@@ -605,11 +663,14 @@ def _run_event(
         log.write(
             "hook_skipped", f"event {event_id} names an unknown hook", level="warn", run_id=run_id
         )
+        _abandon(store, log, run_id, hook or "unknown", [(0, "unknown_hook")], attempt)
         store.mark_event(event_id, delivered=True)
         return DeliveryResult(event_id, "abandoned")
     payload = event["payload"]
     try:
         validate_payload(hook, payload)
+        if payload.get("event_id") != event_id or payload.get("object_id") != run_id:
+            raise ValueError("the payload does not belong to its outbox row")
     except ValueError:
         # A payload that does not match its schema never gets better: abandon it at once.
         _abandon(store, log, run_id, hook, [(0, "payload_invalid")], attempt)

@@ -16,8 +16,13 @@ Rules:
 * ``term_grace`` (default 0: none) adds a SIGTERM to the group first; the group gets SIGKILL when
   the leader has exited or the grace has passed, whichever comes first.
 * ``spawn_detached`` starts a child that is not waited for: no output pipes, its stdin an unlinked
-  private file, its own group, and a watchdog thread that ends exactly that group at the timeout
-  (the watchdog lives only as long as this process does).
+  private file, its own session and group. A small supervisor process (``sys.executable -I``, no
+  dependency) leads that group and runs the program in it, so the timeout is enforced after this
+  process has exited: SIGTERM to the group, ``term_grace``, SIGKILL. A program that exits leaving
+  background descendants gives those no timeout once the supervisor has seen it exit.
+* While ``run`` waits in the main thread, SIGTERM and SIGHUP (when still at their default action)
+  end the child's group and then exit this process (143, 130), so a signalled review-run does not
+  orphan a running hook; the previous handlers are restored afterwards.
 * Output is decoded explicitly as UTF-8 with ``surrogateescape``, never through the locale;
   ``stdin`` is encoded the same way (unencodable or over ``MAX_OUTPUT`` bytes: ``GatewayError``).
 * A normal exit kills nothing: group members that outlive the leader keep running, and their later
@@ -36,12 +41,15 @@ from __future__ import annotations
 import math
 import os
 import selectors
+import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 import threading
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -185,17 +193,18 @@ class Gateway(Protocol):
         cwd: str | None = None,
         term_grace: float = 0.0,
     ) -> DetachedHandle:
-        """Start ``argv`` without waiting; its group is ended at ``timeout`` by a watchdog."""
+        """Start ``argv`` without waiting; a supervisor process ends its group at ``timeout``."""
         ...
 
 
 class DetachedHandle(Protocol):
-    """A detached child: its PID (its group id) and a way to wait for its watchdog."""
+    """A detached child: the PID (group id) of its supervisor and a way to wait for it."""
 
     pid: int
 
     def join(self, timeout: float | None = None) -> bool:
-        """Wait until the child has exited or been ended; ``False`` when still running."""
+        """Wait until the supervisor has exited (the child exited or was ended); ``False`` when
+        still running."""
         ...
 
 
@@ -225,13 +234,81 @@ def _end_group(proc: subprocess.Popen[bytes], pgid: int, grace: float) -> None:
 
 
 class _Detached:
-    def __init__(self, pid: int, thread: threading.Thread) -> None:
-        self.pid = pid
-        self._thread = thread
+    def __init__(self, proc: subprocess.Popen[bytes]) -> None:
+        self.pid = proc.pid
+        self._proc = proc
 
     def join(self, timeout: float | None = None) -> bool:
-        self._thread.join(timeout)
-        return not self._thread.is_alive()
+        try:
+            self._proc.wait(timeout)
+        except subprocess.TimeoutExpired:
+            return False
+        return True
+
+
+# The supervisor of a detached child. It leads the group (the caller starts it with a new
+# session), runs the program in that group and, at the timeout, ends the whole group: SIGTERM, a
+# grace, SIGKILL. Its own SIGTERM handler does nothing, so the group-wide SIGTERM does not stop
+# it (a handler, unlike SIG_IGN, is reset by exec in the program). Arguments: timeout, grace, argv.
+_SUPERVISOR = """
+import os, signal, subprocess, sys
+timeout, grace = float(sys.argv[1]), float(sys.argv[2])
+signal.signal(signal.SIGTERM, lambda *_: None)
+try:
+    child = subprocess.Popen(sys.argv[3:])
+except OSError:
+    os._exit(127)
+try:
+    code = child.wait(timeout=timeout)
+except subprocess.TimeoutExpired:
+    group = os.getpgrp()
+    if grace > 0:
+        os.killpg(group, signal.SIGTERM)
+        try:
+            child.wait(timeout=grace)
+        except subprocess.TimeoutExpired:
+            pass
+    os.killpg(group, signal.SIGKILL)
+    os._exit(1)
+os._exit(code if 0 <= code < 256 else 1)
+"""
+
+
+def _find_program(argv0: str, env: Mapping[str, str] | None) -> bool:
+    if "/" in argv0:
+        return os.path.isfile(argv0) and os.access(argv0, os.X_OK)
+    path = (os.environ if env is None else env).get("PATH")
+    return shutil.which(argv0, path=path if path is not None else os.defpath) is not None
+
+
+@contextmanager
+def _ending_signals() -> Iterator[None]:
+    """While a child is awaited in the main thread, SIGTERM and SIGHUP (still at their default
+    action) raise ``SystemExit`` (143, 130), so the ``BaseException`` path of ``run`` ends the
+    child's group. Previous handlers come back afterwards; off the main thread this does nothing."""
+    installed: dict[int, object] = {}
+    if threading.current_thread() is threading.main_thread():
+
+        def make(code: int) -> object:
+            def handler(_signum: int, _frame: object) -> None:
+                raise SystemExit(code)
+
+            return handler
+
+        for sig, code in ((signal.SIGTERM, 143), (signal.SIGHUP, 130)):
+            try:
+                if signal.getsignal(sig) == signal.SIG_DFL:
+                    installed[sig] = signal.signal(sig, make(code))  # type: ignore[arg-type]
+            except (ValueError, OSError):
+                pass
+    try:
+        yield
+    finally:
+        for sig, previous in installed.items():
+            try:
+                signal.signal(sig, previous)  # type: ignore[arg-type]
+            except (ValueError, OSError):
+                pass
 
 
 def _leader_exited(proc: subprocess.Popen[bytes]) -> bool:
@@ -283,7 +360,8 @@ class SystemGateway:
             ) from exc
         pgid = proc.pid  # the group this call created; valid while the leader is unreaped
         try:
-            out, err = _communicate(proc, data, timeout)
+            with _ending_signals():
+                out, err = _communicate(proc, data, timeout)
         except BaseException:
             # Timeout, overflow, interrupt or any failure: end exactly the group we created, first,
             # and reap after, so a member alive when the leader exits is still killed. The leader
@@ -314,15 +392,26 @@ class SystemGateway:
         args = list(argv)
         if cwd is not None and not os.path.isdir(cwd):
             raise GatewayError("working directory missing")
+        if not _find_program(args[0], env):
+            raise ToolMissing(f"cannot execute {os.path.basename(args[0])!r}")
+        supervisor = [sys.executable, "-I", "-c", _SUPERVISOR, repr(float(timeout)),
+                      repr(float(term_grace)), *args]  # fmt: skip
         # The child's stdin: an unlinked private file (no pipe to feed, nothing to clean up).
-        with tempfile.TemporaryFile() as feed:
-            if data:
-                feed.write(data)
-                feed.flush()
-            feed.seek(0)
+        try:
+            feed = tempfile.TemporaryFile()
+        except OSError as exc:
+            raise GatewayError(f"cannot create the stdin file: errno {exc.errno}") from exc
+        with feed:
+            try:
+                if data:
+                    feed.write(data)
+                    feed.flush()
+                feed.seek(0)
+            except OSError as exc:
+                raise GatewayError(f"cannot write the stdin file: errno {exc.errno}") from exc
             try:
                 proc = subprocess.Popen(
-                    args,
+                    supervisor,
                     stdin=feed,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
@@ -333,24 +422,10 @@ class SystemGateway:
             except OSError as exc:
                 if cwd is not None and exc.filename == cwd:
                     raise GatewayError("working directory unusable") from exc
-                if isinstance(exc, (FileNotFoundError, PermissionError, NotADirectoryError)):
-                    raise ToolMissing(f"cannot execute {os.path.basename(args[0])!r}") from exc
                 raise GatewayError(
                     f"cannot start {os.path.basename(args[0])!r}: errno {exc.errno}"
                 ) from exc
-        pgid = proc.pid
-
-        def watch() -> None:
-            try:
-                proc.wait(timeout=timeout)
-            except subprocess.TimeoutExpired:
-                _end_group(proc, pgid, term_grace)
-            except BaseException:  # never leave a child without a watchdog verdict
-                _end_group(proc, pgid, 0.0)
-
-        thread = threading.Thread(target=watch, name="review-run-watchdog", daemon=True)
-        thread.start()
-        return _Detached(pgid, thread)
+        return _Detached(proc)
 
 
 def _communicate(

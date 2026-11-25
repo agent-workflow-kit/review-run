@@ -343,12 +343,14 @@ def test_a_bad_payload_is_abandoned_at_once_without_running_anything(
 def test_an_unknown_hook_name_in_the_outbox_is_logged_and_dropped(
     store: Store, root: Path, fake_gateway: FakeGateway
 ) -> None:
-    _, event_id = seed(store)
+    run_id, event_id = seed(store)
     with store.transaction() as conn:
         conn.execute("UPDATE events SET hook = 'weird' WHERE event_id = ?", (event_id,))
     deliver(store, root, post_run_config({"cmd": "n"}))
     assert fake_gateway.calls == []
     assert any(r["event"] == "hook_skipped" for r in log_records(root))
+    run = store.get_run(run_id)
+    assert run is not None and "hook_failed" in run.warnings
     assert event_row(store, event_id)[1] == 1
 
 
@@ -366,6 +368,60 @@ def test_an_audit_failure_does_not_stop_the_hooks_and_is_raised_afterwards(
         deliver(store, root, post_run_config({"cmd": "n"}))
     assert events_of(fake_gateway) == [event_id]
     assert event_row(store, event_id) == (1, 1, 1)  # delivered, audit still pending
+
+
+def test_a_payload_that_names_another_event_or_run_is_abandoned(
+    store: Store, root: Path, fake_gateway: FakeGateway
+) -> None:
+    run_id, event_id = seed(store)
+    other_run, _ = seed(store)
+    base = store.pending_events(run_id)[0]["payload"]
+    for changed in ({"event_id": f"{run_id}-post-run-2"}, {"object_id": other_run}):
+        with store.transaction() as conn:
+            conn.execute(
+                "UPDATE events SET payload = ?, delivered = 0 WHERE event_id = ?",
+                (json.dumps({**base, **changed}), event_id),
+            )
+        res = deliver(store, root, post_run_config({"cmd": "n"}), run_id=run_id)
+        assert [r.status for r in res] == ["abandoned"]
+    assert fake_gateway.calls == []
+    run = store.get_run(run_id)
+    assert run is not None and "hook_failed" in run.warnings
+
+
+def test_an_oserror_from_one_entry_does_not_stop_the_pass(
+    store: Store, root: Path, fake_gateway: FakeGateway
+) -> None:
+    fake_gateway.script(SH, OSError(28, "no space"), ok(), ok())
+    _, first = seed(store)
+    _, second = seed(store)
+    res = deliver(store, root, post_run_config({"cmd": "n"}))
+    assert sorted(r.status for r in res) == ["delivered", "retry"]
+    assert {event_row(store, first)[0], event_row(store, second)[0]} == {1}
+
+
+def test_an_invalid_stored_entry_is_a_failed_attempt_not_a_silent_skip(
+    store: Store, root: Path, fake_gateway: FakeGateway
+) -> None:
+    _, event_id = seed(store, flag_hooks=("garbage-no-equals",))
+    assert deliver(store, root, None)[0].status == "retry"
+    assert fake_gateway.calls == []
+    assert event_row(store, event_id)[1] == 0
+
+
+def test_a_sync_entry_reruns_on_each_pass_and_async_starts_only_on_the_ending_pass(
+    store: Store, root: Path, fake_gateway: FakeGateway
+) -> None:
+    fake_gateway.script(SH, ok(), ok(returncode=1), ok(), ok(returncode=1), ok(), ok(returncode=1),
+                        ok(), ok(returncode=1), ok(), ok(returncode=1))  # fmt: skip
+    _, event_id = seed(store)
+    config = post_run_config({"cmd": "good"}, {"cmd": "bad"}, {"cmd": "bg", "async": True})
+    statuses = [deliver(store, root, config)[0].status for _ in range(5)]
+    assert statuses == ["retry"] * 4 + ["abandoned"]
+    sync_runs = [c for c in fake_gateway.calls if not c.detached]
+    async_runs = [c for c in fake_gateway.calls if c.detached]
+    assert len(sync_runs) == 10  # the succeeding entry too, on every pass
+    assert len(async_runs) == 1  # only on the pass that ended the event
 
 
 # -- real processes ---------------------------------------------------------------------

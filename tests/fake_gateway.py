@@ -41,7 +41,7 @@ class Call:
         return out
 
 
-Script = CompletedRun | GatewayError | Callable[[Call], CompletedRun]
+Script = CompletedRun | GatewayError | OSError | RuntimeError | Callable[[Call], CompletedRun]
 
 
 def ok(stdout: str = "", stderr: str = "", returncode: int = 0) -> Callable[[Call], CompletedRun]:
@@ -77,7 +77,7 @@ class FakeGateway:
         if not queue:
             raise AssertionError(f"unscripted gateway call: {argv[0]!r}")
         item = queue.pop(0) if len(queue) > 1 else queue[0]
-        if isinstance(item, GatewayError):
+        if isinstance(item, (GatewayError, OSError, RuntimeError)):
             raise item
         result = item(call) if callable(item) else item
         for text in (result.stdout, result.stderr):  # the real gateway's per-stream cap, in bytes
@@ -112,7 +112,7 @@ class FakeGateway:
         queue = self.scripts.get(argv[0])
         if queue:
             item = queue.pop(0) if len(queue) > 1 else queue[0]
-            if isinstance(item, GatewayError):
+            if isinstance(item, (GatewayError, OSError, RuntimeError)):
                 raise item
         return _DoneHandle()
 
