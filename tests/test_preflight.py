@@ -50,6 +50,7 @@ class Routed:
         stdin: str | None = None,
         env: Mapping[str, str] | None = None,
         cwd: str | None = None,
+        term_grace: float = 0.0,
     ) -> CompletedRun:
         self.calls.append(tuple(argv))
         self.envs.append(None if env is None else dict(env))
@@ -71,7 +72,20 @@ class Routed:
             stdin=stdin,
             env=child,
             cwd=str(self.fb.dir),
+            term_grace=term_grace,
         )
+
+    def spawn_detached(
+        self,
+        argv: Sequence[str],
+        *,
+        timeout: float,
+        stdin: str | None = None,
+        env: Mapping[str, str] | None = None,
+        cwd: str | None = None,
+        term_grace: float = 0.0,
+    ) -> gw.DetachedHandle:
+        raise NotImplementedError("the preflight tests never start a detached child")
 
     def tools_called(self) -> list[str]:
         return [c[0] for c in self.calls]
