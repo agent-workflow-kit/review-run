@@ -1,0 +1,123 @@
+{
+  "x-pinned-from": {
+    "sibling": "pr-comment",
+    "version": "0.39.0",
+    "source": "schemas/cli/draft-check.json"
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "pr-comment/cli/draft-check.json",
+  "title": "draft check output",
+  "description": "Validates a draft offline; runs no forgectl and writes no audit record. Printed with --json on exit 0 (valid) and exit 2 (invalid).",
+  "type": "object",
+  "properties": {
+    "valid": {
+      "type": "boolean"
+    },
+    "schema_version": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "description": "The draft's schema_version, or null when it has none that is an integer."
+    },
+    "draft_id": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "x-untrusted": true,
+      "description": "Untrusted: the draft's draft_id when it is a valid id, else null.",
+      "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "findings": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0,
+      "description": "Number of findings, or null when findings is not an array."
+    },
+    "errors": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "pointer": {
+            "type": "string",
+            "x-untrusted": true,
+            "description": "Untrusted: JSON pointer into the draft.",
+            "pattern": "^(?:/.*)?$"
+          },
+          "message": {
+            "type": "string",
+            "description": "A fixed validation message; never draft content."
+          },
+          "kind": {
+            "oneOf": [
+              {
+                "$ref": "../defs.json#/$defs/text_kind"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The invalid_text kind; null for schema and consistency errors."
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "pointer",
+          "message",
+          "kind"
+        ]
+      },
+      "maxItems": 101,
+      "description": "Empty when valid. At most 100 problems, then one final `further errors omitted` entry (kind null) when more were dropped."
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "valid",
+    "schema_version",
+    "draft_id",
+    "findings",
+    "errors"
+  ],
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "valid": {
+            "const": true
+          }
+        },
+        "required": [
+          "valid"
+        ]
+      },
+      "then": {
+        "properties": {
+          "errors": {
+            "maxItems": 0
+          },
+          "schema_version": {
+            "type": "integer"
+          },
+          "draft_id": {
+            "type": "string"
+          },
+          "findings": {
+            "type": "integer"
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "errors": {
+            "minItems": 1
+          }
+        }
+      }
+    }
+  ]
+}
