@@ -15,7 +15,7 @@ from . import __version__
 from . import runs as runs_mod
 from .audit import export_lines
 from .durations import DurationError, parse_duration, parse_since
-from .errors import PROG, ExitCode, ReviewRunError, printable
+from .errors import DECISION_ID_RE, MAX_DECISION_IDS, PROG, ExitCode, ReviewRunError, printable
 from .fsmodes import apply_umask
 from .store import Store, default_state_root
 
@@ -25,9 +25,8 @@ STATES = ("running", "done", "escalated", "failed")
 # Grammars of schemas/defs.json (actor, decision_ids items); the label grammar of architecture
 # section 8.1 and the PR and run reference shapes are checked by the commands that use them.
 _ACTOR_RE = re.compile(r"(?:human|auto):[A-Za-z0-9._@-]{1,64}", re.ASCII)
-_DECISION_ID_RE = re.compile(r"[A-Za-z0-9._:@/-]{1,128}", re.ASCII)
+_DECISION_ID_RE = DECISION_ID_RE
 _HOOK_RE = re.compile(r"[A-Za-z0-9_-]+=.+", re.ASCII | re.DOTALL)
-MAX_DECISION_IDS = 32
 
 
 class _Parser(argparse.ArgumentParser):
