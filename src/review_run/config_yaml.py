@@ -103,8 +103,8 @@ def private_group(gid: int) -> bool:
         return False
     try:
         members = grp.getgrgid(gid).gr_mem
-    except KeyError:
-        members = []
+    except Exception:  # noqa: BLE001 (a failed group lookup cannot prove privacy)
+        return False
     if any(member != me for member in members):
         return False
     try:

@@ -3,6 +3,7 @@ permission profile, API misuse and the environment mapping."""
 
 from __future__ import annotations
 
+import grp
 import json
 import os
 from pathlib import Path
@@ -11,6 +12,7 @@ import pytest
 
 from review_run.config import check_config, load_config
 from review_run.config_semantic import read_guidelines_file
+from review_run.config_yaml import private_group
 from review_run.errors import ReviewRunError
 from tests.config_helpers import (
     base_env,
@@ -119,6 +121,19 @@ def test_world_writable_is_refused_even_in_a_private_group(
     private_primary_group(monkeypatch)
     with pytest.raises(ReviewRunError):
         load_config(None, base_env())
+
+
+@pytest.mark.parametrize("error", [KeyError("gid"), OSError("nss down"), RuntimeError("boom")])
+def test_a_failing_group_lookup_is_not_private(
+    monkeypatch: pytest.MonkeyPatch, error: Exception
+) -> None:
+    private_primary_group(monkeypatch)
+
+    def broken(gid: int) -> None:
+        raise error
+
+    monkeypatch.setattr(grp, "getgrgid", broken)
+    assert private_group(os.getegid()) is False
 
 
 # -- partial drop-ins (item 3) ----------------------------------------------------------------
