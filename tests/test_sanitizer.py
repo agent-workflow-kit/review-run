@@ -901,3 +901,66 @@ def test_redact_rejects_a_bare_string() -> None:
         redact("a supersecretvalue b", "supersecretvalue")  # type: ignore[arg-type]
     with pytest.raises(TypeError):
         redact("a b", b"supersecretvalue")  # type: ignore[arg-type]
+
+
+def test_a_secret_with_lt_on_a_neutralized_line_is_redacted() -> None:
+    secret = "tok<en>12345678"
+    out = redact(sanitize("<untrusted> leak " + secret), [secret])
+    assert "12345678" not in out
+    assert "tok" not in out
+
+
+def test_a_secret_with_fullwidth_lt_on_a_neutralized_line_is_redacted() -> None:
+    secret = "tok＜en＞12345678"
+    out = redact(sanitize("<untrusted> leak " + secret), [secret])
+    assert "12345678" not in out
+    assert "tok" not in out
+
+
+def _naive_redact(text: str, values: list[str]) -> str:
+    spans: list[tuple[int, int]] = []
+    for pattern in values:
+        start = text.find(pattern)
+        while start != -1:
+            spans.append((start, start + len(pattern)))
+            start = text.find(pattern, start + 1)
+    if not spans:
+        return text
+    spans.sort()
+    parts: list[str] = []
+    position = 0
+    current_start, current_end = spans[0]
+    for start, end in spans[1:]:
+        if start <= current_end:
+            current_end = max(current_end, end)
+            continue
+        parts.extend((text[position:current_start], "<redacted>"))
+        position = current_end
+        current_start, current_end = start, end
+    parts.extend((text[position:current_start], "<redacted>", text[current_end:]))
+    return "".join(parts)
+
+
+def test_redact_matches_the_naive_search_on_small_random_strings() -> None:
+    rng = random.Random(1234)
+    for _ in range(400):
+        text = "".join(rng.choice("ab") for _ in range(rng.randint(8, 60)))
+        values = list(
+            {
+                "".join(rng.choice("ab") for _ in range(rng.randint(8, 14)))
+                for _ in range(rng.randint(1, 3))
+            }
+        )
+        # Only patterns that sanitize to themselves, so the naive search is the reference.
+        assert redact(text, values) == _naive_redact(text, values)
+    # Periodic patterns exercise the overlap skipping.
+    for text in ("ab" * 30, "a" * 40, "aab" * 15 + "aa", "abababababab" + "x" + "ababababab"):
+        for value in ("abababab", "aaaaaaaa", "aabaabaa", "abababababab"):
+            assert redact(text, [value]) == _naive_redact(text, [value])
+
+
+def test_redact_is_not_quadratic_on_repetitive_text() -> None:
+    start = time.perf_counter()
+    out = redact("a" * 50000, ["a" * 25000])
+    assert out == "<redacted>"
+    assert time.perf_counter() - start < 5

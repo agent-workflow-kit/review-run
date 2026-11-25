@@ -275,6 +275,38 @@ def sanitize_inline(value: str | bytes | bytearray | memoryview, limit: int = 20
     return body + "..." if cut else body
 
 
+def _shortest_period(pattern: str) -> int:
+    """Smallest k such that pattern[i] == pattern[i + k] for all valid i (KMP failure function)."""
+    fail = [0] * len(pattern)
+    border = 0
+    for index in range(1, len(pattern)):
+        while border and pattern[index] != pattern[border]:
+            border = fail[border - 1]
+        if pattern[index] == pattern[border]:
+            border += 1
+        fail[index] = border
+    return len(pattern) - fail[-1]
+
+
+def _match_spans(text: str, pattern: str) -> list[tuple[int, int]]:
+    """Every (possibly overlapping) occurrence of pattern, in linear time on repetitive text.
+
+    After a match at i the next one starts at i + period or later, and a match at i + period
+    needs only the pattern's last ``period`` characters to follow the previous match."""
+    size = len(pattern)
+    period = _shortest_period(pattern)
+    tail = pattern[size - period :]
+    spans: list[tuple[int, int]] = []
+    start = text.find(pattern)
+    while start != -1:
+        spans.append((start, start + size))
+        while text.startswith(tail, start + size):
+            start += period
+            spans.append((start, start + size))
+        start = text.find(pattern, start + period)
+    return spans
+
+
 def redact(text: str, values: Iterable[str]) -> str:
     """Replace every occurrence of each value of at least 8 characters with ``<redacted>``.
 
@@ -293,17 +325,16 @@ def redact(text: str, values: Iterable[str]) -> str:
     patterns: set[str] = set()
     for value in values:
         if len(value) >= REDACT_MIN_LENGTH:
-            patterns.add(value)
-            patterns.add(sanitize(value))
+            for form in (value, sanitize(value)):
+                patterns.add(form)
+                # sanitize rewrites every "<"-like char of a neutralized line to "&lt;".
+                patterns.add(_LT_CHAR.sub("&lt;", form))
     patterns.discard("")
     if not patterns or not text:
         return text
     spans: list[tuple[int, int]] = []
     for pattern in patterns:
-        start = text.find(pattern)
-        while start != -1:
-            spans.append((start, start + len(pattern)))
-            start = text.find(pattern, start + 1)
+        spans.extend(_match_spans(text, pattern))
     if not spans:
         return text
     spans.sort()
