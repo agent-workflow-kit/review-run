@@ -1,0 +1,1606 @@
+{
+  "x-pinned-from": {
+    "sibling": "pr-comment",
+    "version": "0.39.0",
+    "source": "schemas/defs.json"
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "pr-comment/defs.json",
+  "title": "pr-comment shared definitions",
+  "description": "Not an output on its own. Shared definitions referenced by the draft, CLI, hook, audit and log schemas. config.json embeds its own copies.",
+  "$defs": {
+    "repo_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*(?::[0-9]{1,5})?(?:/(?!\\.\\.?(?:/|$))[A-Za-z0-9._-]+)+$",
+      "description": "host/<full project path>, taken from the PR."
+    },
+    "pr": {
+      "type": "string",
+      "pattern": "^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*(?::[0-9]{1,5})?(?:/(?!\\.\\.?(?:/|#))[A-Za-z0-9._-]+)+#[1-9][0-9]{0,9}$",
+      "description": "host/<full project path>#N, as normalized by forgectl (GitLab MR numbers without !)."
+    },
+    "sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$",
+      "description": "Full 40-hex commit sha, lowercase."
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "ts": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}[Tt][0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]+)?(?:[Zz]|[+-][0-9]{2}:[0-9]{2})$",
+      "description": "RFC 3339."
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^(?:gh:(?:ic|rc|rt|r):[A-Za-z0-9_=-]{1,100}|gl:d:[0-9a-f]{40}|gl:n:[1-9][0-9]{0,18})$",
+      "description": "forgectl's opaque comment, review or thread id."
+    },
+    "thread_id": {
+      "type": "string",
+      "pattern": "^(?:gh:rt:[A-Za-z0-9_=-]{1,100}|gl:d:[0-9a-f]{40})$",
+      "description": "A review thread id: gh:rt: or gl:d: only."
+    },
+    "draft_id": {
+      "type": "string",
+      "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+      "description": "26 characters of Crockford base32 (draft new writes a ULID), chosen once by whoever creates the draft; kept when a draft is edited or re-anchored."
+    },
+    "finding_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]{1,64}$",
+      "description": "Unique within its draft."
+    },
+    "dedupe_key": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+      "description": "prc:rv:<draft_id>, prc:ra:<draft_id>:<12 hex>, prc:<action>:<20 hex>, or a caller's --dedupe-key."
+    },
+    "decision_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._:@/-]{1,128}$"
+    },
+    "decision_ids": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/decision_id"
+      },
+      "maxItems": 32,
+      "description": "Decision ids (grammar of --decision-id); possibly empty."
+    },
+    "actor": {
+      "type": "string",
+      "pattern": "^(human|auto):[A-Za-z0-9._@-]{1,64}$",
+      "description": "human:<user> or auto:<name>. Advisory against same-user processes."
+    },
+    "base_ref": {
+      "type": "string",
+      "x-untrusted": true,
+      "description": "Untrusted: a branch name, as written in a draft or reported by forgectl; forgectl's branch grammar (git check-ref-format, no leading -, no path component starting with a dot, not a lone @, at most 1024 characters). The schema cannot express the rest of what `draft check` refuses: refs and refs/ prefixes, and control, format, surrogate and line or paragraph separator characters.",
+      "minLength": 1,
+      "maxLength": 1024,
+      "pattern": "^(?!-)(?!/)(?!@$)(?!(?:.*/)?\\.)(?!.*/$)(?!.*\\.\\.)(?!.*@\\{)(?!.*//)(?!.*\\.lock(?:/|$))(?!.*\\.$)[^\\x00-\\x20\\x7f~^:?*\\[\\\\]+$"
+    },
+    "pr_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9:/_=-]{1,128}$",
+      "description": "forgectl's pr_id: opaque, stable across renames."
+    },
+    "side": {
+      "enum": [
+        "right",
+        "left"
+      ]
+    },
+    "review_event": {
+      "enum": [
+        "comment",
+        "request_changes",
+        "approve"
+      ]
+    },
+    "moved_reason": {
+      "enum": [
+        "changed",
+        "file_removed",
+        "diff_unavailable",
+        "base_changed",
+        "invalid_position",
+        "files_incomplete"
+      ]
+    },
+    "degrade_reason": {
+      "enum": [
+        "invisible_chars",
+        "fence",
+        "slash_line",
+        "dedupe_text",
+        "open_fence"
+      ]
+    },
+    "text_kind": {
+      "enum": [
+        "control_character",
+        "suggestion_fence"
+      ]
+    },
+    "mention_name": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*$",
+      "description": "A name without the @; a team as org/team. Matched in ASCII lowercase."
+    },
+    "mention_name_reported": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*$",
+      "maxLength": 128,
+      "description": "A name in a mentions_neutralized report: a mention_name cut to 128 characters (the report is capped silently; the count stays exact)."
+    },
+    "duration": {
+      "anyOf": [
+        {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        {
+          "type": "string",
+          "pattern": "^(?=.*[1-9])[0-9]+(?:\\.[0-9]+)?(?:ms|s|m|h|d)$"
+        },
+        {
+          "type": "string",
+          "pattern": "^(?=.*[1-9])[0-9]+(?:\\.[0-9]+)?$"
+        }
+      ],
+      "description": "Seconds as a positive number, a string <number><unit> with unit ms, s, m, h or d (e.g. '30s'), or a bare number string meaning seconds; zero is refused."
+    },
+    "exit_code": {
+      "enum": [
+        0,
+        1,
+        2,
+        10,
+        11,
+        12,
+        13,
+        20
+      ],
+      "description": "pr-comment's exit codes; forgectl's are passed through unchanged.",
+      "x-codes": {
+        "0": [],
+        "1": [
+          "internal",
+          "interrupted"
+        ],
+        "2": [
+          "usage",
+          "config_invalid",
+          "invalid_pr",
+          "invalid_draft",
+          "invalid_text",
+          "unsupported_draft_version",
+          "draft_pr_mismatch",
+          "approve_conflicts_event",
+          "body_too_large"
+        ],
+        "10": [
+          "not_found"
+        ],
+        "11": [
+          "vetoed"
+        ],
+        "12": [
+          "tool_missing",
+          "lower_contract_mismatch",
+          "audit_unavailable",
+          "audit_failed",
+          "state_unsafe",
+          "invalid_position",
+          "outcome_unknown",
+          "outcome_partial",
+          "quick_action_ran",
+          "approved_stale_head",
+          "auth_required",
+          "permission_denied",
+          "rate_limited",
+          "upstream_error",
+          "network_error",
+          "host_rejected",
+          "unsupported_host_version",
+          "wrong_host_response"
+        ],
+        "13": [
+          "confirmation_required",
+          "escalated"
+        ],
+        "20": [
+          "refused"
+        ]
+      }
+    },
+    "audit_error_code": {
+      "description": "An audit write's lower.code: every error_code, plus `interrupted` (a write never sent because a signal arrived during the attempted append; the run exits 128+N with no envelope). Only the audit record can carry `interrupted`; error_code, used by every error envelope, does not list it.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/error_code"
+        },
+        {
+          "const": "interrupted"
+        }
+      ]
+    },
+    "error_code": {
+      "enum": [
+        "internal",
+        "usage",
+        "config_invalid",
+        "invalid_pr",
+        "invalid_draft",
+        "invalid_text",
+        "unsupported_draft_version",
+        "draft_pr_mismatch",
+        "approve_conflicts_event",
+        "body_too_large",
+        "not_found",
+        "vetoed",
+        "tool_missing",
+        "lower_contract_mismatch",
+        "audit_unavailable",
+        "audit_failed",
+        "state_unsafe",
+        "invalid_position",
+        "outcome_unknown",
+        "outcome_partial",
+        "quick_action_ran",
+        "approved_stale_head",
+        "auth_required",
+        "permission_denied",
+        "rate_limited",
+        "upstream_error",
+        "network_error",
+        "host_rejected",
+        "unsupported_host_version",
+        "wrong_host_response",
+        "confirmation_required",
+        "escalated",
+        "refused"
+      ],
+      "description": "error.code. Exit 20 uses 'refused', with error.reason. Never `interrupted`: that code exists only in an audit write's lower.code (see audit_error_code), and the schema enforces it."
+    },
+    "refusal_reason": {
+      "enum": [
+        "stale_head",
+        "stale_base",
+        "auto_approve_disabled",
+        "auto_approve_reanchored",
+        "not_open",
+        "plan_changed",
+        "self_approval",
+        "drafts_present",
+        "pending_review_exists",
+        "not_resolvable",
+        "too_large",
+        "unknown_host"
+      ]
+    },
+    "counts": {
+      "type": "object",
+      "properties": {
+        "inline": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Inline comments in the plan."
+        },
+        "moved": {
+          "type": "object",
+          "properties": {
+            "changed": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "file_removed": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "diff_unavailable": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "base_changed": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "invalid_position": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "files_incomplete": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "changed",
+            "file_removed",
+            "diff_unavailable",
+            "base_changed",
+            "invalid_position",
+            "files_incomplete"
+          ],
+          "description": "Moved findings by reason; 0 for a reason that did not occur."
+        },
+        "file_level": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "severity": {
+          "type": "object",
+          "properties": {
+            "blocker": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "major": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "minor": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "nit": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "info": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "blocker",
+            "major",
+            "minor",
+            "nit",
+            "info"
+          ],
+          "description": "Findings by severity, over findings and unanchored; 0 for a severity that did not occur."
+        },
+        "suggestions_degraded": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Applicable suggestions degraded (moved findings excluded)."
+        },
+        "mentions_neutralized": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Replaced @ and entity forms."
+        },
+        "links": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Upper bound over the untrusted input, code included: link forms (URLs, www., mailto:, e-mail forms, inline link and image destinations, reference definitions, reference and footnote uses, angle autolinks)."
+        },
+        "images": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Upper bound over the untrusted input, code included: each ![."
+        },
+        "raw_html": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Upper bound over the untrusted input, code included: each < followed by an ASCII letter, /, ! or ?."
+        },
+        "invisible": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Characters in the untrusted fields that forgectl's Sanitizing would mark."
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "inline",
+        "moved",
+        "file_level",
+        "severity",
+        "suggestions_degraded",
+        "mentions_neutralized",
+        "links",
+        "images",
+        "raw_html",
+        "invisible"
+      ],
+      "description": "All draft counts are zero for actions without a draft."
+    },
+    "body_entry": {
+      "type": "object",
+      "properties": {
+        "role": {
+          "type": "string",
+          "pattern": "^(?:body|inline:[A-Za-z0-9._-]{1,64})$",
+          "description": "body, or inline:<finding id>."
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256",
+          "description": "Of the final UTF-8 text handed to forgectl."
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "role",
+        "sha256",
+        "bytes"
+      ],
+      "description": "One body handed to forgectl. Never holds text."
+    },
+    "moved": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/finding_id"
+        },
+        "reason": {
+          "$ref": "#/$defs/moved_reason"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "reason"
+      ]
+    },
+    "degraded": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/finding_id"
+        },
+        "reason": {
+          "$ref": "#/$defs/degrade_reason"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "reason"
+      ]
+    },
+    "forgectl_invalid_position": {
+      "type": "object",
+      "properties": {
+        "index": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Position in forgectl's review input comments list."
+        },
+        "path": {
+          "type": "string",
+          "x-untrusted": true,
+          "description": "Untrusted: the path as given.",
+          "minLength": 1
+        },
+        "line": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "side": {
+          "enum": [
+            "right",
+            "left",
+            null
+          ]
+        },
+        "start_line": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "index",
+        "path",
+        "line",
+        "side",
+        "start_line"
+      ],
+      "description": "forgectl's details.invalid item, passed through."
+    },
+    "error_details": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "x-untrusted": true,
+      "description": "Untrusted: may hold host or draft text. Keys of pr-comment's own codes are listed; forgectl's details are copied whole when forgectl fails, so other keys may appear (forgectl's error schema describes them).",
+      "properties": {
+        "head_sha": {
+          "$ref": "#/$defs/sha",
+          "description": "stale_head: the PR's current head."
+        },
+        "base_ref": {
+          "$ref": "#/$defs/base_ref",
+          "description": "stale_base: the PR's current base."
+        },
+        "errors": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "pointer": {
+                "type": "string",
+                "x-untrusted": true,
+                "description": "Untrusted: JSON pointer into the draft.",
+                "pattern": "^(?:/.*)?$"
+              },
+              "message": {
+                "type": "string",
+                "x-untrusted": true,
+                "description": "Untrusted: the validation message; may quote draft text."
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "pointer",
+              "message"
+            ]
+          },
+          "minItems": 1,
+          "description": "invalid_draft."
+        },
+        "pointer": {
+          "type": "string",
+          "x-untrusted": true,
+          "description": "Untrusted: invalid_text: JSON pointer to the field (/body for a body file).",
+          "pattern": "^(?:/.*)?$"
+        },
+        "kind": {
+          "$ref": "#/$defs/text_kind",
+          "description": "invalid_text: what was found."
+        },
+        "role": {
+          "type": "string",
+          "pattern": "^(?:body|inline:[A-Za-z0-9._-]{1,64})$",
+          "description": "body_too_large: the body at fault (body, or inline:<finding id>)."
+        },
+        "leftover_drafts": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "host_rejected: own drafts left after a failed cleanup (forgectl's)."
+        },
+        "what": {
+          "enum": [
+            "pr",
+            "to",
+            "thread"
+          ],
+          "description": "not_found: which lookup failed."
+        },
+        "id": {
+          "type": "string",
+          "x-untrusted": true,
+          "description": "Untrusted: not_found: the PR, --to id or thread id that was not found."
+        },
+        "plan_sha256": {
+          "$ref": "#/$defs/sha256",
+          "description": "plan_changed: the final plan's plan_sha256."
+        },
+        "outcome": {
+          "type": "object",
+          "x-untrusted": true,
+          "description": "Untrusted: audit_failed: the command's result document (a post or resolve result)."
+        },
+        "supported": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "minItems": 1,
+          "uniqueItems": true,
+          "description": "unsupported_draft_version: the draft versions this build reads."
+        },
+        "draft_pr": {
+          "$ref": "#/$defs/pr",
+          "description": "draft_pr_mismatch: the draft's pr."
+        },
+        "pr": {
+          "$ref": "#/$defs/pr",
+          "description": "draft_pr_mismatch: the normalized <pr> argument."
+        },
+        "install": {
+          "type": "string",
+          "description": "tool_missing: the install command."
+        },
+        "lower_version": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "lower_contract_mismatch: forgectl --version, or null when it gave none."
+        },
+        "command": {
+          "type": "string",
+          "description": "lower_contract_mismatch: the forgectl subcommand whose output did not validate."
+        },
+        "key": {
+          "type": "string",
+          "description": "config_invalid: the key at fault."
+        },
+        "invalid": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/forgectl_invalid_position"
+          },
+          "minItems": 1,
+          "description": "invalid_position: forgectl's items."
+        }
+      },
+      "additionalProperties": true
+    },
+    "error": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/error_code"
+        },
+        "message": {
+          "type": "string",
+          "x-untrusted": true,
+          "description": "Untrusted: may hold forgectl's or a host's message."
+        },
+        "reason": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/refusal_reason"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "On exit 20."
+        },
+        "details": {
+          "$ref": "#/$defs/error_details"
+        },
+        "retry_after": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "description": "Seconds, copied from forgectl's envelope; null otherwise."
+        },
+        "landed": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "Exit 12: false when nothing was sent, true when text landed, null when unknown (outcome_unknown); see the table in the interface."
+        },
+        "retry": {
+          "enum": [
+            "same_command",
+            "new_key",
+            "none",
+            null
+          ],
+          "description": "Exit 12: same_command (a rerun cannot duplicate text and can complete it), new_key (post a new draft or pass --dedupe-key), none (it landed, or a human must act first)."
+        },
+        "lower_error": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "x-untrusted": true,
+          "description": "Untrusted: forgectl's whole error envelope when forgectl failed, else null. Open: forgectl's error schema governs it."
+        },
+        "hook": {
+          "enum": [
+            "pre-post",
+            null
+          ],
+          "description": "pr-comment's own hook that vetoed or escalated; null otherwise (forgectl's hooks appear in lower_error)."
+        },
+        "hook_stderr": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-untrusted": true,
+          "description": "Untrusted: the hook's stderr, cut to 4096 bytes (maxLength counts code points and approximates it); with several escalations, the first's.",
+          "maxLength": 4096
+        },
+        "escalated_by": {
+          "enum": [
+            "pr-comment",
+            "forgectl",
+            null
+          ],
+          "description": "escalated: whose hook escalated; null otherwise."
+        },
+        "escalated_hooks": {
+          "oneOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "hook": {
+                    "const": "pre-post"
+                  },
+                  "index": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Position of the hook in its list."
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "hook",
+                  "index"
+                ]
+              },
+              "minItems": 1
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "escalated: every escalating hook, from pr-comment's hooks or copied from forgectl's envelope; null otherwise."
+        },
+        "decision_ids": {
+          "$ref": "#/$defs/decision_ids"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "message"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "refused"
+              }
+            },
+            "required": [
+              "code"
+            ]
+          },
+          "then": {
+            "required": [
+              "reason"
+            ],
+            "properties": {
+              "reason": {
+                "type": "string"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "reason": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "hook": {
+                "const": "pre-post"
+              }
+            },
+            "required": [
+              "hook"
+            ]
+          },
+          "then": {
+            "required": [
+              "hook_stderr"
+            ],
+            "properties": {
+              "code": {
+                "enum": [
+                  "vetoed",
+                  "escalated"
+                ]
+              },
+              "hook_stderr": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "escalated"
+              }
+            },
+            "required": [
+              "code"
+            ]
+          },
+          "then": {
+            "required": [
+              "escalated_by",
+              "escalated_hooks"
+            ],
+            "properties": {
+              "escalated_by": {
+                "type": "string"
+              },
+              "escalated_hooks": {
+                "type": "array"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "escalated_by": {
+                "type": "null"
+              },
+              "escalated_hooks": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "enum": [
+                  "tool_missing",
+                  "lower_contract_mismatch",
+                  "audit_unavailable",
+                  "audit_failed",
+                  "state_unsafe",
+                  "invalid_position",
+                  "outcome_unknown",
+                  "outcome_partial",
+                  "quick_action_ran",
+                  "approved_stale_head",
+                  "auth_required",
+                  "permission_denied",
+                  "rate_limited",
+                  "upstream_error",
+                  "network_error",
+                  "host_rejected",
+                  "unsupported_host_version",
+                  "wrong_host_response"
+                ]
+              }
+            },
+            "required": [
+              "code"
+            ]
+          },
+          "then": {
+            "required": [
+              "landed",
+              "retry"
+            ],
+            "properties": {
+              "retry": {
+                "type": "string"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "landed": {
+                "type": "null"
+              },
+              "retry": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "enum": [
+                  "tool_missing",
+                  "audit_unavailable",
+                  "state_unsafe",
+                  "invalid_position",
+                  "auth_required",
+                  "permission_denied",
+                  "rate_limited",
+                  "upstream_error",
+                  "network_error",
+                  "unsupported_host_version",
+                  "wrong_host_response"
+                ]
+              }
+            },
+            "required": [
+              "code"
+            ]
+          },
+          "then": {
+            "properties": {
+              "landed": {
+                "const": false
+              },
+              "retry": {
+                "const": "same_command"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "enum": [
+                  "quick_action_ran",
+                  "approved_stale_head"
+                ]
+              }
+            },
+            "required": [
+              "code"
+            ]
+          },
+          "then": {
+            "properties": {
+              "landed": {
+                "const": true
+              },
+              "retry": {
+                "const": "none"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "outcome_unknown"
+              }
+            },
+            "required": [
+              "code"
+            ]
+          },
+          "then": {
+            "properties": {
+              "landed": {
+                "type": "null"
+              },
+              "retry": {
+                "const": "same_command"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "enum": [
+                  "lower_contract_mismatch",
+                  "audit_failed"
+                ]
+              }
+            },
+            "required": [
+              "code"
+            ]
+          },
+          "then": {
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "landed": {
+                      "const": false
+                    }
+                  },
+                  "required": [
+                    "landed"
+                  ]
+                },
+                "then": {
+                  "properties": {
+                    "retry": {
+                      "const": "same_command"
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "landed": {
+                      "const": true
+                    }
+                  },
+                  "required": [
+                    "landed"
+                  ]
+                },
+                "then": {
+                  "properties": {
+                    "retry": {
+                      "const": "none"
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "host_rejected"
+              }
+            },
+            "required": [
+              "code"
+            ]
+          },
+          "then": {
+            "properties": {
+              "landed": {
+                "const": false
+              }
+            },
+            "allOf": [
+              {
+                "if": {
+                  "required": [
+                    "details"
+                  ],
+                  "properties": {
+                    "details": {
+                      "type": "object",
+                      "required": [
+                        "leftover_drafts"
+                      ]
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "retry": {
+                      "const": "none"
+                    }
+                  }
+                },
+                "else": {
+                  "properties": {
+                    "retry": {
+                      "const": "same_command"
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "outcome_partial"
+              }
+            },
+            "required": [
+              "code"
+            ]
+          },
+          "then": {
+            "properties": {
+              "landed": {
+                "type": "boolean"
+              },
+              "retry": {
+                "enum": [
+                  "same_command",
+                  "new_key"
+                ]
+              }
+            },
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "retry": {
+                      "const": "new_key"
+                    }
+                  },
+                  "required": [
+                    "retry"
+                  ]
+                },
+                "then": {
+                  "properties": {
+                    "landed": {
+                      "const": false
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "invalid_draft"
+              }
+            },
+            "required": [
+              "code"
+            ]
+          },
+          "then": {
+            "required": [
+              "details"
+            ],
+            "properties": {
+              "details": {
+                "type": "object",
+                "required": [
+                  "errors"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "invalid_text"
+              }
+            },
+            "required": [
+              "code"
+            ]
+          },
+          "then": {
+            "required": [
+              "details"
+            ],
+            "properties": {
+              "details": {
+                "type": "object",
+                "required": [
+                  "kind",
+                  "pointer"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "unsupported_draft_version"
+              }
+            },
+            "required": [
+              "code"
+            ]
+          },
+          "then": {
+            "required": [
+              "details"
+            ],
+            "properties": {
+              "details": {
+                "type": "object",
+                "required": [
+                  "supported"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "draft_pr_mismatch"
+              }
+            },
+            "required": [
+              "code"
+            ]
+          },
+          "then": {
+            "required": [
+              "details"
+            ],
+            "properties": {
+              "details": {
+                "type": "object",
+                "required": [
+                  "draft_pr",
+                  "pr"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "lower_contract_mismatch"
+              }
+            },
+            "required": [
+              "code"
+            ]
+          },
+          "then": {
+            "required": [
+              "details"
+            ],
+            "properties": {
+              "details": {
+                "type": "object",
+                "required": [
+                  "lower_version",
+                  "command"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "invalid_position"
+              }
+            },
+            "required": [
+              "code"
+            ]
+          },
+          "then": {
+            "required": [
+              "details"
+            ],
+            "properties": {
+              "details": {
+                "type": "object",
+                "required": [
+                  "invalid"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "not_found"
+              }
+            },
+            "required": [
+              "code"
+            ]
+          },
+          "then": {
+            "required": [
+              "details"
+            ],
+            "properties": {
+              "details": {
+                "type": "object",
+                "required": [
+                  "what",
+                  "id"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "audit_failed"
+              }
+            },
+            "required": [
+              "code"
+            ]
+          },
+          "then": {
+            "required": [
+              "details"
+            ],
+            "properties": {
+              "details": {
+                "type": "object",
+                "required": [
+                  "outcome"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "reason": {
+                "const": "stale_base"
+              }
+            },
+            "required": [
+              "reason"
+            ]
+          },
+          "then": {
+            "required": [
+              "details"
+            ],
+            "properties": {
+              "details": {
+                "type": "object",
+                "required": [
+                  "base_ref"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "reason": {
+                "const": "plan_changed"
+              }
+            },
+            "required": [
+              "reason"
+            ]
+          },
+          "then": {
+            "required": [
+              "details"
+            ],
+            "properties": {
+              "details": {
+                "type": "object",
+                "required": [
+                  "plan_sha256"
+                ]
+              }
+            }
+          }
+        }
+      ]
+    },
+    "inline_comment": {
+      "type": "object",
+      "properties": {
+        "finding_id": {
+          "$ref": "#/$defs/finding_id"
+        },
+        "path": {
+          "type": "string",
+          "x-untrusted": true,
+          "description": "Untrusted: the file's path at the pinned head, as forgectl prints it.",
+          "minLength": 1
+        },
+        "line": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "start_line": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "side": {
+          "$ref": "#/$defs/side"
+        },
+        "role": {
+          "type": "string",
+          "pattern": "^inline:[A-Za-z0-9._-]{1,64}$",
+          "description": "inline:<finding id>: the bodies entry holding this comment's text."
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "finding_id",
+        "path",
+        "line",
+        "start_line",
+        "side",
+        "role"
+      ]
+    },
+    "plan_body": {
+      "type": "object",
+      "properties": {
+        "role": {
+          "type": "string",
+          "pattern": "^(?:body|inline:[A-Za-z0-9._-]{1,64})$",
+          "description": "body, or inline:<finding id>."
+        },
+        "text": {
+          "type": "string",
+          "x-untrusted": true,
+          "description": "Untrusted: the body as handed to forgectl (the Text pipeline's output), without forgectl's dedupe line."
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "role",
+        "text",
+        "bytes"
+      ]
+    },
+    "follow_up": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "const": "resolve"
+        },
+        "thread_id": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/thread_id"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The GitLab body thread; null when it is known only after the post."
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "action",
+        "thread_id"
+      ],
+      "description": "A forgectl write that follows the post (the GitLab body-thread resolve)."
+    },
+    "plan": {
+      "type": "object",
+      "properties": {
+        "plan_sha256": {
+          "$ref": "#/$defs/sha256",
+          "description": "sha256 of the canonical JSON of the plan's posting content (interface, Posting plan)."
+        },
+        "bodies": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/plan_body"
+          },
+          "minItems": 1
+        },
+        "inline_comments": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/inline_comment"
+          },
+          "description": "review only; empty otherwise."
+        },
+        "commands": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1
+          },
+          "minItems": 1,
+          "description": "The real forgectl calls the run would execute (with --yes), in order; not the pre-check. The input goes on stdin."
+        },
+        "follow_ups": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/follow_up"
+          },
+          "description": "pr-comment's own follow-up writes (the GitLab body-thread resolve), in write order."
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "plan_sha256",
+        "bodies",
+        "inline_comments",
+        "commands",
+        "follow_ups"
+      ],
+      "description": "What a real run would post: the confirmed plan."
+    },
+    "hook_entry_pre": {
+      "type": "object",
+      "properties": {
+        "cmd": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Run through sh -c in its own process group."
+        },
+        "timeout": {
+          "$ref": "#/$defs/duration",
+          "default": "30s"
+        },
+        "with_text": {
+          "type": "boolean",
+          "default": false,
+          "description": "Add each body's final text to the payload's bodies."
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "cmd"
+      ],
+      "description": "Exit 0 continues; 13 escalates; any other non-zero exit or a timeout vetoes."
+    },
+    "hook_entry_post": {
+      "type": "object",
+      "properties": {
+        "cmd": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Run through sh -c in its own process group."
+        },
+        "timeout": {
+          "$ref": "#/$defs/duration",
+          "default": "30s"
+        },
+        "async": {
+          "type": "boolean",
+          "default": false,
+          "description": "Run detached under a watchdog that enforces its timeout."
+        },
+        "with_text": {
+          "type": "boolean",
+          "default": false,
+          "description": "Add each body's final text to the payload's bodies."
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "cmd"
+      ],
+      "description": "Cannot undo; failures are logged and warned, never fatal."
+    }
+  }
+}
