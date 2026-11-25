@@ -1,10 +1,11 @@
 [project]
 name = "review-run"
-version = "0.0.1"
+version = "0.1.0"
 description = "Run a review skill on a pull request and store the resulting review draft."
 readme = "README.md"
 requires-python = ">=3.12"
 license = "MIT"
+# todo(#6): jsonschema and PyYAML are runtime dependencies (docs/design.md); move jsonschema from the dev group to [project].dependencies and add PyYAML
 dependencies = []
 
 [project.scripts]

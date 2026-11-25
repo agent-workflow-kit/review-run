@@ -1,3 +1,4 @@
+import errno
 import os
 import stat
 from pathlib import Path
@@ -133,6 +134,12 @@ def test_write_private_file_replaces_atomically_with_0600(tmp_path: Path) -> Non
     assert sorted(p.name for p in directory.iterdir()) == ["f"]
 
 
+def test_write_private_file_accepts_a_max_length_multibyte_name(tmp_path: Path) -> None:
+    target = tmp_path / ("\u754c" * 85)  # 255 bytes
+    write_private_file(target, b"x")
+    assert target.read_bytes() == b"x"
+
+
 def test_write_private_file_replaces_a_symlink_without_following(tmp_path: Path) -> None:
     victim = tmp_path / "victim"
     victim.write_text("keep")
@@ -155,3 +162,61 @@ def test_a_racing_creator_is_not_a_failure(tmp_path: Path, monkeypatch: pytest.M
     monkeypatch.setattr(os, "mkdir", racing_mkdir)
     ensure_private_dir(target)
     assert mode(target) == 0o700
+
+
+def _enospc(*args: object, **kwargs: object) -> int:
+    raise OSError(errno.ENOSPC, "no space")
+
+
+def test_create_removes_a_partial_file_on_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    d = tmp_path / "d"
+    d.mkdir()
+    monkeypatch.setattr(os, "write", _enospc)
+    with pytest.raises(OSError):
+        create_private_file(d / "f", b"data")
+    assert list(d.iterdir()) == []
+
+
+def test_write_removes_its_temp_file_on_write_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    d = tmp_path / "d"
+    d.mkdir()
+    monkeypatch.setattr(os, "write", _enospc)
+    with pytest.raises(OSError):
+        write_private_file(d / "f", b"data")
+    assert list(d.iterdir()) == []
+
+
+def test_write_removes_its_temp_file_when_the_create_fails_on_fsync(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    d = tmp_path / "d"
+    d.mkdir()
+    monkeypatch.setattr(os, "fsync", _enospc)
+    with pytest.raises(OSError):
+        write_private_file(d / "f", b"data")
+    assert list(d.iterdir()) == []
+
+
+def test_write_private_file_accepts_a_250_char_name(tmp_path: Path) -> None:
+    d = tmp_path / "d"
+    d.mkdir()
+    target = d / ("a" * 250)
+    write_private_file(target, b"x")
+    assert target.read_bytes() == b"x"
+    assert [p.name for p in d.iterdir()] == [target.name]
+
+
+def test_other_os_errors_in_ensure_private_dir_propagate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fail(*args: object, **kwargs: object) -> None:
+        raise OSError(errno.ENOSPC, "no space")
+
+    monkeypatch.setattr(os, "mkdir", fail)
+    with pytest.raises(OSError) as exc:
+        ensure_private_dir(tmp_path / "state")
+    assert exc.value.errno == errno.ENOSPC

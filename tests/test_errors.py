@@ -23,6 +23,11 @@ def test_exit_code_values_match_the_interface() -> None:
         "REFUSED": 20,
         "AMBIGUOUS": 21,
         "ARTIFACT": 22,
+        "UNREPORTED": 14,
+        "KILLED": 15,
+        "TIMEOUT": 16,
+        "LOST": 17,
+        "SESSION_FAILED": 18,
         "SIGINT": 130,
         "SIGTERM": 143,
     }
@@ -102,3 +107,9 @@ def test_human_line_is_one_line_and_names_the_code() -> None:
     line = err.human()
     assert "\n" not in line and "\r" not in line and "\x1b" not in line
     assert line.startswith("review-run: usage: ")
+
+
+def test_exit_codes_match_the_schema_enums() -> None:
+    defs = json.loads((SCHEMAS / "defs.json").read_text(encoding="utf-8"))["$defs"]
+    assert {int(c) for c in ExitCode} == set(defs["exit_code"]["enum"])
+    assert set(defs["run_exit_code"]["enum"]) <= {int(c) for c in ExitCode}

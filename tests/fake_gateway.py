@@ -7,6 +7,7 @@ Every call is recorded with its argv, env (or ``None``), cwd, stdin and timeout.
 
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 
@@ -64,7 +65,7 @@ class FakeGateway:
         env: Mapping[str, str] | None = None,
         cwd: str | None = None,
     ) -> CompletedRun:
-        gw.check_call(argv, timeout)
+        gw.check_call(argv, timeout, stdin=stdin, env=env, cwd=cwd)
         call = Call(tuple(argv), stdin, None if env is None else dict(env), cwd, timeout)
         self.calls.append(call)
         queue = self.scripts.get(argv[0])
@@ -73,9 +74,11 @@ class FakeGateway:
         item = queue.pop(0) if len(queue) > 1 else queue[0]
         if isinstance(item, GatewayError):
             raise item
-        if callable(item):
-            return item(call)
-        return item
+        result = item(call) if callable(item) else item
+        for text in (result.stdout, result.stderr):  # the real gateway's per-stream cap, in bytes
+            if len(text.encode("utf-8", errors="surrogateescape")) > gw.MAX_OUTPUT:
+                raise gw.OutputTooLarge(f"a call printed more than {gw.MAX_OUTPUT} bytes")
+        return dataclasses.replace(result, argv=call.argv)
 
     def assert_no_marker(self, marker: str) -> None:
         """Fail when ``marker`` (planted untrusted text) is in any recorded argv, env or cwd."""
