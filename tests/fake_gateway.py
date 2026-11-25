@@ -100,7 +100,12 @@ class FakeGateway:
         gw.check_call(argv, timeout, stdin=stdin, env=env, cwd=cwd, term_grace=term_grace)
         self.calls.append(
             Call(
-                tuple(argv), stdin, None if env is None else dict(env), cwd, timeout, term_grace,
+                tuple(argv),
+                stdin,
+                None if env is None else dict(env),
+                cwd,
+                timeout,
+                term_grace,
                 True,
             )
         )

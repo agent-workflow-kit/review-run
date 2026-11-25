@@ -148,7 +148,12 @@ def test_a_missing_program_is_tool_missing_for_a_detached_call(tmp_path: Path) -
 
 @pytest.mark.parametrize(
     "kwargs",
-    [{"timeout": 0}, {"timeout": float("nan")}, {"timeout": 5, "term_grace": -1}, {"timeout": None}],
+    [
+        {"timeout": 0},
+        {"timeout": float("nan")},
+        {"timeout": 5, "term_grace": -1},
+        {"timeout": None},
+    ],
 )
 def test_bad_detached_arguments_raise_value_error(kwargs: dict[str, Any]) -> None:
     with pytest.raises(ValueError):
