@@ -16,9 +16,11 @@ Scenario = dict[str, Any]
 SCENARIOS: dict[str, dict[str, Callable[..., Scenario]]] = {}
 
 
-def scenario(tool: str) -> Callable[[Callable[..., Scenario]], Callable[..., Scenario]]:
+def scenario(
+    tool: str, name: str | None = None
+) -> Callable[[Callable[..., Scenario]], Callable[..., Scenario]]:
     def register(fn: Callable[..., Scenario]) -> Callable[..., Scenario]:
-        SCENARIOS.setdefault(tool, {})[fn.__name__] = fn
+        SCENARIOS.setdefault(tool, {})[name or fn.__name__] = fn
         return fn
 
     return register
@@ -158,8 +160,13 @@ def merge_base_null() -> Scenario:
 def stale_head() -> Scenario:
     return {
         "draft new": [
-            _err(20, "refused", "the head did not hold still", reason="stale_head",
-                 details={"head_sha": fg.NEW_HEAD})  # fmt: skip
+            _err(
+                20,
+                "refused",
+                "the head did not hold still",
+                reason="stale_head",
+                details={"head_sha": fg.NEW_HEAD},
+            )  # fmt: skip
         ]
     }
 
@@ -186,21 +193,29 @@ def check_forced_invalid() -> Scenario:
 def lower_failed(exit_code: int = 12, code: str = "upstream_error") -> Scenario:
     """forgectl failed under pr-comment: its code is passed through."""
     return {
-        "draft new": [_err(exit_code, code, "forgectl failed", retry_after=None, landed=False,
-                           retry="same_command")]  # fmt: skip
+        "draft new": [
+            _err(
+                exit_code,
+                code,
+                "forgectl failed",
+                retry_after=None,
+                landed=False,
+                retry="same_command",
+            )
+        ]  # fmt: skip
     }
 
 
-@scenario("pr-comment")
-def hang(command: str = "draft check") -> Scenario:
+@scenario("pr-comment", "hang")
+def hang_pr_comment(command: str = "draft check") -> Scenario:
     return {command: [{"hang": True}]}
 
 
 # ---- wtctl --------------------------------------------------------------------------------
 
 
-@scenario("wtctl")
-def ok() -> Scenario:
+@scenario("wtctl", "ok")
+def ok_wtctl() -> Scenario:
     return {}
 
 
@@ -228,8 +243,14 @@ def create_vetoed() -> Scenario:
 def create_escalated() -> Scenario:
     return {
         "create": [
-            _err(13, "escalated", "escalated", hook="pre-create", hook_stderr="ask",
-                 escalated_hooks=["pre-create"])  # fmt: skip
+            _err(
+                13,
+                "escalated",
+                "escalated",
+                hook="pre-create",
+                hook_stderr="ask",
+                escalated_hooks=["pre-create"],
+            )  # fmt: skip
         ]
     }
 
@@ -239,8 +260,14 @@ def remove_in_use() -> Scenario:
     proc = {"pid": 4242, "command": "fake-process", "path": "/tmp/x"}
     return {
         "remove": [
-            _err(20, "refused", "in use", reason="in_use", processes=[proc],
-                 checks={"in_use": {"status": "fail", "details": [proc]}}),
+            _err(
+                20,
+                "refused",
+                "in use",
+                reason="in_use",
+                processes=[proc],
+                checks={"in_use": {"status": "fail", "details": [proc]}},
+            ),
             {},
         ]
     }
@@ -258,12 +285,20 @@ def remove_busy() -> Scenario:
 
 @scenario("wtctl")
 def remove_partial() -> Scenario:
-    return {"remove": [_err(1, "partial", "the removal deleted part of the tree",
-                       details={"remaining_path": "/tmp/fake-throwaway", "remaining": []})]}
+    return {
+        "remove": [
+            _err(
+                1,
+                "partial",
+                "the removal deleted part of the tree",
+                details={"remaining_path": "/tmp/fake-throwaway", "remaining": []},
+            )
+        ]
+    }
 
 
-@scenario("wtctl")
-def hang(command: str = "create") -> Scenario:
+@scenario("wtctl", "hang")
+def hang_wtctl(command: str = "create") -> Scenario:
     return {command: [{"hang": True}]}
 
 
@@ -277,7 +312,9 @@ def _plan(**plan: Any) -> Scenario:
     return {"@sessions": {"plan": plan}}
 
 
-def _as_err(exit_code: int, code: str, message: str = "fake failure", **extra: Any) -> dict[str, Any]:
+def _as_err(
+    exit_code: int, code: str, message: str = "fake failure", **extra: Any
+) -> dict[str, Any]:
     return {"error": {"code": code, "message": message, **extra}, "exit": exit_code}
 
 
@@ -369,7 +406,8 @@ def dry_run_error(exit_code: int = 12, code: str = "failed", **extra: Any) -> Sc
 def dry_run_no_tmux() -> Scenario:
     lower = {"code": "tmux_missing", "message": "tmux is not installed"}
     return {"launch --dry-run": [_as_err(12, "failed", "termctl failed", tool="termctl",
-                                         lower_code="tmux_missing", lower_error=lower)]}  # fmt: skip
+                                         lower_code="tmux_missing",
+                                         lower_error=lower)]}  # fmt: skip
 
 
 @scenario("agent-spawn")
@@ -392,8 +430,8 @@ def teardown_failed(exit_code: int = 12, code: str = "failed") -> Scenario:
     return {"teardown": [_as_err(exit_code, code)]}
 
 
-@scenario("agent-spawn")
-def hang(command: str = "launch") -> Scenario:
+@scenario("agent-spawn", "hang")
+def hang_agent_spawn(command: str = "launch") -> Scenario:
     return {command: [{"hang": True}]}
 
 
@@ -448,6 +486,6 @@ def status_error(exit_code: int = 12, code: str = "failed") -> Scenario:
     return {"status": [_as_err(exit_code, code)]}
 
 
-@scenario("claude-session")
-def hang(command: str = "status") -> Scenario:
+@scenario("claude-session", "hang")
+def hang_claude_session(command: str = "status") -> Scenario:
     return {command: [{"hang": True}]}

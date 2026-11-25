@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+
 from review_run import gateway as gw
 from review_run.gateway import CompletedRun
 from tests.fakebin import _schemas as schemas
@@ -111,7 +112,7 @@ class FakeBin:
             wrapper.write_text(
                 "#!/bin/sh\n"
                 f"FAKEBIN_DIR={shlex.quote(str(self.dir))} exec "
-                f"{shlex.quote(sys.executable)} -E -s {shlex.quote(str(script))} \"$@\"\n",
+                f'{shlex.quote(sys.executable)} -E -s {shlex.quote(str(script))} "$@"\n',
                 encoding="utf-8",
             )
             wrapper.chmod(0o755)
@@ -234,3 +235,18 @@ def fakebin(tmp_path: Path) -> Iterator[FakeBin]:
     fb = FakeBin(tmp_path / "fakebin-run")
     yield fb
     fb.assert_valid()
+
+
+@pytest.fixture(name="inputs")
+def launch_inputs(tmp_path: Path) -> dict[str, Path]:
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("review it", encoding="utf-8")
+    patch = tmp_path / "f0001.patch"
+    patch.write_text("diff", encoding="utf-8")
+    plugin = tmp_path / "plugin"
+    plugin.mkdir()
+    profile = tmp_path / "permission-profile.json"
+    profile.write_text("{}", encoding="utf-8")
+    (tmp_path / "runs").mkdir()
+    return {"prompt": prompt, "patch": patch, "plugin": plugin, "profile": profile,
+            "result": tmp_path / "runs" / "launch.json"}  # fmt: skip

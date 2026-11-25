@@ -36,7 +36,7 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 #: Versions the fakes report; ``tests/test_fakes_harness.py`` keeps them equal to the pinned ones.
 VERSIONS = {
@@ -398,7 +398,7 @@ class Call:
         if self.stdin_text is None:
             data = sys.stdin.buffer.read() if not sys.stdin.isatty() else b""
             self.stdin_text = data.decode("utf-8", errors="surrogateescape")
-        return self.stdin_text
+        return self.stdin_text or ""
 
     def _signal(self, signum: int, _frame: object) -> None:
         """A signal ends the call by that signal's exit code (128+N) unless the tool says more."""
@@ -407,7 +407,7 @@ class Call:
             out = Out(exit=128 + signum, schema=None)
         self.finish(out, signaled=signum)
 
-    def finish(self, out: Out, *, signaled: int | None = None) -> None:
+    def finish(self, out: Out, *, signaled: int | None = None) -> NoReturn:
         if self.done:
             os._exit(out.exit)
         self.done = True
@@ -568,9 +568,7 @@ def run_tool(
         except Usage as exc:
             call.finish(usage_out(tool, exc, json_mode=json_requested(argv)))
         except Unimplemented as exc:
-            call.finish(
-                Out(exit=EXIT_UNIMPLEMENTED, stderr=f"fake {tool}: {exc} is not emulated")
-            )
+            call.finish(Out(exit=EXIT_UNIMPLEMENTED, stderr=f"fake {tool}: {exc} is not emulated"))
         try:
             out = handler(call, parsed)
         except Usage as exc:
@@ -581,7 +579,9 @@ def run_tool(
     except SystemExit:
         raise
     except BaseException as exc:  # a bug in a fake must be loud, never a plausible answer
-        call.finish(Out(exit=EXIT_FAKE_BUG, stderr=f"fake {tool}: bug: {type(exc).__name__}: {exc}"))
+        call.finish(
+            Out(exit=EXIT_FAKE_BUG, stderr=f"fake {tool}: bug: {type(exc).__name__}: {exc}")
+        )
 
 
 def iso(ts: float | None = None) -> str:

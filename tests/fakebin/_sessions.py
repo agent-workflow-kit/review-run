@@ -83,7 +83,9 @@ def new_ids(state: dict[str, Any]) -> tuple[str, str]:
     return base32_id("ag-", f"agent-{n}"), base32_id("cs-", f"session-{n}")
 
 
-def new_agent(state: dict[str, Any], settings: dict[str, Any], plan: dict[str, Any]) -> dict[str, Any]:
+def new_agent(
+    state: dict[str, Any], settings: dict[str, Any], plan: dict[str, Any]
+) -> dict[str, Any]:
     agent_id, csession_id = new_ids(state)
     now = iso()
     rec = {
@@ -107,7 +109,9 @@ def new_agent(state: dict[str, Any], settings: dict[str, Any], plan: dict[str, A
     return rec
 
 
-def new_run(n: int, plan: dict[str, Any], mode: str, now: str, auto: bool = False) -> dict[str, Any]:
+def new_run(
+    n: int, plan: dict[str, Any], mode: str, now: str, auto: bool = False
+) -> dict[str, Any]:
     return {"run": n, "plan": resolved_plan(plan), "mode": mode, "final": False,
             "started_at": now, "ended_at": None, "auto_resumed": auto, "outcome": None}  # fmt: skip
 

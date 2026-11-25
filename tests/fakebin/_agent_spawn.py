@@ -78,8 +78,10 @@ _GLOBAL = {
 
 _LAUNCH_FLAGS = {
     # claude-session pass-throughs
-    "--kind": flag(takes=True, check=lambda v: None if re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", v)
-                   else "is not a kind"),  # fmt: skip
+    "--kind": flag(
+        takes=True,
+        check=lambda v: None if re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", v) else "is not a kind",
+    ),  # fmt: skip
     "--mode": flag(takes=True, choices=("interactive", "headless")),
     "--skill": flag(takes=True),
     "--plugin-dir": flag(takes=True, repeat=True),
@@ -127,9 +129,24 @@ _LAUNCH_FLAGS = {
     "--dry-run": flag(),
 }
 _RESUME_FLAGS = {
-    **{k: v for k, v in _LAUNCH_FLAGS.items() if k not in ("--repo", "--worktree", "--branch",
-       "--base", "--ref", "--detach", "--worktree-name", "--no-bootstrap", "--copy-env",
-       "--ephemeral", "--hook")},  # fmt: skip
+    **{
+        k: v
+        for k, v in _LAUNCH_FLAGS.items()
+        if k
+        not in (
+            "--repo",
+            "--worktree",
+            "--branch",
+            "--base",
+            "--ref",
+            "--detach",
+            "--worktree-name",
+            "--no-bootstrap",
+            "--copy-env",
+            "--ephemeral",
+            "--hook",
+        )
+    },  # fmt: skip
     "--fork": flag(),
     "--select": flag(takes=True, repeat=True),
     "--hook": flag(takes=True, repeat=True, check=_hook_check(("post-launch",))),
@@ -142,8 +159,10 @@ GRAMMAR = Grammar(
         ("launch",): CommandSpec(flags=_LAUNCH_FLAGS),
         ("resume",): CommandSpec(flags=_RESUME_FLAGS, min_args=0, max_args=1),
         ("wait",): CommandSpec(
-            flags={"--timeout": flag(takes=True, check=duration_check),
-                   "--result-file": flag(takes=True)},  # fmt: skip
+            flags={
+                "--timeout": flag(takes=True, check=duration_check),
+                "--result-file": flag(takes=True),
+            },  # fmt: skip
             min_args=1,
             max_args=1,
         ),
@@ -158,8 +177,9 @@ GRAMMAR = Grammar(
                 "--merged-head": flag(takes=True, check=sha_check),
                 "--force": flag(),
                 "--override-escalation": flag(),
-                "--hook": flag(takes=True, repeat=True,
-                               check=_hook_check(("pre-teardown", "post-teardown"))),  # fmt: skip
+                "--hook": flag(
+                    takes=True, repeat=True, check=_hook_check(("pre-teardown", "post-teardown"))
+                ),  # fmt: skip
                 "--dry-run": flag(),
             },
             min_args=1,
@@ -181,8 +201,19 @@ GRAMMAR = Grammar(
         ),
     },
     unimplemented=frozenset(
-        [("attach",), ("ack",), ("label", "add"), ("label", "remove"), ("prune",), ("reconcile",),
-         ("cron", "install"), ("cron", "uninstall"), ("export",), ("browse",), ("validate",)]
+        [
+            ("attach",),
+            ("ack",),
+            ("label", "add"),
+            ("label", "remove"),
+            ("prune",),
+            ("reconcile",),
+            ("cron", "install"),
+            ("cron", "uninstall"),
+            ("export",),
+            ("browse",),
+            ("validate",),
+        ]
     ),
     mutually_exclusive=(
         ("--implicit-done", "--no-implicit-done"),
@@ -234,7 +265,9 @@ def _check_launch_flags(parsed: Parsed, *, resume: bool) -> None:
     result = parsed.get("--result-file")
     if result is not None and not os.path.isabs(result):
         raise Usage("--result-file must be an absolute path")
-    if parsed.has("--wait-timeout") and not (parsed.has("--wait") or parsed.get("--placement") == "here"):
+    if parsed.has("--wait-timeout") and not (
+        parsed.has("--wait") or parsed.get("--placement") == "here"
+    ):
         raise Usage("--wait-timeout needs --wait")
     if resume:
         if parsed.has("--select"):
@@ -267,7 +300,11 @@ def _settings(parsed: Parsed) -> dict[str, Any]:
         "cwd": parsed.get("--cwd"),
         "labels": parsed.all("--label"),
         "name": parsed.get("--name"),
-        "promote": True if parsed.has("--promote") else False if parsed.has("--no-promote") else None,
+        "promote": True
+        if parsed.has("--promote")
+        else False
+        if parsed.has("--no-promote")
+        else None,
         "ephemeral": parsed.has("--ephemeral"),
         "model": parsed.get("--model"),
         "sandbox": parsed.get("--sandbox", "required"),
@@ -278,7 +315,9 @@ def _settings(parsed: Parsed) -> dict[str, Any]:
     }
 
 
-def _result_doc(rec: dict[str, Any], run: dict[str, Any] | None, *, timed_out: bool = False) -> dict[str, Any]:
+def _result_doc(
+    rec: dict[str, Any], run: dict[str, Any] | None, *, timed_out: bool = False
+) -> dict[str, Any]:
     final = run is not None and run["final"]
     o = run["outcome"] if final and run is not None else None
     return {
@@ -471,23 +510,36 @@ def _show(call: Call, parsed: Parsed) -> Out:
                 "agent": sess.agent_doc(rec),
                 "runs": [
                     {
-                        "run": r["run"], "csession_id": rec["csession_id"],
-                        "run_kind": rec["settings"].get("kind"), "mode": r["mode"],
-                        "promoted": False, "auto_resumed": r["auto_resumed"],
-                        "adopted_at": r["started_at"], "ended_at": r["ended_at"],
-                        "first_working_at": r["started_at"], "window": None,
+                        "run": r["run"],
+                        "csession_id": rec["csession_id"],
+                        "run_kind": rec["settings"].get("kind"),
+                        "mode": r["mode"],
+                        "promoted": False,
+                        "auto_resumed": r["auto_resumed"],
+                        "adopted_at": r["started_at"],
+                        "ended_at": r["ended_at"],
+                        "first_working_at": r["started_at"],
+                        "window": None,
                         "outcome": sess.run_outcome_doc(rec, r) if r["final"] else None,
                     }  # fmt: skip
                     for r in rec["runs"]
                 ],
-                "session": None if tomb else {
-                    "state": st, "needs_input_reason": needs, "activity": activity,
+                "session": None
+                if tomb
+                else {
+                    "state": st,
+                    "needs_input_reason": needs,
+                    "activity": activity,
                     "run": run["run"],
                     "report_status": (run["outcome"]["report"] or {}).get("status")
-                    if run["final"] else None,
-                    "sandbox_active": True, "tainted": False,
+                    if run["final"]
+                    else None,
+                    "sandbox_active": True,
+                    "tainted": False,
                 },  # fmt: skip
-                "supervisor": None if tomb else {
+                "supervisor": None
+                if tomb
+                else {
                     "pid": 424242 if live else None,
                     "alive": None if parsed.has("--no-liveness") else live,
                     "exec_pid": 424243 if live else None,

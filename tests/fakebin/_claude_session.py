@@ -47,8 +47,9 @@ GRAMMAR = Grammar(
     tool=TOOL,
     global_flags=_GLOBAL,
     commands={
-        ("status",): CommandSpec(flags={"--run": flag(takes=True, check=positive_int_check)},
-                                 min_args=1, max_args=1),  # fmt: skip
+        ("status",): CommandSpec(
+            flags={"--run": flag(takes=True, check=positive_int_check)}, min_args=1, max_args=1
+        ),  # fmt: skip
         ("forget",): CommandSpec(
             flags={
                 "--purge": flag(),

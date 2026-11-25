@@ -11,7 +11,7 @@ import pytest
 from review_run.gateway import CallTimeout
 from tests.fakebin._sessions import DEFAULT_TOOLS
 from tests.fakes import FakeBin
-from tests.test_fake_agent_spawn import aid, inputs, launch, run  # noqa: F401  (fixture)
+from tests.test_fake_agent_spawn import aid, launch, run
 
 
 def csid_of(doc: dict[str, Any]) -> str:
@@ -78,7 +78,9 @@ def test_interactive_runs_have_no_result_path(fakebin: FakeBin, inputs: Any) -> 
         ("init_late", {"skip": 5}, lambda lines: lines[5]["subtype"] == "init"),
     ],
 )
-def test_init_object_fixtures(fakebin: FakeBin, inputs: Any, scenario: str, params: Any, check: Any) -> None:
+def test_init_object_fixtures(
+    fakebin: FakeBin, inputs: Any, scenario: str, params: Any, check: Any
+) -> None:
     fakebin.use("claude-session", scenario, **params)
     _, doc = finished(fakebin, inputs)
     assert check(result_lines(doc["run"]["result_path"]))
@@ -95,7 +97,9 @@ def test_missing_and_absent_result_files(fakebin: FakeBin, inputs: Any) -> None:
 
 @pytest.mark.parametrize("outcome", ["blocked", "needs-input", "failed", "exited-unreported",
                                      "killed", "timeout", "lost"])  # fmt: skip
-def test_status_reports_the_final_state_of_every_outcome(fakebin: FakeBin, inputs: Any, outcome: str) -> None:
+def test_status_reports_the_final_state_of_every_outcome(
+    fakebin: FakeBin, inputs: Any, outcome: str
+) -> None:
     fakebin.use("agent-spawn", "outcome", outcome=outcome)
     _, doc = finished(fakebin, inputs)
     assert doc["run"]["outcome"] == outcome and doc["live"] is False
@@ -105,20 +109,25 @@ def test_status_unknown_session_and_usage(fakebin: FakeBin) -> None:
     assert status(fakebin, "cs-aaaaaaaa")[0] == 10
     for argv in (["status"], ["status", "cs-short"], ["status", "cs-aaaaaaaa", "--run", "0"],
                  ["status", "cs-aaaaaaaa", "--run"], ["status", "cs-aaaaaaaa", "--bogus"],
-                 ["status", "cs-aaaaaaaa", "extra"], ["--json", "--run", "1", "status", "cs-aaaaaaaa"],
+                 ["status", "cs-aaaaaaaa", "extra"],
+                 ["--json", "--run", "1", "status", "cs-aaaaaaaa"],
                  ["status", "cs-aaaaaaaa", "--verbose", "--quiet"], ["frob"]):  # fmt: skip
         code, doc, _ = run(fakebin, "claude-session", *argv, "--json")
         assert code == 2 and doc["error"]["code"] == "usage", argv
 
 
-def test_forget_refuses_a_live_session_and_forgets_a_final_one(fakebin: FakeBin, inputs: Any) -> None:
+def test_forget_refuses_a_live_session_and_forgets_a_final_one(
+    fakebin: FakeBin, inputs: Any
+) -> None:
     doc = launch(fakebin, inputs)
     csid = csid_of(doc)
     code, err, _ = run(fakebin, "claude-session", "forget", csid, "--json")
     assert code == 20 and err["error"]["reason"] == "live"
     assert status(fakebin, csid)[0] == 0  # still there
     run(fakebin, "agent-spawn", "wait", aid(doc), "--json")
-    code, out, _ = run(fakebin, "claude-session", "forget", csid, "--actor", "auto:review-run", "--json")
+    code, out, _ = run(
+        fakebin, "claude-session", "forget", csid, "--actor", "auto:review-run", "--json"
+    )
     assert code == 0 and out["forgotten"][0]["csession_id"] == csid and out["skipped"] == []
     assert status(fakebin, csid)[0] == 10
     assert run(fakebin, "claude-session", "forget", csid, "--json")[0] == 10

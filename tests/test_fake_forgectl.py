@@ -235,3 +235,8 @@ def test_sigterm_ends_a_hanging_fake_with_exit_143(fakebin: FakeBin) -> None:
     os.kill(proc.pid, signal.SIGTERM)  # the PID we launched
     assert proc.wait(timeout=10) == 143
     assert fakebin.calls("forgectl")[0].signal == signal.SIGTERM
+
+
+def test_ok_scenario_is_the_default(fakebin: FakeBin) -> None:
+    fakebin.use("forgectl", "ok")
+    assert run(fakebin, "show", PR, "--json")[1]["state"] == "open"

@@ -179,3 +179,8 @@ def test_hang_is_ended_by_the_gateway_timeout(fakebin: FakeBin) -> None:
     fakebin.use("wtctl", "hang")
     with pytest.raises(CallTimeout):
         fakebin.run("wtctl", *CREATE, timeout=0.6)
+
+
+def test_ok_scenario_is_the_default(fakebin: FakeBin) -> None:
+    fakebin.use("wtctl", "ok")
+    assert create(fakebin)["state"] == "active"

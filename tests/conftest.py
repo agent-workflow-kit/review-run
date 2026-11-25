@@ -13,7 +13,7 @@ from jsonschema import Draft202012Validator
 from referencing import Registry, Resource
 
 from tests.fake_gateway import fake_gateway  # noqa: F401  (fixture)
-from tests.fakes import fakebin  # noqa: F401  (fixture)
+from tests.fakes import fakebin, launch_inputs  # noqa: F401  (fixtures)
 from tests.proc_guard import proc_tracker  # noqa: F401  (autouse fixture)
 
 SCHEMAS = Path(__file__).resolve().parent.parent / "schemas"

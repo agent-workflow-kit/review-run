@@ -117,13 +117,19 @@ def mutate(path: tuple[Any, ...], value: Any) -> dict[str, Any]:
         (lambda d: d.update(findings=[finding(extra=1)]), "/findings/0"),
         (lambda d: d.update(findings=[finding(), finding()]), "/findings/1/id"),
         (lambda d: d.update(findings=[finding(start_line=2)]), "/findings/0/start_line"),
-        (lambda d: d.update(findings=[finding(side="left", suggestion={"lines": ["x"]})]),
-         "/findings/0/suggestion"),  # fmt: skip
+        (
+            lambda d: d.update(findings=[finding(side="left", suggestion={"lines": ["x"]})]),
+            "/findings/0/suggestion",
+        ),  # fmt: skip
         (lambda d: d.update(findings=[finding(body="a\x07b")]), "/findings/0/body"),
-        (lambda d: d.update(findings=[finding(suggestion={"lines": ["```"]})]),
-         "/findings/0/suggestion/lines/0"),  # fmt: skip
-        (lambda d: d.update(findings=[finding(id=f"f{i}", line=i + 1) for i in range(201)]),
-         "/findings"),  # fmt: skip
+        (
+            lambda d: d.update(findings=[finding(suggestion={"lines": ["```"]})]),
+            "/findings/0/suggestion/lines/0",
+        ),  # fmt: skip
+        (
+            lambda d: d.update(findings=[finding(id=f"f{i}", line=i + 1) for i in range(201)]),
+            "/findings",
+        ),  # fmt: skip
     ],
 )
 def test_check_rejects_invalid_drafts(fakebin: FakeBin, edit: Any, pointer: str) -> None:
@@ -204,9 +210,13 @@ def test_the_grammar_rejects_what_the_real_tool_rejects(fakebin: FakeBin, argv: 
 
 def test_global_flags_go_anywhere_including_between_draft_and_subcommand(fakebin: FakeBin) -> None:
     assert run(fakebin, "--json", "draft", "--config", "/x", "new", PR)[0] == 0
-    assert run(fakebin, "draft", "--json", "check", "-", stdin=json.dumps(new_draft(fakebin)))[0] == 0
+    assert (
+        run(fakebin, "draft", "--json", "check", "-", stdin=json.dumps(new_draft(fakebin)))[0] == 0
+    )
     # the same scalar value twice is accepted
-    assert run(fakebin, "draft", "new", PR, "--json", "--actor", "auto:x", "--actor", "auto:x")[0] == 0
+    assert (
+        run(fakebin, "draft", "new", PR, "--json", "--actor", "auto:x", "--actor", "auto:x")[0] == 0
+    )
 
 
 def test_posting_commands_are_not_emulated(fakebin: FakeBin) -> None:
@@ -228,3 +238,13 @@ def test_a_draft_copy_is_independent(fakebin: FakeBin) -> None:
     b = copy.deepcopy(a)
     b["findings"].append(finding())
     assert a["findings"] == []
+
+
+def test_draft_ok_scenario_is_the_default(fakebin: FakeBin) -> None:
+    fakebin.use("pr-comment", "draft_ok")
+    assert new_draft(fakebin)["anchor"]["head_sha"] == fg.HEAD
+
+
+def test_a_head_can_be_chosen(fakebin: FakeBin) -> None:
+    fakebin.use("pr-comment", "head", sha="f" * 40)
+    assert new_draft(fakebin)["anchor"]["head_sha"] == "f" * 40

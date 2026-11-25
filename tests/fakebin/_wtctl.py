@@ -104,8 +104,17 @@ _LIST = CommandSpec(
         "--state": flag(
             takes=True,
             repeat=True,
-            choices=("creating", "active", "unlinked", "missing", "clone_missing", "partial",
-                     "gone", "removed", "forgotten"),  # fmt: skip
+            choices=(
+                "creating",
+                "active",
+                "unlinked",
+                "missing",
+                "clone_missing",
+                "partial",
+                "gone",
+                "removed",
+                "forgotten",
+            ),  # fmt: skip
         ),
         "--all": flag(),
     }
@@ -147,7 +156,7 @@ def new_record(
         "common_dir": None,
         "admin_dir": None,
         "common_id": None,
-        "dir_id": "1:%d" % (1000 + counter),
+        "dir_id": f"1:{1000 + counter}",
         "base_dir": throwaway_root(),
         "root_id": "1:1",
         "path": path,
@@ -206,7 +215,8 @@ def _create(call: Call, parsed: Parsed) -> Out:
             records = state.setdefault("wtctl", {"records": {}, "n": 0})
             records["n"] += 1
             rec = new_record(records["n"], repo, ref, parsed.get("--source", "auto") or "auto",
-                             int(parsed.get("--depth", "1") or 1), parsed.all("--label"))  # fmt: skip
+                             int(parsed.get("--depth", "1") or 1),
+                             parsed.all("--label"))  # fmt: skip
             records["records"][rec["id"]] = rec
         os.makedirs(rec["path"], mode=0o700, exist_ok=True)
         return Out(
@@ -230,8 +240,14 @@ def default_dry(parsed: Parsed, repo: str, ref: str) -> Out:
     rec = new_record(0, repo, ref, parsed.get("--source", "auto") or "auto",
                      int(parsed.get("--depth", "1") or 1), parsed.all("--label"))  # fmt: skip
     return Out(
-        doc={"record": rec, "branch_action": None, "bootstrap": None, "reused": False,
-             "warnings": [], "dry_run": True}  # fmt: skip
+        doc={
+            "record": rec,
+            "branch_action": None,
+            "bootstrap": None,
+            "reused": False,
+            "warnings": [],
+            "dry_run": True,
+        }  # fmt: skip
     )
 
 
@@ -249,9 +265,7 @@ def _remove(call: Call, parsed: Parsed) -> Out:
                 (r for r in records.values() if r["path"] == target), None
             )
             if rec is None:
-                return error_out(
-                    TOOL, 10, {"code": "not_found", "message": "no such record"}
-                )
+                return error_out(TOOL, 10, {"code": "not_found", "message": "no such record"})
             if rec["state"] in _TOMBSTONES:
                 return error_out(
                     TOOL, 10, {"code": "not_found", "message": f"the record is {rec['state']}"}

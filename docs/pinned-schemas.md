@@ -25,15 +25,15 @@ files that a pinned schema references (for example `defs.json`) are copied too.
 | Sibling | Version | Files |
 |---|---|---|
 | forgectl | 0.56.0 | `cli/show`, `cli/files`, `cli/diff`, `cli/ci`, `cli/error`, `defs` |
-| agent-spawn | 0.38.1 | `cli/launch` (launch result), `cli/wait` and `cli/show` (outcome object), `cli/resume` (resume result), `cli/list` (`list --json`), `cli/error` (error envelope), `defs` |
-| claude-session | 0.45.2 | `cli/status`, `cli/outcome` (referenced by `status`), `cli/error` |
+| agent-spawn | 0.38.1 | `cli/launch` (launch result), `cli/wait` and `cli/show` (outcome object), `cli/resume` (resume result), `cli/list` (`list --json`), `cli/error` (error envelope), `defs`; also `cli/launch-dry-run`, `cli/stop`, `cli/teardown`, `cli/teardown-dry-run` (read only by the fake harness) |
+| claude-session | 0.45.2 | `cli/status`, `cli/outcome` (referenced by `status`), `cli/error`, `cli/forget` (read only by the fake harness) |
 | wtctl | 1.2.0 | `cli/create`, `cli/remove`, `cli/list` (`wtctl list --json`, which `list --throwaways` filters), `cli/error`, `defs` |
 | pr-comment | 0.39.0 | `review-draft`, `cli/draft-new`, `cli/draft-check`, `cli/error`, `defs` |
 
 Only the outputs review-run parses are pinned. For agent-spawn that is
-`launch`, `wait`, `show`, `resume` and `list`; the outputs of `stop`,
-`teardown` and the other commands are not pinned because review-run does not
-read them.
+`launch`, `wait`, `show`, `resume` and `list`. The fake harness also validates
+the fakes' `launch --dry-run`, `stop`, `teardown` and claude-session `forget`
+outputs, so those schemas are pinned too; review-run does not read them.
 
 ## Refreshing after a sibling release
 
@@ -64,3 +64,15 @@ without the `schemas/` segment (for example `wtctl/cli/list.json`,
 `agent-spawn/defs.json`, `pr-comment/review-draft.json`), so key the registry by
 `$id`, or map `<sibling>/<path>` to
 `tests/pinned_schemas/<sibling>/schemas/<path>`. This issue adds no validator dependency.
+
+## The fake siblings (issue #10)
+
+`tests/fakebin/` holds fake `forgectl`, `pr-comment`, `agent-spawn`,
+`claude-session` and `wtctl` programs, and `tests/fakes.py` the `fakebin`
+fixture that runs them. Each fake follows the sibling's `docs/interface.md` at
+the pinned version (argv grammar, exit codes, stdout and stderr split, error
+envelope, signals). The harness validates every recorded stdout that names a
+pinned schema when the test ends, so a fake that emits an invalid document fails
+the test. Named scenarios live in `tests/fake_scenarios.py`; the format of a
+scenario step is in `tests/fakebin/_common.py`. When a sibling release changes a
+pinned schema, update the fake in the same change.

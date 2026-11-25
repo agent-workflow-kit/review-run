@@ -98,8 +98,11 @@ def check_draft(raw: str) -> tuple[int, dict[str, Any]]:
         key=lambda e: list(map(str, e.absolute_path)),
     ):
         errors.append(
-            {"pointer": _pointer(err.absolute_path), "message": "does not match the schema",
-             "kind": None}  # fmt: skip
+            {
+                "pointer": _pointer(err.absolute_path),
+                "message": "does not match the schema",
+                "kind": None,
+            }  # fmt: skip
         )
     findings = draft.get("findings") if isinstance(draft, dict) else None
     if isinstance(findings, list):
@@ -118,10 +121,12 @@ def check_draft(raw: str) -> tuple[int, dict[str, Any]]:
                 with_line += 1
             if isinstance(start, int) and isinstance(line, int) and start >= line:
                 errors.append({"pointer": f"/findings/{i}/start_line",
-                               "message": "start_line must be below line", "kind": None})  # fmt: skip
+                               "message": "start_line must be below line",
+                               "kind": None})  # fmt: skip
             if "suggestion" in f and (f.get("side") == "left" or line is None):
                 errors.append({"pointer": f"/findings/{i}/suggestion",
-                               "message": "a suggestion needs a right-side line", "kind": None})  # fmt: skip
+                               "message": "a suggestion needs a right-side line",
+                               "kind": None})  # fmt: skip
         if with_line > INLINE_CAP:
             errors.append({"pointer": "/findings", "message": "too many inline comments",
                            "kind": None})  # fmt: skip
@@ -230,10 +235,14 @@ def _new(call: Call, parsed: Parsed, cfg: dict[str, Any]) -> Out:
             raise Usage(
                 "the source draft is not valid",
                 code="invalid_draft",
-                details={"errors": [{"pointer": e["pointer"], "message": e["message"]}
-                                    for e in result["errors"]]},
+                details={
+                    "errors": [
+                        {"pointer": e["pointer"], "message": e["message"]} for e in result["errors"]
+                    ]
+                },
             )
         source = json.loads(raw)
+        assert source is not None
         if source["pr"] != pr:
             raise Usage("the source draft is for another pull request", code="draft_pr_mismatch",
                         details={"draft_pr": source["pr"], "pr": pr})  # fmt: skip
@@ -241,9 +250,12 @@ def _new(call: Call, parsed: Parsed, cfg: dict[str, Any]) -> Out:
         counter = state["_drafts"] = state.get("_drafts", 0) + 1
     step = next_step(TOOL, "draft new")
 
+    given = source
+
     def default() -> Out:
         draft = _default_draft(pr, counter, cfg, event)
-        if source is not None:
+        if given is not None:
+            source = given
             if source["anchor"]["head_sha"] != draft["anchor"]["head_sha"]:
                 return error_out(
                     TOOL,
