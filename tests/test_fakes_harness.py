@@ -61,15 +61,33 @@ def test_nothing_in_src_imports_or_names_a_fake_or_a_pinned_schema() -> None:
     assert offenders == []
 
 
-def test_every_scenario_is_exercised_by_a_test() -> None:
-    text = "".join(p.read_text(encoding="utf-8") for p in TESTS.glob("test_fake_*.py"))
+def _exercised(tool: str, name: str, texts: list[str]) -> bool:
+    """A test file applies scenario ``name`` of ``tool``: ``use("<tool>", "<name>"`` literally,
+    or ``use("<tool>", <variable>`` in a file that lists the quoted name (a parametrized test)."""
+    literal = rf"""use\(\s*["']{re.escape(tool)}["']\s*,\s*["']{re.escape(name)}["']"""
+    variable = rf"""use\(\s*["']{re.escape(tool)}["']\s*,\s*[A-Za-z_][A-Za-z_0-9]*\s*[,)]"""
+    quoted = rf"""["']{re.escape(name)}["']"""
+    return any(
+        re.search(literal, t) or (re.search(variable, t) and re.search(quoted, t)) for t in texts
+    )
+
+
+def test_every_scenario_is_exercised_by_a_test_of_its_own_tool() -> None:
+    texts = [p.read_text(encoding="utf-8") for p in sorted(TESTS.glob("test_fake_*.py"))]
     missing = [
         f"{tool}:{name}"
         for tool, scenarios in SCENARIOS.items()
         for name in scenarios
-        if not re.search(rf"""["']{re.escape(name)}["']""", text)
+        if not _exercised(tool, name, texts)
     ]
     assert missing == []
+
+
+def test_the_scenario_guard_checks_the_tool_not_just_the_name() -> None:
+    texts = ['fakebin.use("forgectl", "hang")']
+    assert _exercised("forgectl", "hang", texts)
+    assert not _exercised("wtctl", "hang", texts)  # same name, another tool
+    assert _exercised("wtctl", "x", ['use("wtctl", name)\n("x", 1)'])
 
 
 def test_every_fake_tool_has_an_executable_script_and_a_wrapper(fakebin: FakeBin) -> None:
@@ -94,14 +112,20 @@ def test_the_fakes_run_without_the_callers_environment(fakebin: FakeBin) -> None
     assert fakebin.calls("forgectl")[0].env.get("FAKEBIN_DIR") == str(fakebin.dir)
 
 
-def test_fakes_never_touch_the_real_home(fakebin: FakeBin, tmp_path: Path) -> None:
-    before = {p for p in Path.home().iterdir()} if Path.home().exists() else set()
+def test_fakes_run_with_a_private_home_and_write_only_under_their_directory(
+    fakebin: FakeBin, tmp_path: Path
+) -> None:
     for tool, argv in (("forgectl", ["show", "github.com/o/r#1", "--json"]),
                        ("wtctl", ["list", "--json"]),
                        ("agent-spawn", ["list", "--json"])):  # fmt: skip
         fakebin.run(tool, *argv)
-    after = {p for p in Path.home().iterdir()} if Path.home().exists() else set()
-    assert before == after
+    private = str(fakebin.dir / "home")
+    for call in fakebin.calls():
+        assert call.env["HOME"] == private and call.env["XDG_CONFIG_HOME"] == private
+    assert fakebin.env()["HOME"] == private == fakebin.env()["XDG_CONFIG_HOME"]
+    assert list((fakebin.dir / "home").iterdir()) == []  # the fakes never wrote their home
+    # nothing was created beside the harness directory (and the test session's own ``home``)
+    assert {p.name for p in tmp_path.iterdir()} <= {fakebin.dir.name, "home"}
 
 
 def test_a_missing_fakebin_dir_is_a_loud_failure(tmp_path: Path) -> None:

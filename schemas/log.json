@@ -32,7 +32,7 @@
     },
     "message": {
       "type": "string",
-      "maxLength": 512,
+      "maxLength": 300,
       "description": "A short line of closed codes, ids and counts; never untrusted text."
     },
     "run_id": {

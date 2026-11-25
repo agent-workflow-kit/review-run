@@ -55,7 +55,11 @@ GRAMMAR = Grammar(
 )
 
 _SEGMENT = r"[A-Za-z0-9._-]+"
-_HOST = r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*(?::[0-9]{1,5})?"
+# Hosts in input are lowercased (interface.md, Identifiers): match any case, normalize below.
+_HOST = (
+    r"(?i:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*(?::[0-9]{1,5})?)"
+)
+BUILTIN_HOSTS = ("github.com", "gitlab.com")
 _SHORT = re.compile(rf"({_HOST})((?:/{_SEGMENT})+)#([1-9][0-9]{{0,9}})")
 _GITHUB = re.compile(
     rf"https://({_HOST})/({_SEGMENT})/({_SEGMENT})/pull/([1-9][0-9]{{0,9}})"
@@ -86,13 +90,16 @@ def parse_pr(text: str, hosts: list[str]) -> tuple[str, str, int, str]:
         host, path, number = m.group(1), m.group(2).strip("/"), m.group(3)
     if host is None or path is None or number is None:
         raise bad
+    # ``:443`` is normalized away; a leading ``www.`` is stripped only for the built-in hosts.
+    host = host.lower().removesuffix(":443")
+    if host.startswith("www.") and host.removeprefix("www.") in BUILTIN_HOSTS:
+        host = host.removeprefix("www.")
     segments = path.split("/")
     backend = "gitlab" if host.startswith("gitlab") else "github"
     # No owner or GitLab segment starts with "-"; a GitHub repo name (last segment) may.
     checked = segments[:-1] if backend == "github" else segments
     if any(s in (".", "..") for s in segments) or any(s.startswith("-") for s in checked):
         raise bad
-    host = host.removesuffix(":443").removeprefix("www.")
     if backend == "github" and len(segments) != 2:
         raise bad
     return host, path, int(number), backend

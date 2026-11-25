@@ -107,13 +107,24 @@ def test_status_reports_the_final_state_of_every_outcome(
 
 def test_status_unknown_session_and_usage(fakebin: FakeBin) -> None:
     assert status(fakebin, "cs-aaaaaaaa")[0] == 10
-    for argv in (["status"], ["status", "cs-short"], ["status", "cs-aaaaaaaa", "--run", "0"],
-                 ["status", "cs-aaaaaaaa", "--run"], ["status", "cs-aaaaaaaa", "--bogus"],
-                 ["status", "cs-aaaaaaaa", "extra"],
+    for argv in (["status"], ["status", "cs-short"], ["status", "cs-aaaaaaaa", "--run"],
+                 ["status", "cs-aaaaaaaa", "--bogus"], ["status", "cs-aaaaaaaa", "extra"],
                  ["--json", "--run", "1", "status", "cs-aaaaaaaa"],
                  ["status", "cs-aaaaaaaa", "--verbose", "--quiet"], ["frob"]):  # fmt: skip
         code, doc, _ = run(fakebin, "claude-session", *argv, "--json")
         assert code == 2 and doc["error"]["code"] == "usage", argv
+
+
+def test_status_of_run_zero_is_not_found_not_usage(fakebin: FakeBin, inputs: Any) -> None:
+    csid = csid_of(launch(fakebin, inputs))
+    assert status(fakebin, csid, "--run", "0")[0] == 10
+    assert status(fakebin, csid, "--run", "x")[0] == 2
+
+
+def test_a_repeated_scalar_flag_keeps_the_last_value(fakebin: FakeBin, inputs: Any) -> None:
+    csid = csid_of(launch(fakebin, inputs))
+    assert status(fakebin, csid, "--run", "9", "--run", "1")[0] == 0
+    assert run(fakebin, "claude-session", "status", csid, "--json", "--json")[0] == 0
 
 
 def test_forget_refuses_a_live_session_and_forgets_a_final_one(

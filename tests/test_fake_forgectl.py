@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
+import signal
+import subprocess
+import time
 from typing import Any
 
 import pytest
@@ -58,6 +62,17 @@ def test_ci_head_flip_happens_once(fakebin: FakeBin) -> None:
     assert second["head_sha"] == fg.HEAD
 
 
+@pytest.mark.parametrize("on", ["show", "files", "diff"])
+def test_head_flip_on_every_read_happens_once(fakebin: FakeBin, on: str) -> None:
+    fakebin.use("forgectl", "head_flip", on=on)
+
+    def head(doc: Any) -> str:
+        return doc["head"]["sha"] if on == "show" else doc["head_sha"]
+
+    assert head(run(fakebin, on, PR, "--json")[1]) == fg.NEW_HEAD
+    assert head(run(fakebin, on, PR, "--json")[1]) == fg.HEAD  # then it holds still
+
+
 def test_head_flip_on_diff_and_always(fakebin: FakeBin) -> None:
     fakebin.use("forgectl", "head_flip_always", on="diff")
     assert run(fakebin, "diff", PR, "--json")[1]["head_sha"] == fg.NEW_HEAD
@@ -90,6 +105,26 @@ def test_unknown_host_exits_20(fakebin: FakeBin) -> None:
     fakebin.use("forgectl", "unknown_host")
     code, doc, _ = run(fakebin, "show", PR, "--json")
     assert code == 20 and doc["error"]["reason"] == "unknown_host"
+
+
+@pytest.mark.parametrize(
+    ("pr", "canonical"),
+    [
+        ("GitHub.com/Acme/widgets#7", "github.com/Acme/widgets#7"),  # hosts are lowercased
+        ("https://GITHUB.COM:443/acme/widgets/pull/7", "github.com/acme/widgets#7"),
+        ("www.github.com/acme/widgets#7", "github.com/acme/widgets#7"),  # built-in: www. stripped
+        ("https://www.gitlab.com/acme/widgets/-/merge_requests/7", "gitlab.com/acme/widgets#7"),
+    ],
+)
+def test_hosts_in_input_are_normalized(fakebin: FakeBin, pr: str, canonical: str) -> None:
+    code, doc, _ = run(fakebin, "show", pr, "--json")
+    assert code == 0 and doc["pr"] == canonical
+
+
+def test_www_is_stripped_only_for_the_built_in_hosts(fakebin: FakeBin) -> None:
+    fakebin.configure("forgectl", hosts=["github.com", "gitlab.com", "www.example.org"])
+    code, doc, _ = run(fakebin, "show", "www.example.org/acme/widgets#7", "--json")
+    assert code == 0 and doc["pr"] == "www.example.org/acme/widgets#7"
 
 
 def test_ci_failing_and_none(fakebin: FakeBin) -> None:
@@ -159,6 +194,14 @@ def test_global_flags_are_accepted_before_and_after_the_command(fakebin: FakeBin
     assert run(fakebin, "show", "--json", PR)[0] == 0
 
 
+def test_the_recorded_command_skips_the_values_of_global_flags(fakebin: FakeBin) -> None:
+    assert run(fakebin, "--timeout", "5s", "--config", "/nonexistent", "show", PR, "--json")[0] == 0
+    run(fakebin, "diff", PR, "--json")
+    assert [c.argv[-3] for c in fakebin.calls("forgectl", "show")] == ["show"]
+    assert len(fakebin.calls("forgectl", "diff")) == 1
+    assert fakebin.calls("forgectl", "5s") == [] and fakebin.calls("forgectl", "--timeout") == []
+
+
 def test_a_usage_error_without_json_prints_text_only(fakebin: FakeBin) -> None:
     code, doc, err = run(fakebin, "show")
     assert code == 2 and doc is None and "forgectl" in err
@@ -205,21 +248,20 @@ def test_an_invalid_document_fails_the_harness(fakebin: FakeBin) -> None:
 def test_a_hanging_fake_is_ended_by_the_gateway_timeout(fakebin: FakeBin) -> None:
     fakebin.use("forgectl", "hang", command="diff")
     with pytest.raises(CallTimeout):
-        fakebin.run("forgectl", "diff", PR, "--json", timeout=0.6)
+        fakebin.run("forgectl", "diff", PR, "--json", timeout=5)  # the start record is logged
     (call,) = fakebin.calls("forgectl")
     assert not call.finished  # killed with SIGKILL: no end record
     with pytest.raises(ProcessLookupError):
-        import os
-
         os.kill(call.pid, 0)
 
 
-def test_sigterm_ends_a_hanging_fake_with_exit_143(fakebin: FakeBin) -> None:
-    import os
-    import signal
-    import subprocess
-    import time
-
+@pytest.mark.parametrize(
+    ("signum", "code"),
+    [(signal.SIGTERM, 143), (signal.SIGINT, 130), (signal.SIGHUP, 129)],  # forgectl: 128+N
+)
+def test_a_signal_ends_a_hanging_fake_with_128_plus_n(
+    fakebin: FakeBin, signum: int, code: int
+) -> None:
     fakebin.use("forgectl", "hang")
     proc = subprocess.Popen(
         [fakebin.argv0("forgectl"), "show", PR, "--json"],
@@ -230,11 +272,10 @@ def test_sigterm_ends_a_hanging_fake_with_exit_143(fakebin: FakeBin) -> None:
     )
     deadline = time.monotonic() + 10
     while not fakebin.all_calls() and time.monotonic() < deadline:
-        time.sleep(0.05)
-    time.sleep(0.2)
-    os.kill(proc.pid, signal.SIGTERM)  # the PID we launched
-    assert proc.wait(timeout=10) == 143
-    assert fakebin.calls("forgectl")[0].signal == signal.SIGTERM
+        time.sleep(0.05)  # poll for the start record only: the handlers are already installed
+    os.kill(proc.pid, signum)  # the PID we launched
+    assert proc.wait(timeout=10) == code
+    assert fakebin.calls("forgectl")[0].signal == signum
 
 
 def test_ok_scenario_is_the_default(fakebin: FakeBin) -> None:
