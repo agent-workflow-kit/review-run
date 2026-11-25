@@ -27,6 +27,7 @@ import re
 import secrets
 import sqlite3
 import stat
+import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, fields
@@ -875,11 +876,25 @@ def _cas(
     return conn.execute(sql, params).rowcount
 
 
+def _enable_wal(conn: sqlite3.Connection) -> None:
+    """Switch to WAL (a persistent setting). SQLite does not run the busy handler for this
+    switch when another connection is mid-open, so retry for the busy timeout ourselves."""
+    deadline = time.monotonic() + BUSY_TIMEOUT_MS / 1000
+    while True:
+        try:
+            row = conn.execute("PRAGMA journal_mode = WAL").fetchone()
+            break
+        except sqlite3.OperationalError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.02)
+    if row is None or str(row[0]).lower() != "wal":
+        raise ReviewRunError("internal", "state.db cannot use WAL mode")
+
+
 def _configure(conn: sqlite3.Connection) -> None:
     try:
-        mode = conn.execute("PRAGMA journal_mode = WAL").fetchone()
-        if mode is None or str(mode[0]).lower() != "wal":
-            raise ReviewRunError("internal", "state.db cannot use WAL mode")
+        _enable_wal(conn)
         conn.execute("PRAGMA synchronous = FULL")
         conn.execute("PRAGMA foreign_keys = ON")
         conn.execute("PRAGMA trusted_schema = OFF")
