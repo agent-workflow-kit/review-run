@@ -32,8 +32,9 @@ Seams, each with its owner (a ``Seams`` left incomplete makes ``finalize_session
 ``session`` for a later finalizer):
 
 * ``Seams.check_session``: the skill and tool checks (step 5), TODO(#22).
-* ``Seams.process``: strict parse, session claims, identity, normalization, ``draft check``,
-  end head and meta derivation (steps 6 to 12), TODO(#20) and TODO(#21). It returns the bytes of
+* ``Seams.derive``: end head and meta derivation (steps 11 and 12), TODO(#21); steps 6 to 10
+  (``validate_step``, the ``artifact`` module) run before it. ``Seams.process`` overrides all of
+  steps 6 to 12 (tests). It returns the bytes of
   ``review.json`` and the run's ``summary``; this module writes ``review.json`` (step 13) and
   runs the terminal transaction (step 14).
 """
@@ -49,7 +50,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final
 
-from . import gateway, hooks
+from . import artifact, gateway, hooks
 from . import launch as lc
 from .audit import FINALIZER_ACTOR, AuditWriter, Caller, LogWriter
 from .ending import Ender
@@ -139,16 +140,54 @@ class Processed:
 
 SessionCheckFn = Callable[[SessionContext], SessionCheck]
 ProcessFn = Callable[[ArtifactContext], Processed]
+DeriveFn = Callable[[ArtifactContext, artifact.Validated], Processed]
+
+
+def validate_step(ctx: ArtifactContext) -> artifact.Validated:
+    """Steps 6 to 10 on the verified copy: strict parse, session claims, identity, normalization
+    and ``pr-comment draft check`` (``artifact`` module). ``artifact_invalid`` carries the closed
+    ``{pointer, kind}`` errors; a ``draft check`` that gives no verdict is ``internal`` with
+    ``failure.tool: pr-comment``."""
+    run = ctx.run
+    if run.draft_id is None or run.anchor is None:
+        raise ReviewRunError("internal", "the run has no stored draft identity")
+    identity = artifact.Identity(run.draft_id, run.pr, run.anchor)
+    try:
+        return artifact.validate(
+            ctx.original,
+            max_bytes=int(ctx.settings.value("limits.max_artifact_bytes")),
+            max_files=int(ctx.settings.value("limits.max_files")),
+            identity=identity,
+        )
+    except artifact.Invalid as exc:
+        raise FinalizeFailure("artifact_invalid", errors=exc.errors) from None
+    except artifact.CheckFailed as exc:
+        raise FinalizeFailure("internal", tool="pr-comment", lower_code=exc.lower_code) from None
 
 
 @dataclass(frozen=True)
 class Seams:
     check_session: SessionCheckFn | None = None  # TODO(#22): skill and tool checks
-    process: ProcessFn | None = None  # TODO(#20), TODO(#21): validation and meta
+    # An override of the whole of steps 6 to 12 (tests). Unset, steps 6 to 10 are ``validate_step``
+    # and steps 11 and 12 are ``derive``.
+    process: ProcessFn | None = None
+    derive: DeriveFn | None = None  # TODO(#21): end head, meta derivation, review.json bytes
+
+    def processor(self) -> ProcessFn | None:
+        if self.process is not None:
+            return self.process
+        derive = self.derive
+        if derive is None:
+            return None
+
+        def process(ctx: ArtifactContext) -> Processed:
+            return derive(ctx, validate_step(ctx))
+
+        return process
 
     @property
     def complete(self) -> bool:
-        return self.check_session is not None and self.process is not None
+        return self.check_session is not None and self.processor() is not None
 
 
 # -- copy and verify -----------------------------------------------------------------------------
@@ -356,7 +395,7 @@ def finalize_session(
     if disposition.kind != "finalize":
         return ender.apply_failure(disposition)
     if not seams.complete:
-        # TODO(#20, #21, #22): until the checks land a done session stays ``running`` in phase
+        # TODO(#21, #22): until the checks land a done session stays ``running`` in phase
         # ``session`` (agent stored), exactly as before this issue.
         raise ReviewRunError("internal", "finalize is not complete: artifact checks are pending")
     assert run.agent_id is not None
@@ -405,7 +444,8 @@ def _canceled(ender: Ender, result: lc.SpawnResult) -> Run:
 
 def _finalize_done(ender: Ender, result: lc.SpawnResult, seams: Seams, verdict: str) -> Run:
     """Steps 2 to 14 for a ``done`` outcome, the run in phase ``finalize``."""
-    assert seams.check_session is not None and seams.process is not None
+    process = seams.processor()
+    assert seams.check_session is not None and process is not None
     run = ender.row()
     run_dir = ender.run_dir
     extra: dict[str, Any] = {}
@@ -425,7 +465,7 @@ def _finalize_done(ender: Ender, result: lc.SpawnResult, seams: Seams, verdict: 
         session = seams.check_session(SessionContext(run, ender.settings, result, run_dir))
         _check_session(session)
         ender.check_lease()
-        processed = seams.process(
+        processed = process(
             ArtifactContext(run, ender.settings, result, run_dir, original, original_sha, session)
         )
         _check_processed(processed)

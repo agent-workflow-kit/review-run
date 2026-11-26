@@ -9,7 +9,8 @@ and removes the prompt files; ``run`` never ends a run it does not hold the leas
 Seams, each with its owner:
 
 * ``finalize`` (a ``done`` session): the pipeline of ``finalize`` (#19) with ``Options.seams``
-  for the checks that other issues own (TODO(#20), TODO(#21), TODO(#22)). While a seam is missing
+  for the checks that other issues own (TODO(#21): ``Seams.derive``, TODO(#22)). While a seam
+  is missing
   the default leaves the run ``running`` in phase ``session`` (its agent and ``awaited_run``
   stored, so ``show``, ``wait`` and ``reconcile`` can finalize it later) and raises ``internal``.
 * The code run (phase ``code_run``, ``code-run.json``): TODO(#35). Until it lands a repo that
@@ -111,8 +112,8 @@ FinalizeFn = Callable[["FinalizeRequest"], Run]
 
 
 def default_finalize(request: FinalizeRequest) -> Run:
-    """The finalize pipeline of issue #19. While ``request.seams`` is incomplete (TODO(#20),
-    TODO(#21), TODO(#22)) it raises ``internal`` before changing anything: the run stays
+    """The finalize pipeline of issue #19. While ``request.seams`` is incomplete (TODO(#21),
+    TODO(#22)) it raises ``internal`` before changing anything: the run stays
     ``running`` in phase ``session`` with its agent stored, so ``show``, ``wait`` and
     ``reconcile`` can finalize it later."""
     return finalize_session(request.ender, request.result, request.seams)

@@ -272,14 +272,25 @@ def _reject_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return out
 
 
+def _reject_float(text: str) -> float:
+    value = float(text)
+    if not math.isfinite(value):  # ``1e999`` overflows to infinity (issue #73)
+        raise ValueError("non-finite number")
+    return value
+
+
 def strict_json(text: str) -> Any:
-    """Parse one JSON document, refusing duplicate keys and non-finite numbers.
+    """Parse one JSON document, refusing duplicate keys and non-finite numbers (``NaN``,
+    ``Infinity`` and a float literal that overflows).
 
     Raises ``ValueError`` for anything unparseable, including deep nesting and huge integers.
     """
     try:
         return json.loads(
-            text, parse_constant=_reject_constant, object_pairs_hook=_reject_duplicates
+            text,
+            parse_constant=_reject_constant,
+            parse_float=_reject_float,
+            object_pairs_hook=_reject_duplicates,
         )
     except RecursionError:
         raise ValueError("nesting too deep") from None
@@ -301,6 +312,13 @@ def _envelope(stdout: str) -> tuple[str | None, str | None, int | None]:
     )
 
 
+def lower_failure(tool: str, done: gateway.CompletedRun) -> LowerFailure:
+    """The failure of a sibling call that exited non-zero: the envelope's closed code and reason
+    when it printed one, else ``failed``. Nothing of its text is kept."""
+    code, reason, retry_after = _envelope(done.stdout)
+    return LowerFailure(tool, done.returncode, code or "failed", reason, retry_after)
+
+
 def call_json(tool: str, args: list[str], *, timeout: float = CALL_TIMEOUT) -> Any:
     """Run ``<tool> <args>`` through the gateway and return its parsed stdout (exit 0 only).
 
@@ -313,8 +331,7 @@ def call_json(tool: str, args: list[str], *, timeout: float = CALL_TIMEOUT) -> A
     except gateway.GatewayError as exc:
         raise LowerFailure(tool, None, exc.lower_code) from None
     if done.returncode != 0:
-        code, reason, retry_after = _envelope(done.stdout)
-        raise LowerFailure(tool, done.returncode, code or "failed", reason, retry_after)
+        raise lower_failure(tool, done)
     try:
         return strict_json(done.stdout)
     except ValueError:
