@@ -836,6 +836,19 @@ class Store:
                     (json.dumps(current + [code]), run_id),
                 )
 
+    def set_teardown(self, run_id: str, status: str, *, lease: Lease) -> bool:
+        """Record the state of the agent teardown (``done``, ``pending`` or ``failed``). Teardown
+        follows the terminal transaction, so this is the one write allowed on a terminal run; it
+        needs the run's lease and touches nothing else. ``False`` when the run does not exist."""
+        if status not in ("done", "pending", "failed"):
+            raise ValueError("teardown is done, pending or failed")
+        if lease.name != lease_name(run_id):
+            raise ValueError("the lease belongs to another run")
+        with self.transaction() as conn:
+            _require_lease(conn, lease, run_id)
+            cur = conn.execute("UPDATE runs SET teardown = ? WHERE run_id = ?", (status, run_id))
+            return cur.rowcount == 1
+
     # -- outbox
 
     def pending_events(self, run_id: str | None = None) -> list[dict[str, Any]]:

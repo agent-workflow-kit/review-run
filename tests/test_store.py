@@ -998,3 +998,32 @@ def test_a_hostile_holder_text_never_raises_and_keeps_the_lease(store: Store) ->
                 (holder,),
             )
         assert store.acquire_lease("h") is None
+
+
+def test_set_teardown_records_the_state_on_a_terminal_run_under_the_lease(tmp_path: Path) -> None:
+    from review_run.store import Expect, NewRun, lease_name
+
+    with Store.open(tmp_path / "s") as store:
+        rid = store.reserve_id()
+        store.create_run(NewRun(rid, "h/o/r#1", "h/o/r", "a" * 40, "headless", "p:s"))
+        lease = store.acquire_lease(lease_name(rid))
+        assert lease is not None
+        assert store.end_run(
+            rid, Expect("running", "prefetch", None), lease=lease,
+            state="failed", reason="killed", exit_code=15,
+        )  # fmt: skip
+        assert store.set_teardown(rid, "pending", lease=lease)
+        assert store.set_teardown(rid, "done", lease=lease)
+        run = store.get_run(rid)
+        assert run is not None and (run.state, run.teardown, run.reason) == (
+            "failed",
+            "done",
+            "killed",
+        )
+        with pytest.raises(ValueError):
+            store.set_teardown(rid, "gone", lease=lease)
+        with pytest.raises(ValueError):
+            store.set_teardown("rr-bbbbbbbb", "done", lease=lease)  # another run's lease
+        assert store.release_lease(lease)
+        with pytest.raises(ReviewRunError):
+            store.set_teardown(rid, "failed", lease=lease)  # no lease, no write

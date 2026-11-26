@@ -7,7 +7,7 @@ writes ``manifest.json`` and the ``inputs/*.patch`` files, adds the fence lines 
 
 Scope: #14 writes ``inputs/*.patch`` and ``manifest.json`` (from ``Manifest.to_json()``), adds the
 fences, the nonce and the meta; #18 wires ``build_manifest`` into the run orchestration (it is not
-called from ``prefetch()`` yet).
+called from ``prefetch()``).
 
 Public API::
 
@@ -34,6 +34,7 @@ that leaves this module is sanitized first.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -56,13 +57,34 @@ _DISPLAY = {
     SKIPPED_SIZE_CAP: "skipped(size_cap)",
     SKIPPED_FILE_CAP: "skipped(file_cap)",
 }
-# todo(#18): finalize reads manifest.json dicts only; expose a public Manifest.from_json /
-# coverage-from-entries helper so it does not need a Manifest object.
 _COVERAGE_REASON = {
     TRUNCATED: "truncated",
     SKIPPED_SIZE_CAP: "size_cap",
     SKIPPED_FILE_CAP: "file_cap",
 }
+_ENTRY_KEYS = frozenset(
+    {
+        "file",
+        "path",
+        "status",
+        "old_path",
+        "additions",
+        "deletions",
+        "bytes",
+        "inputs",
+        "disposition",
+    }
+)
+_DISPOSITIONS = frozenset({PROVIDED, TRUNCATED, SKIPPED_SIZE_CAP, SKIPPED_FILE_CAP, BINARY, EMPTY})
+_FILE_ID = re.compile(r"f[0-9]{4}", re.ASCII)
+
+
+def _is_count(value: object, *, null: bool = False) -> bool:
+    if value is None:
+        return null
+    return type(value) is int and value >= 0  # noqa: E721 (a bool is not a count)
+
+
 _COLUMNS = (
     "file",
     "path",
@@ -129,6 +151,51 @@ class Manifest:
             }
             for e in self.entries
         ]
+
+    @classmethod
+    def from_json(cls, document: object) -> Manifest:
+        """Rebuild the entries from ``manifest.json`` (a list of ``manifest_entry`` objects), for
+        a finalizer in another process. The input files are not stored there, so ``inputs`` is
+        empty. Raises ``ValueError`` for anything that is not the closed shape ``to_json``
+        writes."""
+        if not isinstance(document, list):
+            raise ValueError("manifest.json is a list")
+        entries: list[ManifestEntry] = []
+        for item in document:
+            if not isinstance(item, dict) or set(item) != _ENTRY_KEYS:
+                raise ValueError("a manifest entry has the closed set of keys")
+            names = item["inputs"]
+            old = item["old_path"]
+            if (
+                not isinstance(item["file"], str)
+                or not _FILE_ID.fullmatch(item["file"])
+                or not isinstance(item["path"], str)
+                or not item["path"]
+                or not (old is None or (isinstance(old, str) and old))
+                or item["status"] not in ("added", "modified", "deleted", "renamed")
+                or item["disposition"] not in _DISPOSITIONS
+                or not isinstance(names, list)
+                or not all(isinstance(n, str) for n in names)
+                or not _is_count(item["bytes"])
+                or not all(_is_count(item[k], null=True) for k in ("additions", "deletions"))
+            ):
+                raise ValueError("a manifest entry is malformed")
+            entries.append(
+                ManifestEntry(
+                    file=item["file"],
+                    path=item["path"],
+                    old_path=old,
+                    status=item["status"],
+                    additions=item["additions"],
+                    deletions=item["deletions"],
+                    bytes=item["bytes"],
+                    inputs=tuple(names),
+                    disposition=item["disposition"],
+                )
+            )
+        if len({e.file for e in entries}) != len(entries):
+            raise ValueError("manifest file ids are unique")
+        return cls(tuple(entries), ())
 
     def coverage_preview(self) -> dict[str, Any]:
         """The ``coverage`` object if the session reviewed every provided entry: ``reviewed`` is

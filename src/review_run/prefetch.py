@@ -85,6 +85,10 @@ class PrFacts:
     is_bot: bool | None
     is_fork: bool | None
     base_is_default: bool | None
+    # forgectl's size counts (the ``pre-run`` payload's ``sizes``); null when it gave none.
+    additions: int | None = None
+    deletions: int | None = None
+    changed_files: int | None = None
 
     def run_facts(self) -> dict[str, bool | None]:
         """The four facts stored in ``pr.json`` and ``meta.review_run.pr``."""
@@ -382,6 +386,11 @@ def _ref(value: object, *, limit: int = 1024) -> str:
     return value
 
 
+def _count_or_none(value: object) -> int | None:
+    """An optional size count: a non-negative integer, else null (never a failure)."""
+    return value if type(value) is int and value >= 0 else None  # noqa: E721
+
+
 def _parse_show(doc: object) -> PrFacts:
     d = _obj(doc)
     pr, repo = _str(d.get("pr")), _str(d.get("repo"))
@@ -410,6 +419,9 @@ def _parse_show(doc: object) -> PrFacts:
         is_bot=_flag(author.get("is_bot"), null=True),
         is_fork=_flag(head.get("is_fork"), null=True),
         base_is_default=_flag(base.get("is_default"), null=True),
+        additions=_count_or_none(d.get("additions")),
+        deletions=_count_or_none(d.get("deletions")),
+        changed_files=_count_or_none(d.get("changed_files")),
     )
 
 

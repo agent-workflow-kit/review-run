@@ -174,10 +174,13 @@ class Gateway(Protocol):
         env: Mapping[str, str] | None = None,
         cwd: str | None = None,
         term_grace: float = 0.0,
+        on_start: Callable[[int], None] | None = None,
     ) -> CompletedRun:
         """Run ``argv`` without a shell and capture its output.
 
-        ``env`` is the child's complete environment (``None`` inherits ours). Raises
+        ``env`` is the child's complete environment (``None`` inherits ours). ``on_start`` is
+        called with the child's PID as soon as the process exists (before any output is read);
+        an exception from it ends the child's group like any other failure. Raises
         ``CallTimeout``, ``ToolMissing``, ``OutputTooLarge`` or ``GatewayError``; a non-zero
         exit is returned, not raised.
         """
@@ -346,6 +349,7 @@ class SystemGateway:
         env: Mapping[str, str] | None = None,
         cwd: str | None = None,
         term_grace: float = 0.0,
+        on_start: Callable[[int], None] | None = None,
     ) -> CompletedRun:
         data = check_call(argv, timeout, stdin=stdin, env=env, cwd=cwd, term_grace=term_grace)
         args = list(argv)
@@ -374,6 +378,8 @@ class SystemGateway:
                     raise GatewayError(
                         f"cannot start {os.path.basename(args[0])!r}: errno {exc.errno}"
                     ) from exc
+                if on_start is not None:
+                    on_start(proc.pid)
                 out, err = _communicate(proc, data, timeout)
                 result = proc
             except BaseException:
@@ -558,10 +564,22 @@ def run(
     env: Mapping[str, str] | None = None,
     cwd: str | None = None,
     term_grace: float = 0.0,
+    on_start: Callable[[int], None] | None = None,
 ) -> CompletedRun:
-    """``get_gateway().run(...)``: the entry point other modules call."""
+    """``get_gateway().run(...)``: the entry point other modules call. ``on_start`` is passed
+    on only when given, so a gateway written before it existed keeps working."""
+    if on_start is None:
+        return get_gateway().run(
+            argv, timeout=timeout, stdin=stdin, env=env, cwd=cwd, term_grace=term_grace
+        )
     return get_gateway().run(
-        argv, timeout=timeout, stdin=stdin, env=env, cwd=cwd, term_grace=term_grace
+        argv,
+        timeout=timeout,
+        stdin=stdin,
+        env=env,
+        cwd=cwd,
+        term_grace=term_grace,
+        on_start=on_start,
     )
 
 
