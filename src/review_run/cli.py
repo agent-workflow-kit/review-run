@@ -12,7 +12,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, NoReturn
 
-from . import __version__, dryrun
+from . import __version__, dryrun, signals
 from . import hooks as hooks_mod
 from . import runs as runs_mod
 from .audit import Caller, export_lines
@@ -318,7 +318,7 @@ def _run_command(args: argparse.Namespace) -> int:
     try:
         run = run_review(plan, root, options)
     except Interrupted as stop:
-        return stop.exit_code  # a waiter ended by a signal prints nothing (TODO(#27))
+        return stop.exit_code  # a waiter ended by a signal prints nothing
     return _print_run(runs_mod.run_object(run), "run", args)
 
 
@@ -438,9 +438,11 @@ def _cancel(args: argparse.Namespace) -> int:
 
 # Each command is replaced by its owning issue's implementation.
 _HANDLERS: dict[str, Handler] = {
-    "run": _run_command,  # steps 1 to 7 and --dry-run (#15, #16, #17, #18)
-    "resume": _stub("resume"),  # TODO(#28): resume
-    "wait": _wait,
+    # run, resume and wait run under the signal handlers (#27): from the first resolve to the
+    # printed outcome, never in ``list``, ``show``, ``cancel`` and the like
+    "run": signals.guarded(_run_command),  # steps 1 to 7 and --dry-run (#15, #16, #17, #18)
+    "resume": signals.guarded(_stub("resume")),  # TODO(#28): resume (keep the guard)
+    "wait": signals.guarded(_wait),
     "list": _list,
     "show": _show,
     "reconcile": _stub("reconcile"),  # TODO(#29): reconcile

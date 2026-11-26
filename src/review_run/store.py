@@ -34,7 +34,7 @@ from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Any, Self
 
-from . import procid
+from . import procid, signals
 from .errors import ReviewRunError
 from .fsmodes import DIR_MODE, FILE_MODE, ensure_private_dir
 from .store_schema import JSON_COLUMNS, MIGRATIONS, check_additive
@@ -416,19 +416,22 @@ class Store:
 
         For modules that add their own tables or queries; always pass values as parameters.
         """
-        try:
-            self._conn.execute("BEGIN IMMEDIATE")
-        except sqlite3.Error as exc:
-            raise _translate(exc) from exc
-        try:
-            yield self._conn
-            self._conn.execute("COMMIT")
-        except BaseException as exc:
-            if self._conn.in_transaction:
-                self._conn.execute("ROLLBACK")
-            if isinstance(exc, sqlite3.Error):
+        # A signal waits for the end of the transaction (a deferred section): the commit or the
+        # rollback always completes, the signal is raised after it (issue #27).
+        with signals.deferred():
+            try:
+                self._conn.execute("BEGIN IMMEDIATE")
+            except sqlite3.Error as exc:
                 raise _translate(exc) from exc
-            raise
+            try:
+                yield self._conn
+                self._conn.execute("COMMIT")
+            except BaseException as exc:
+                if self._conn.in_transaction:
+                    self._conn.execute("ROLLBACK")
+                if isinstance(exc, sqlite3.Error):
+                    raise _translate(exc) from exc
+                raise
 
     # -- run directories
 

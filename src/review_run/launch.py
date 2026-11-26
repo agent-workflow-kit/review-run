@@ -12,8 +12,8 @@ validate counts as absent).
 three attempts, ``teardown_parked`` the ownership-checked teardown of an agent a failed launch left
 parked.
 
-TODO(#27): signals during launch and wait (record the cancellation, forward SIGTERM to the
-launcher, ``agent-spawn stop``). A waiter that exits 130 or 143 is reported as ``interrupted``.
+Signals during launch and wait are ``runner._interrupted`` (#27): the launcher gets SIGTERM and
+``LAUNCH_TERM_GRACE``. A waiter that exits 130 or 143 is reported as ``interrupted``.
 """
 
 from __future__ import annotations
@@ -33,6 +33,7 @@ from .errors import ReviewRunError
 from .settings import RunSettings, launch_flags, strict_finite_json
 
 RESULT_MAX_BYTES: Final = 1024 * 1024
+LAUNCH_TERM_GRACE: Final = 60.0  # a signaled or timed-out launcher gets SIGTERM, then this long
 LAUNCH_TIMEOUT: Final = 900.0  # agent-spawn bounds itself; this is the backstop of the call
 SHOW_TIMEOUT: Final = 60.0
 TEARDOWN_TIMEOUT: Final = 300.0

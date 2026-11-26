@@ -22,7 +22,11 @@ Rules:
   background descendants gives those no timeout once the supervisor has seen it exit.
 * While ``run`` waits in the main thread, SIGTERM and SIGHUP (when still at their default action)
   end the child's group and then exit this process (143, 130), so a signalled review-run does not
-  orphan a running hook; the previous handlers are restored afterwards.
+  orphan a running hook; the previous handlers are restored afterwards. Under the command's own
+  guard (``signals``, installed by ``cli`` for ``run``, ``resume`` and ``wait``) that fallback is
+  not installed: the guard's handler raises ``SignalExit``, the group is ended in the same
+  ``BaseException`` path, and ``Popen`` and the group's cleanup are deferred sections (a signal
+  between ``fork`` and the return of ``Popen`` ends the child's group too).
 * Output is decoded explicitly as UTF-8 with ``surrogateescape``, never through the locale;
   ``stdin`` is encoded the same way (unencodable or over ``MAX_OUTPUT`` bytes: ``GatewayError``).
 * A normal exit kills nothing: group members that outlive the leader keep running, and their later
@@ -52,6 +56,8 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Protocol
+
+from . import signals
 
 #: At most this many bytes are kept per stream; one more byte kills the child.
 MAX_OUTPUT = 8 * 1024 * 1024
@@ -360,16 +366,19 @@ class SystemGateway:
         with _ending_signals() as quiesce:
             try:
                 try:
-                    proc = subprocess.Popen(
-                        args,
-                        # Without input the child gets /dev/null, never this process's own stdin.
-                        stdin=subprocess.DEVNULL if data is None else subprocess.PIPE,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE,
-                        env=None if env is None else dict(env),
-                        cwd=cwd,
-                        start_new_session=True,
-                    )
+                    # A signal between fork and the return of Popen would lose the child's group:
+                    # it waits for the end of the section and is raised with ``proc`` set.
+                    with signals.deferred():
+                        proc = subprocess.Popen(
+                            args,
+                            # Without input the child gets /dev/null, never our own stdin.
+                            stdin=subprocess.DEVNULL if data is None else subprocess.PIPE,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                            env=None if env is None else dict(env),
+                            cwd=cwd,
+                            start_new_session=True,
+                        )
                 except OSError as exc:
                     if cwd is not None and exc.filename == cwd:  # the directory, not the program
                         raise GatewayError("working directory unusable") from exc
@@ -390,7 +399,8 @@ class SystemGateway:
                 # until the group is gone.
                 quiesce()
                 if proc is not None:
-                    _end_group(proc, proc.pid, term_grace)
+                    with signals.deferred():  # a signal during the cleanup waits for its end
+                        _end_group(proc, proc.pid, term_grace)
                 raise
             finally:
                 if proc is not None:

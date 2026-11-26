@@ -17,10 +17,15 @@ Seams, each with its owner:
   ``code-run.json`` in every case) a run that configures ``run_pr_code`` is not supported end to
   end: the session still runs (a ``warning`` log record says so) but finalize finds no
   ``code-run.json`` and ends such a run ``internal`` (todo(#35)).
-* Signals (record the cancellation, stop the launcher and the waiter): TODO(#27). Until it lands
-  a SIGTERM or SIGINT outside a gateway call kills the process with the lease held and the prompt
-  files on disk; #27 installs handlers around the whole ``run_review``, removes the prompt files on
-  any ``BaseException``, records the cancellation and stops the launcher.
+* Signals (#27, ``signals``): ``cli`` installs the handlers for ``run``; a signal raises
+  ``SignalExit`` at a safe point (store transactions, the terminal transaction, a process start and
+  the finalize pipeline are deferred sections). Before the run record exists the unwinding ends
+  the in-flight child or hook group and nothing is recorded. After it ``_interrupted`` records the
+  cancellation, stops the launcher (the gateway's SIGTERM, then at most ``LAUNCH_TERM_GRACE``) and
+  the waiter, stops and tears down the agent and ends the run ``canceled``; SIGHUP after the
+  launch only stops waiting (``Interrupted``). A run whose cleanup could not finish stays
+  ``running`` with the cancellation recorded for the next finalizer (``show``, ``wait``,
+  ``reconcile`` (TODO(#29)), ``cancel``).
 * The mapping of an outcome to the printed output and exit code is ``outcome.render_run``, applied
   by ``cli`` to the run this module returns.
 """
@@ -34,10 +39,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import gateway, hooks, procid
+from . import gateway, hooks, procid, signals
 from . import launch as lc
 from .audit import AuditWriter, Caller, LogWriter
-from .ending import Ender, run_inputs
+from .cancel import stop_agent
+from .ending import Ender, run_inputs, valid_agent_id
 from .errors import MAX_DECISION_IDS, ReviewRunError
 from .finalize import Seams, finalize_session
 from .inputs import compose_prompt, fetch_and_manifest
@@ -283,7 +289,7 @@ class _Flow:
 
     def canceled_row(self) -> Run | None:
         """When a cancellation is recorded, end the run ``canceled`` (``cancel`` and the signals
-        of TODO(#27) record one; this process only honors it)."""
+        and the signals record one; this process only honors it)."""
         run = self.row()
         if run.cancel_requested_at is None:
             return None
@@ -375,7 +381,13 @@ class _Flow:
             )
 
         try:
-            done = gateway.run(argv, timeout=lc.LAUNCH_TIMEOUT, env=launch_env(s), on_start=started)
+            done = gateway.run(
+                argv,
+                timeout=lc.LAUNCH_TIMEOUT,
+                env=launch_env(s),
+                on_start=started,
+                term_grace=lc.LAUNCH_TERM_GRACE,
+            )
         except gateway.ToolMissing as exc:
             return self.end_failed(
                 "launch_failed", 12, lc.failure_object("agent-spawn", exc.lower_code)
@@ -438,17 +450,22 @@ class _Flow:
             self.adopt(agent)
         if kind == "finalize":
             assert agent is not None
-            return self.opts.finalize(
-                FinalizeRequest(
-                    self.store,
-                    self.run_id,
-                    self.lease,
-                    self.settings,
-                    agent,
-                    self.ender,
-                    self.opts.seams,
+            # Finalize is not interrupted: a signal waits for it and the run's own outcome and
+            # exit code stand (interface.md, Signals).
+            with signals.deferred(raise_on_exit=False):
+                finished = self.opts.finalize(
+                    FinalizeRequest(
+                        self.store,
+                        self.run_id,
+                        self.lease,
+                        self.settings,
+                        agent,
+                        self.ender,
+                        self.opts.seams,
+                    )
                 )
-            )
+            signals.ignore_rest()
+            return finished
         if kind == "escalate":
             assert agent is not None and disposition.reason and disposition.exit_code
             return self.ender.escalate(agent, disposition.reason, disposition.exit_code)
@@ -467,38 +484,47 @@ def run_review(plan: RunPlan, root: Path, opts: Options) -> Run:
     with Store.open(root) as store:
         run_id, decision_ids = pre_run_hooks(plan, store, audit, opts, stored)
         facts, settings = plan.facts, plan.settings
-        run = store.create_run(
-            NewRun(
-                run_id=run_id,
-                pr=facts.pr,
-                repo=facts.repo,
-                head_sha=facts.head_sha,
-                mode=plan.mode,
-                skill=plan.skill,
-                labels=plan.request.labels,
-                previous_run=plan.previous.run_id if plan.previous else None,
-                hooks=tuple(stored),
-                actor=opts.caller.actor,
-                decision_ids=tuple(decision_ids),
-                config_sha256=settings.config_sha256,
+        # The run record, the lease, the keeper and the audit pair come into being together: a
+        # signal waits for the end of this block (``_drive`` raises it first thing).
+        with signals.deferred(raise_on_exit=False):
+            run = store.create_run(
+                NewRun(
+                    run_id=run_id,
+                    pr=facts.pr,
+                    repo=facts.repo,
+                    head_sha=facts.head_sha,
+                    mode=plan.mode,
+                    skill=plan.skill,
+                    labels=plan.request.labels,
+                    previous_run=plan.previous.run_id if plan.previous else None,
+                    hooks=tuple(stored),
+                    actor=opts.caller.actor,
+                    decision_ids=tuple(decision_ids),
+                    config_sha256=settings.config_sha256,
+                )
             )
-        )
-        lease = store.acquire_lease(lease_name(run_id))
-        if lease is None:  # a fresh id: nobody else can hold it
-            raise ReviewRunError("internal", "the new run's lease is taken")
-        keeper = LeaseKeeper(root, lease, opts.lease_interval)
-        keeper.start()
+            lease = store.acquire_lease(lease_name(run_id))
+            if lease is None:  # a fresh id: nobody else can hold it
+                raise ReviewRunError("internal", "the new run's lease is taken")
+            keeper = LeaseKeeper(root, lease, opts.lease_interval)
+            keeper.start()
+            try:
+                attempt = audit.begin(
+                    "run",
+                    caller=opts.caller,
+                    run_id=run_id,
+                    pr=facts.pr,
+                    inputs=run_inputs(run, settings, override=plan.request.override_escalation),
+                )
+                flow = _Flow(plan, store, audit, log, opts, run_id, lease, keeper, attempt, root)
+            except BaseException:
+                keeper.stop()
+                store.release_lease(lease)
+                raise
         try:
-            attempt = audit.begin(
-                "run",
-                caller=opts.caller,
-                run_id=run_id,
-                pr=facts.pr,
-                inputs=run_inputs(run, settings, override=plan.request.override_escalation),
-            )
-            flow = _Flow(plan, store, audit, log, opts, run_id, lease, keeper, attempt, root)
             return _drive(flow)
         finally:
+            signals.ignore_rest()  # the lease is released whatever arrives now
             keeper.stop()
             store.release_lease(lease)
 
@@ -506,6 +532,7 @@ def run_review(plan: RunPlan, root: Path, opts: Options) -> Run:
 def _drive(flow: _Flow) -> Run:
     """Steps 4 (the run files) to 7 and the wait; every ending goes through ``flow.end``."""
     try:
+        signals.checkpoint()  # a signal that arrived while the run came into being
         write_run_files(flow.run_dir, flow.plan.settings, flow.plan.profile)
         # The run reads its own stored files from here on, never the plan in memory.
         flow.settings = load_run_settings(flow.run_dir)
@@ -538,6 +565,8 @@ def _drive(flow: _Flow) -> Run:
         return flow.row() if ended is None else ended
     except Interrupted:
         raise
+    except signals.SignalExit as sig:
+        return _interrupted(flow, sig)
     except Exception as exc:
         if flow.launched:
             # The session may exist: whatever failed (a store error included), the run stays
@@ -554,6 +583,73 @@ def _drive(flow: _Flow) -> Run:
             raise ReviewRunError("internal", "unexpected error") from None
     finally:
         remove_prompt_files(flow.run_dir)
+
+
+def _interrupted(flow: _Flow, sig: signals.SignalExit) -> Run:
+    """A signal reached ``run`` after the run record exists (interface.md, Signals). Every child
+    the gateway started (the launcher, the waiter, a hook) was ended while the exception
+    unwound; further signals are ignored from here on. Returns the run when it ended, raises
+    ``Interrupted`` (exit 130 or 143, nothing printed) when it stays as it is."""
+    code = int(sig.code) if isinstance(sig.code, int) else 143
+    run = flow.row()
+    if run.state != "running":
+        return run  # the run ended (this signal came late or another process ended it)
+    if run.cancel_requested_at is None:
+        if sig.hangup and flow.launched:
+            raise Interrupted(code)  # SIGHUP: stop waiting; the session keeps running
+        recorded = flow.store.request_cancel(
+            flow.run_id, run.key, actor=flow.opts.caller.actor, exit_code=code
+        )
+        if not recorded:
+            run = flow.row()
+            if run.state != "running":
+                return run
+            if run.cancel_requested_at is None:  # finalize began elsewhere: leave the row
+                raise Interrupted(code)
+    return _end_canceled(flow, code)
+
+
+def _launch_agent(flow: _Flow) -> tuple[str | None, str | None]:
+    """The agent id (and session id) the launcher's result file names, when the run has none
+    stored (the launcher was ended after it started the agent)."""
+    found = lc.interpret_file(flow.run_dir / lc.LAUNCH_FILE)
+    if found is None:
+        return None, None
+    agent_id = found.agent_id or (found.envelope.agent_id if found.envelope else None)
+    csession = found.csession_id if found.envelope is None else None
+    return valid_agent_id(agent_id), csession
+
+
+def _end_canceled(flow: _Flow, code: int) -> Run:
+    """With the cancellation recorded: stop a live agent, then end the run ``canceled`` (the
+    terminal transaction, hooks and the teardown of the parked agent are ``Ender.apply_failure``).
+    A stop that fails or an agent that stays live leaves the run ``running`` with the
+    cancellation recorded: the next finalizer ends it."""
+    run = flow.row()
+    agent_id = valid_agent_id(run.agent_id)
+    csession = run.csession_id if agent_id else None
+    if agent_id is None and flow.launched:
+        agent_id, csession = _launch_agent(flow)
+    verdict: str | None = None
+    try:
+        if agent_id is not None:
+            verdict = lc.check_parked(
+                agent_id, run_id=run.run_id, pr=run.pr, repo=run.repo, csession_id=csession
+            )
+            if verdict == "live":
+                stop_agent(agent_id, flow.opts.caller.actor)
+                verdict = lc.check_parked(
+                    agent_id, run_id=run.run_id, pr=run.pr, repo=run.repo, csession_id=csession
+                )
+            if verdict in ("live", "failed"):
+                raise Interrupted(code)
+    except ReviewRunError:
+        raise Interrupted(code) from None
+    ended = flow.ender.apply_failure(
+        lc.Disposition("fail", "canceled", code, teardown_agent=agent_id),
+        verdict="mismatch" if verdict == "mismatch" else None,
+    )
+    return ended
 
 
 __all__ = [

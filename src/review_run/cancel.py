@@ -29,7 +29,7 @@ The order of one invocation:
 
 The pair of audit ``cancel`` records is opened for every invocation that is not a dry run; the
 terminal transaction carries the closing record when this invocation ends the run, otherwise the
-invocation writes it itself. Seams: signals while a run is in flight are #27, ``resume`` is #28
+invocation writes it itself. Seams: ``resume`` is #28
 and the runner check and label recovery of ``reconcile`` are #29.
 """
 

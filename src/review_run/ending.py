@@ -19,7 +19,7 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, Literal
 
-from . import hooks
+from . import hooks, signals
 from . import launch as lc
 from .audit import FINALIZER_ACTOR, AuditWriter, Caller, LogWriter, make_audit_record
 from .errors import ReviewRunError
@@ -234,24 +234,25 @@ class Ender:
             )
         if escalated_run is not None and state == "escalated":
             extra["escalated_run"] = escalated_run
-        moved = self.store.end_run(
-            self.run_id,
-            expect_key if expect_key is not None else run.key,
-            lease=self.lease,
-            state=state,
-            reason=reason,
-            exit_code=exit_code,
-            fields=extra,
-            events=[NewEvent(event_id, hook, payload, (record,))],
-        )
-        try:
-            remove_prompt_files(self.run_dir)
-        except OSError:  # the commit stands: teardown and delivery still follow
-            self.note("warning", "prompt files could not be removed", level="warn")
-        if moved:
-            self.moved = True
-            self.note("state_change", f"run ended {state} ({reason})", state=state)
-        return self.row(), moved
+        with signals.deferred():  # the commit, the prompt files and ``moved`` are one unit
+            moved = self.store.end_run(
+                self.run_id,
+                expect_key if expect_key is not None else run.key,
+                lease=self.lease,
+                state=state,
+                reason=reason,
+                exit_code=exit_code,
+                fields=extra,
+                events=[NewEvent(event_id, hook, payload, (record,))],
+            )
+            try:
+                remove_prompt_files(self.run_dir)
+            except OSError:  # the commit stands: teardown and delivery still follow
+                self.note("warning", "prompt files could not be removed", level="warn")
+            if moved:
+                self.moved = True
+                self.note("state_change", f"run ended {state} ({reason})", state=state)
+            return self.row(), moved
 
     def deliver(self) -> None:
         """Right after the commit: the audit records of the transition, then the hooks."""

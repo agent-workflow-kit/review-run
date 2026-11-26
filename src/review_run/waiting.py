@@ -16,8 +16,9 @@ Seams, each with its owner:
   ``agent-spawn show`` cannot run (``finalize_agent`` treats a gateway failure as "row
   unchanged"); the diagnosis of repeated refresh failures (``tool_missing``) belongs to the runner
   check and recovery work.
-* TODO(#27): signals; an interrupted waiter prints nothing (``KeyboardInterrupt``) and changes
-  nothing: no lease or process is held while sleeping.
+* Signals (#27): ``cli`` runs ``wait`` under ``signals.guarded``; a signal while sleeping or polling
+  raises ``SignalExit`` (nothing printed, exit 130 or 143, nothing changed: no lease or process is
+  held while sleeping), and one during a finalization waits for it to end (finalize is deferred).
 """
 
 from __future__ import annotations
@@ -28,6 +29,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
 
+from . import signals
 from .audit import LogWriter
 from .config import load_config
 from .errors import ReviewRunError
@@ -148,15 +150,16 @@ def refresh_run(
         return run
     run_object(run)  # CorruptRunError for a row that cannot be shown: no sibling call
     try:
-        finalize_agent(
-            root,
-            run_id,
-            AgentFinalize(
-                finalized_by=by,
-                hooks_config=_LazyHooks(config_path, run.repo, LogWriter(root), run_id),
-                escalated=escalated,
-            ),
-        )
+        with signals.deferred():  # a finalization that began is finished; the signal comes after
+            finalize_agent(
+                root,
+                run_id,
+                AgentFinalize(
+                    finalized_by=by,
+                    hooks_config=_LazyHooks(config_path, run.repo, LogWriter(root), run_id),
+                    escalated=escalated,
+                ),
+            )
     except ReviewRunError:
         raise
     except Exception:  # a ValueError of a stored value, sqlite3.Error, ...; never a traceback

@@ -45,6 +45,8 @@ class Routed:
         self.envs: list[dict[str, str] | None] = []
         self.missing: set[str] = set()
         self.on_run: Callable[[Sequence[str]], None] | None = None  # runs before each spawn
+        # runs right after each spawn with the child's PID (a signal raised there ends its group)
+        self.on_started: Callable[[Sequence[str], int], None] | None = None
 
     def run(
         self,
@@ -72,6 +74,14 @@ class Routed:
         child = self.fb.env()
         if env is not None and rs.DEPTH_VARIABLE in env:
             child[rs.DEPTH_VARIABLE] = env[rs.DEPTH_VARIABLE]
+        hook = self.on_started
+
+        def started(pid: int) -> None:
+            if on_start is not None:
+                on_start(pid)
+            if hook is not None:
+                hook(argv, pid)
+
         return gw.SystemGateway().run(
             [self.fb.argv0(argv[0]), *argv[1:]],
             timeout=timeout,
@@ -79,7 +89,7 @@ class Routed:
             env=child,
             cwd=str(self.fb.dir),
             term_grace=term_grace,
-            on_start=on_start,
+            on_start=started if (on_start is not None or hook is not None) else None,
         )
 
     def spawn_detached(self, *args: Any, **kwargs: Any) -> gw.DetachedHandle:
