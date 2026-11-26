@@ -257,9 +257,12 @@ def test_every_run_reason_has_a_golden(
 @pytest.mark.parametrize("reason", sorted(EXPECTED_NO_RUN))
 def test_every_no_run_reason_has_an_envelope_golden(reason: str) -> None:
     code, exit_code = EXPECTED_NO_RUN[reason]
-    err = ReviewRunError(code, "closed message", reason=reason)
+    retryable = {"details": {"retryable": True}} if reason == "wait_timeout" else {}
+    message = "the wait timed out" if retryable else "closed message"
+    err = ReviewRunError(code, message, reason=reason, **retryable)  # type: ignore[arg-type]
     assert err.exit_code == exit_code
-    check_golden(f"envelope-{reason}.json", "cli/error.json", err.envelope())
+    name = f"envelope-{reason}-retryable.json" if retryable else f"envelope-{reason}.json"
+    check_golden(name, "cli/error.json", err.envelope())
 
 
 @pytest.mark.parametrize("code", sorted(EXPECTED_NO_REASON))

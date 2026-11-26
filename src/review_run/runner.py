@@ -21,8 +21,8 @@ Seams, each with its owner:
   a SIGTERM or SIGINT outside a gateway call kills the process with the lease held and the prompt
   files on disk; #27 installs handlers around the whole ``run_review``, removes the prompt files on
   any ``BaseException``, records the cancellation and stops the launcher.
-* The mapping of an outcome to the printed output and exit code: TODO(#24); ``cli`` prints the run
-  object and exits with its code in the meantime.
+* The mapping of an outcome to the printed output and exit code is ``outcome.render_run``, applied
+  by ``cli`` to the run this module returns.
 """
 
 from __future__ import annotations

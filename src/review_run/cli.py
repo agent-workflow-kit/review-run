@@ -20,9 +20,11 @@ from .config import load_config
 from .durations import DurationError, parse_duration, parse_since
 from .errors import DECISION_ID_RE, MAX_DECISION_IDS, PROG, ExitCode, ReviewRunError, printable
 from .fsmodes import apply_umask
+from .outcome import render_run
 from .preflight import RunRequest, plan_run
 from .runner import Interrupted, Options, run_review
 from .store import Store, default_state_root
+from .waiting import Clock, refresh_for_show, show_refreshed, wait_run
 
 DESCRIPTION = "Run a review skill on a pull request and store the resulting review draft."
 STATES = ("running", "done", "escalated", "failed")
@@ -258,6 +260,7 @@ def build_parser() -> argparse.ArgumentParser:
 # -- commands --------------------------------------------------------------------------------
 
 Handler = Callable[[argparse.Namespace], int]
+_CLOCK = Clock()  # the sleep and clock of ``wait``; tests substitute them
 
 
 def _stub(name: str) -> Handler:
@@ -314,13 +317,16 @@ def _run_command(args: argparse.Namespace) -> int:
         run = run_review(plan, root, options)
     except Interrupted as stop:
         return stop.exit_code  # a waiter ended by a signal prints nothing (TODO(#27))
-    # TODO(#24): the outcome-to-output and exit-code mapping of every run state.
-    obj = runs_mod.run_object(run)
-    if run.state == "running":  # --no-wait: the session started
-        _write_stdout(runs_mod.dump(obj) if args.json else f"{run.run_id}\n")
-        return 0
-    _write_stdout(runs_mod.dump(obj) if args.json else runs_mod.human_run(obj))
-    return int(obj["exit_code"])
+    return _print_run(runs_mod.run_object(run), "run", args)
+
+
+def _print_run(obj: dict[str, Any], command: str, args: argparse.Namespace) -> int:
+    """Print a run object by the outcome mapping (``outcome.render_run``) and return its code."""
+    shown = render_run(
+        obj, command=command, as_json=args.json, no_wait=getattr(args, "no_wait", False)
+    )
+    _write_stdout(shown.text)
+    return shown.code
 
 
 def _write_stdout(text: str | bytes) -> None:
@@ -359,26 +365,57 @@ def _list(args: argparse.Namespace) -> int:
     return 0
 
 
+def _refresh_failed(err: ReviewRunError) -> None:
+    """One closed stderr line: the run is shown as stored."""
+    print(f"{PROG}: not refreshed ({err.code})", file=sys.stderr)
+
+
 def _show(args: argparse.Namespace) -> int:
-    """``show``: the run object, or with ``--draft`` the stored review.json as stored."""
-    with Store.open(default_state_root()) as store:
-        if args.draft:
+    """``show``: the run object (refreshed unless ``--no-refresh``), or with ``--draft`` the
+    stored review.json as stored. Whatever it printed is exit 0."""
+    root = default_state_root()
+    config_path = None if args.config is None else Path(args.config)
+    if args.draft:
+        if not args.no_refresh:
+            refresh_for_show(
+                root, args.run, config_path=config_path, on_refresh_error=_refresh_failed
+            )
+        with Store.open(root) as store:
             data = runs_mod.read_draft(store, args.run)
-            print(f"{PROG}: printing the stored draft as stored (untrusted text)", file=sys.stderr)
-            _write_stdout(data)
-            return 0
-        obj = runs_mod.show_run(store, args.run)
-    _write_stdout(runs_mod.dump(obj) if args.json else runs_mod.human_run(obj))
-    return 0
+        print(f"{PROG}: printing the stored draft as stored (untrusted text)", file=sys.stderr)
+        _write_stdout(data)
+        return 0
+    obj = show_refreshed(
+        root,
+        args.run,
+        refresh=not args.no_refresh,
+        config_path=config_path,
+        on_refresh_error=_refresh_failed,
+    )
+    return _print_run(obj, "show", args)
+
+
+def _wait(args: argparse.Namespace) -> int:
+    """``wait``: poll (finalizing through ``finalize_agent``) until the run is not ``running`` or
+    ``--timeout`` passes; exits with the run's own exit code."""
+    timeout = None if args.timeout is None else args.timeout.total_seconds()
+    obj = wait_run(
+        default_state_root(),
+        args.run,
+        timeout=timeout,
+        clock=_CLOCK,
+        config_path=None if args.config is None else Path(args.config),
+    )
+    return _print_run(obj, "wait", args)
 
 
 # Each command is replaced by its owning issue's implementation.
 _HANDLERS: dict[str, Handler] = {
-    "run": _run_command,  # steps 1 to 7 (#16, #17, #18); TODO(#24): outcome mapping; TODO(#15)
+    "run": _run_command,  # steps 1 to 7 (#16, #17, #18); TODO(#15)
     "resume": _stub("resume"),  # TODO(#28): resume
-    "wait": _stub("wait"),  # TODO(#24): wait
+    "wait": _wait,
     "list": _list,
-    "show": _show,  # TODO(#24): the refresh of show (without --no-refresh)
+    "show": _show,
     "reconcile": _stub("reconcile"),  # TODO(#29): reconcile
     "prune": _stub("prune"),  # TODO(#37): prune
     "cancel": _stub("cancel"),  # TODO(#26): cancel
