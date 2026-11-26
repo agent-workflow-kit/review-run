@@ -55,13 +55,6 @@ _FILLERS = frozenset(
         0xFFA0,
     }
 )
-# todo(#20): schemas/session-meta.json (meta.risk_reasons items, line ~27, and meta.summary,
-# line ~35) uses BMP-only literal ranges for the marked characters, so (1) TAG characters
-# (U+E0001, U+E0020 to U+E007F), the variation selectors U+E0100 to U+E01EF, other astral Cf
-# and lone surrogates are accepted although interface.md says they are excluded; (2) U+2065
-# (Cn) is rejected in summary although Cn is allowed there; (3) `$` in risk_reasons allows a
-# trailing LF under Python's re. Deferred: not part of this module; fix with the session-claim
-# validation.
 _MARKED_CATEGORIES = frozenset({"Cf", "Co", "Cs", "Cn", "Zl", "Zp"})
 # After NFKD, characters ignored when looking for an opener: all marks and every invisible
 # character (a superset of what marking already removed).
@@ -78,6 +71,13 @@ _OPENER = re.compile(r"<\s*(?:/\s*)?untrusted")
 
 def _marker(char: str) -> str:
     return f"<U+{ord(char):04X}>"
+
+
+def is_marked(char: str) -> bool:
+    """Whether ``sanitize`` turns ``char`` into a ``<U+XXXX>`` marker (TAB and LF are not marked;
+    ``sanitize_inline`` marks them too). One character; the session-claim rules of the
+    ``artifact`` module are built on it."""
+    return _is_marked(char)
 
 
 @lru_cache(maxsize=4096)
