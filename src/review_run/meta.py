@@ -506,10 +506,11 @@ def derive(ctx: ArtifactContext, validated: artifact.Validated) -> Processed:
 
 
 def production_seams() -> Seams:
-    """The seams of a production run: ``derive`` is this module's. TODO(#22): ``check_session``
-    (the skill and tool checks); until it lands the seams stay incomplete and finalize leaves a
-    done session ``running`` for a later finalizer."""
-    return Seams(derive=derive)
+    """The seams of a production run: ``derive`` is this module's, ``check_session`` is
+    ``session_check``'s (the skill and tool checks, #22). The seams are complete."""
+    from .session_check import check_session  # session_check imports finalize
+
+    return Seams(check_session=check_session, derive=derive)
 
 
 __all__ = [

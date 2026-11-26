@@ -71,11 +71,23 @@ def test_no_wait_prints_the_run_id_and_exits_0(world: World, cli) -> None:  # ty
     assert (doc["state"], doc["phase"]) == ("running", "session") and doc["agent_id"]
 
 
-def test_a_done_session_waits_for_finalize_and_exits_1_until_it_exists(world: World, cli) -> None:  # type: ignore[no-untyped-def]
+def test_a_done_session_with_a_valid_artifact_runs_end_to_end_and_exits_0(
+    world: World, cli
+) -> None:  # type: ignore[no-untyped-def]
+    from tests.test_meta import artifact_text
+
+    world.fb.use("agent-spawn", "outcome", outcome="done", artifact_text=artifact_text())
     res = cli("--json", "run", PR_URL)
-    assert res.code == 1 and res.envelope()["error"]["code"] == "internal"
-    shown = cli("--json", "list", "--state", "running")
-    assert len(json.loads(shown.out)["runs"]) == 1  # left for show, wait and reconcile
+    assert res.code == 0, res.out
+    shown = json.loads(res.out)
+    assert (shown["state"], shown["reason"], shown["exit_code"]) == ("done", None, 0)
+    listed = cli("--json", "list", "--state", "running")
+    assert json.loads(listed.out)["runs"] == []
+
+
+def test_a_done_session_with_an_invalid_artifact_exits_22(world: World, cli) -> None:  # type: ignore[no-untyped-def]
+    res = cli("--json", "run", PR_URL)  # the fake's default artifact has no meta
+    assert res.code == 22 and json.loads(res.out)["reason"] == "artifact_invalid"
 
 
 def test_a_waiter_ended_by_a_signal_prints_nothing(world: World, cli) -> None:  # type: ignore[no-untyped-def]

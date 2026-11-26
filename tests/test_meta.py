@@ -361,9 +361,12 @@ def test_the_same_inputs_give_the_same_bytes(world: World) -> None:
     assert art.canonical_json(copy.deepcopy(ctx_doc)).encode() + b"\n" == first
 
 
-def test_production_seams_hold_derive_and_stay_incomplete_until_22() -> None:
+def test_production_seams_are_complete() -> None:
+    from review_run import session_check
+
     seams = meta.production_seams()
-    assert seams.derive is meta.derive and not seams.complete
+    assert seams.derive is meta.derive and seams.check_session is session_check.check_session
+    assert seams.complete
 
 
 # -- round 1 review fixes (R1-R15) ---------------------------------------------------------------------

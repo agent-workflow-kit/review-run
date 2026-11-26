@@ -244,18 +244,13 @@ def test_a_done_session_reaches_the_finalize_seam_with_its_agent_stored(world: W
     assert run.agent_id and run.csession_id
 
 
-def test_by_default_a_done_session_leaves_the_run_running_for_a_later_finalizer(
-    world: World,
-) -> None:
-    with pytest.raises(ReviewRunError) as info:
-        world.run()
-    assert info.value.code == "internal"
-    run = world.only_run()
-    assert (run.state, run.phase, run.awaited_run) == ("running", "session", 1)
-    assert run.agent_id is not None and run.finished_at is None
-    assert agent_calls(world, "teardown") == []
-    with world.store() as store:
-        assert store.lease_info(lease_name(run.run_id)) is None  # released
+def test_by_default_a_done_session_with_a_valid_artifact_ends_done(world: World) -> None:
+    from tests.test_meta import artifact_text
+
+    world.fb.use("agent-spawn", "outcome", outcome="done", artifact_text=artifact_text())
+    run = world.run()
+    assert (run.state, run.reason, run.exit_code) == ("done", None, 0)
+    assert run.teardown == "done" and len(agent_calls(world, "teardown")) == 1
     no_files_left(world)
 
 
