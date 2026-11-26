@@ -27,6 +27,7 @@ from tests.test_outcome import FakeClock, live, started, stored
 
 REAL_KILL = cancel_mod._kill  # noqa: SLF001 - the unit tests of the default sender use it
 ORIG_KILL = os.kill
+ORIG_KILLPG = os.killpg
 STARTED: set[int] = set()  # the PIDs of the children these tests started: the only ones to signal
 
 
@@ -61,7 +62,7 @@ def no_real_signals(monkeypatch: pytest.MonkeyPatch) -> None:
     def guard_killpg(pgid: int, sig: int) -> None:
         if from_cancel():
             refuse()
-        os.killpg(pgid, sig)  # pragma: no cover
+        ORIG_KILLPG(pgid, sig)
 
     def guard_pidfd(fd: int, sig: int, *a: Any) -> None:
         if from_cancel() and _pidfd_target(fd) not in STARTED:
@@ -1042,6 +1043,33 @@ def test_an_unexpected_exception_closes_the_pair_and_is_internal(  # F10c
     pair = cancel_records()
     assert [r["result"]["status"] for r in pair] == ["attempted", "failed"]
     assert pair[1]["result"]["exit_code"] == 1
+
+
+def test_a_keyboard_interrupt_closes_the_pair_and_propagates(
+    world: World, cli, monkeypatch: pytest.MonkeyPatch
+) -> None:  # type: ignore[no-untyped-def]
+    run_id = live(cli)
+
+    def interrupted(self: Any, run: Run) -> Run:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cancel_mod._Cancel, "settle", interrupted)  # noqa: SLF001
+    with pytest.raises(KeyboardInterrupt):
+        cancel_mod.cancel_run(default_state_root(), run_id, _options(world, cli))
+    pair = cancel_records()
+    assert [r["result"]["status"] for r in pair] == ["attempted", "failed"]
+    assert pair[1]["result"]["exit_code"] == 1
+
+
+def test_the_signal_guard_passes_a_call_from_a_test_through_to_its_own_child() -> None:
+    child = subprocess.Popen([PY, "-c", "import time; time.sleep(60)"], start_new_session=True)
+    try:
+        os.killpg(child.pid, signal.SIGTERM)  # the guarded os.killpg, called from the test
+        assert child.wait(timeout=10) == -signal.SIGTERM
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait()
 
 
 def test_a_corrupt_stored_pid_is_taken_as_no_process(world: World, cli) -> None:  # type: ignore[no-untyped-def]  # F10a

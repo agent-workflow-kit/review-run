@@ -59,7 +59,7 @@ RUNNER_WAIT_SECONDS: Final = 120.0
 LAUNCHER_WINDOW_SECONDS: Final = 120.0
 POLL_SECONDS: Final = 1.0
 STOP_GRACE: Final = "10s"
-STOP_TIMEOUT: Final = 45.0  # agent-spawn stop's documented bound (10 s grace + 30 s) + margin
+STOP_TIMEOUT: Final = 300.0  # interface.md: agent-spawn stop is bounded by 300 s
 MAX_PID: Final = 2**31
 CANCEL_EXIT: Final = 143
 MAX_ROUNDS: Final = 8
@@ -559,6 +559,9 @@ def cancel_run(root: Path, ref: str, opts: CancelOptions) -> CancelResult:
             err = ReviewRunError("internal", "cancel failed unexpectedly")
             job.close(job.last_row(run), err)
             raise err from None
+        except BaseException:  # KeyboardInterrupt, SystemExit: close the pair, keep the original
+            job.close(job.last_row(run), ReviewRunError("internal", "cancel was interrupted"))
+            raise
         job.close(final)
         return CancelResult(final, result.changed, result.action, False)
 
