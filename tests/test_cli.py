@@ -11,7 +11,6 @@ from tests.helpers import run_cli
 
 COMMANDS: list[list[str]] = [
     ["resume", "rr-aaaa", "--prompt-file", "-"],
-    ["wait", "rr-aaaa"],
     ["reconcile"],
     ["prune"],
     ["cancel", "rr-aaaa"],
@@ -20,7 +19,7 @@ COMMANDS: list[list[str]] = [
 ]
 # `export` (tests/test_audit.py), `list` and `show` (tests/test_runs.py) are implemented and
 # `run` has its own tests (tests/test_preflight.py: its checks reach sibling tools); the others
-# are stubs of later issues.
+# are stubs of later issues (`wait` and the refresh of `show`: tests/test_outcome.py).
 
 
 def test_version_prints_version_and_exits_zero(capsys: pytest.CaptureFixture[str]) -> None:
@@ -97,7 +96,7 @@ def test_every_command_is_a_stub_exiting_1_with_internal_envelope(
 
 
 def test_stub_human_mode_prints_one_line_to_stderr(capsys: pytest.CaptureFixture[str]) -> None:
-    res = run_cli(capsys, "wait", "rr-aaaa")
+    res = run_cli(capsys, "cancel", "rr-aaaa")
     assert res.code == 1
     assert res.out == ""
     assert res.err.startswith("review-run: internal: ")
@@ -241,8 +240,6 @@ def test_main_sets_umask_077(capsys: pytest.CaptureFixture[str]) -> None:
 @pytest.mark.parametrize(
     "argv",
     [
-        ["wait", "rr-aaaa", "--timeout", "30s"],
-        ["wait", "rr-aaaa", "--timeout", "5m"],
         ["prune", "--older-than", "0"],
         ["prune", "--older-than", "30d"],
     ],
@@ -321,7 +318,7 @@ def test_valid_since_values_reach_list(capsys: pytest.CaptureFixture[str], since
 
 
 def test_internal_envelope_golden(capsys: pytest.CaptureFixture[str]) -> None:
-    res = run_cli(capsys, "--json", "wait", "rr-aaaa")
+    res = run_cli(capsys, "--json", "cancel", "rr-aaaa")
     assert res.code == 1
     check_golden("internal.json", "cli/error.json", res.envelope())
 

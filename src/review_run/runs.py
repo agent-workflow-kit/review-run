@@ -611,12 +611,10 @@ def list_runs(
 
 
 def show_run(store: Store, ref: str) -> dict[str, Any]:
-    """The run object of a run id or prefix (``show --no-refresh``). Read-only.
+    """The run object of a run id or prefix as stored (``show --no-refresh``). Read-only; the
+    refresh of ``show`` is ``waiting.show_refreshed``.
 
     A corrupt row raises ``CorruptRunError`` (exit 1).
-
-    TODO(#24): the refresh of ``show`` (finalize, runner check) is added with finalize; until
-    then ``show`` always behaves as ``--no-refresh``.
     """
     run_id = store.resolve_run_id(ref)
     run = store.get_run(run_id, tolerant=True)

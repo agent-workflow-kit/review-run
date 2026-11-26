@@ -1,0 +1,10 @@
+{
+  "error": {
+    "code": "failed",
+    "message": "the wait timed out",
+    "reason": "wait_timeout",
+    "details": {
+      "retryable": true
+    }
+  }
+}

@@ -617,7 +617,7 @@ def outcome_from_show(run: Run, doc: Mapping[str, Any]) -> lc.SpawnResult | None
 
 def finalize_agent(root: Path, run_id: str, opts: AgentFinalize) -> Run | None:
     """Finalize a run left ``running`` in phase ``session`` (or ``finalize``) whose agent has
-    ended; the entry point of ``show``, ``wait`` and ``reconcile`` (TODO(#24), TODO(#29) call it).
+    ended; the entry point of ``show`` and ``wait`` (``waiting``) and of ``reconcile`` (TODO(#29)).
 
     Returns the stored row after whatever happened, or ``None`` when the run does not exist. Nothing
     changes (the row is returned as read) when the run is not in a finalizable place, its lease is

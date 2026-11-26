@@ -322,7 +322,7 @@ Runs the order of [Run order](#run-order) and blocks until the run is `done`, `e
 
 ### `wait`
 
-`review-run wait <run> [--timeout <dur>] [--json]` polls every 2 s until the run is terminal or `escalated` (also waiting on a run in `prefetch` or `code_run`; finalizing it if its agent has ended, and applying the runner check of [reconcile](#reconcile) to this run) and exits with the run's exit code; a wait timeout exits 12 with `reason: wait_timeout` and the run unchanged (exit 22 keeps its single meaning). An `escalated` run is reported at once, also while a human answers it through agent-spawn; it is finalized once that session ends. A run that ended `canceled` exits with its stored code (143 or 130) and prints the run object; interrupted by a signal, `wait` prints nothing, exits 130 or 143 and changes nothing.
+`review-run wait <run> [--timeout <dur>] [--json]` polls every 2 s until the run is terminal or `escalated` (also waiting on a run in `prefetch` or `code_run`; finalizing it if its agent has ended, and applying the runner check of [reconcile](#reconcile) to this run) and exits with the run's exit code; a wait timeout exits 12 with `reason: wait_timeout`, `details.retryable: true` and the run unchanged (exit 22 keeps its single meaning). An `escalated` run is reported at once, also while a human answers it through agent-spawn; it is finalized once that session ends. A run that ended `canceled` exits with its stored code (143 or 130) and prints the run object; interrupted by a signal, `wait` prints nothing, exits 130 or 143 and changes nothing.
 
 ### `list`
 
