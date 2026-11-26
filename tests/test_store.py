@@ -723,9 +723,20 @@ def test_resume_started_clears_the_record(store: Store) -> None:
     )
     esc = store.get_run(run_id)
     assert esc is not None and store.begin_resume(run_id, esc.key, lease=lease, awaited_run=4)
-    assert store.resume_started(run_id, lease=lease, previous_awaited=4, awaited_run=5)
+    assert store.resume_started(
+        run_id,
+        lease=lease,
+        previous_awaited=4,
+        awaited_run=5,
+        fields={"actor": "human:bob", "hooks": ["post-run=true"], "decision_ids": ["d-1"]},
+    )
     run = store.get_run(run_id)
     assert run is not None and run.awaited_run == 5 and run.escalation_reason is None
+    assert (run.actor, run.hooks, run.decision_ids) == ("human:bob", ["post-run=true"], ["d-1"])
+    with pytest.raises(ValueError):
+        store.resume_started(
+            run_id, lease=lease, previous_awaited=5, awaited_run=6, fields={"state": "done"}
+        )
     assert not store.resume_revert(run_id, lease=lease, awaited_run=5)  # nothing left to restore
 
 

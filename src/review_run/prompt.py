@@ -610,6 +610,14 @@ def write_prompt_files(run_dir: Path | str, files: PromptFiles, manifest: Manife
     write_private_file(run / "prompt.md", files.prompt.encode("utf-8"))
 
 
+def write_resume_prompt(run_dir: Path | str, files: PromptFiles) -> None:
+    """Write ``prompt.md`` of a resume (0600, atomically, nothing followed through a symlink);
+    ``manifest.json`` and ``inputs/`` of the run are not touched."""
+    run = Path(run_dir)
+    ensure_private_dir(run)
+    write_private_file(run / "prompt.md", files.prompt.encode("utf-8"))
+
+
 def input_paths(run_dir: Path | str, files: PromptFiles) -> list[Path]:
     """The ``--input-file`` paths of ``files``, in order."""
     return [Path(run_dir) / "inputs" / i.name for i in files.inputs]
@@ -654,4 +662,5 @@ __all__ = [
     "remove_prompt_files",
     "render_header",
     "write_prompt_files",
+    "write_resume_prompt",
 ]

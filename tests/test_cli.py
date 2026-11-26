@@ -10,7 +10,6 @@ from tests.golden_harness import check_golden
 from tests.helpers import run_cli
 
 COMMANDS: list[list[str]] = [
-    ["resume", "rr-aaaa", "--prompt-file", "-"],
     ["reconcile"],
     ["prune"],
     ["cron", "install"],
@@ -18,7 +17,7 @@ COMMANDS: list[list[str]] = [
 ]
 # `export` (tests/test_audit.py), `list` and `show` (tests/test_runs.py) are implemented and
 # `run` has its own tests (tests/test_preflight.py: its checks reach sibling tools); the others
-# are stubs of later issues (`cancel`: tests/test_cancel.py; `wait` and the refresh of `show`:
+# are stubs of later issues (`resume`: tests/test_resume.py; `cancel`: tests/test_cancel.py; `wait` and the refresh of `show`:
 # tests/test_outcome.py).
 
 
@@ -129,7 +128,7 @@ def test_decision_id_limit(capsys: pytest.CaptureFixture[str]) -> None:
             *[a for i in range(n) for a in ("--decision-id", f"d{i}")],
         ]
 
-    assert run_cli(capsys, "--json", *argv(32)).code == 1
+    assert run_cli(capsys, "--json", *argv(32)).code == 10  # no such run: past the limit check
     assert run_cli(capsys, "--json", *argv(33)).code == 2
 
 

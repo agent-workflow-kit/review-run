@@ -23,6 +23,7 @@ from .errors import DECISION_ID_RE, MAX_DECISION_IDS, PROG, ExitCode, ReviewRunE
 from .fsmodes import apply_umask
 from .outcome import render_cancel, render_run
 from .preflight import RunRequest, plan_run
+from .resume import ResumeOptions, resume_run
 from .runner import Interrupted, Options, run_review
 from .store import Store, default_state_root
 from .waiting import Clock, refresh_for_show, show_refreshed, wait_run
@@ -322,6 +323,24 @@ def _run_command(args: argparse.Namespace) -> int:
     return _print_run(runs_mod.run_object(run), "run", args)
 
 
+def _resume_command(args: argparse.Namespace) -> int:
+    """``resume``: answer an ``escalated`` run (``resume.resume_run``). The run's stored settings
+    drive the launch; the config is read for ``hooks`` only, when a hook is delivered."""
+    caller = Caller.resolve(args.actor, stdin_tty=sys.stdin.isatty(), decision_ids=args.decision_id)
+    options = ResumeOptions(
+        caller=caller,
+        flag_hooks=tuple(args.hook),
+        no_wait=args.no_wait,
+        actor_flag=args.actor,
+        config_path=None if args.config is None else Path(args.config),
+    )
+    try:
+        run = resume_run(default_state_root(), args.run, args.prompt_file, options)
+    except Interrupted as stop:
+        return stop.exit_code  # a waiter ended by a signal prints nothing
+    return _print_run(runs_mod.run_object(run), "resume", args)
+
+
 def _print_run(obj: dict[str, Any], command: str, args: argparse.Namespace) -> int:
     """Print a run object by the outcome mapping (``outcome.render_run``) and return its code."""
     shown = render_run(
@@ -441,7 +460,7 @@ _HANDLERS: dict[str, Handler] = {
     # run, resume and wait run under the signal handlers (#27): from the first resolve to the
     # printed outcome, never in ``list``, ``show``, ``cancel`` and the like
     "run": signals.guarded(_run_command),  # steps 1 to 7 and --dry-run (#15, #16, #17, #18)
-    "resume": signals.guarded(_stub("resume")),  # TODO(#28): resume (keep the guard)
+    "resume": signals.guarded(_resume_command),  # #28
     "wait": signals.guarded(_wait),
     "list": _list,
     "show": _show,

@@ -227,12 +227,13 @@ def pre_run_hooks(
 # -- the run -------------------------------------------------------------------------------------
 
 
-class _Flow:
-    """The state of one run in this process: the store, the lease and the audit pair."""
+class SessionFlow:
+    """What ``run`` and ``resume`` share for one run in this process: the store, the lease, the
+    audit pair, the ender and the steps that follow a started session (adopting its result,
+    waiting, finalizing)."""
 
     def __init__(
         self,
-        plan: RunPlan,
         store: Store,
         audit: AuditWriter,
         log: LogWriter,
@@ -242,28 +243,15 @@ class _Flow:
         keeper: LeaseKeeper,
         attempt_id: str,
         root: Path,
+        settings: RunSettings,
+        ender: Ender,
     ) -> None:
-        self.plan, self.store, self.audit, self.log = plan, store, audit, log
+        self.store, self.audit, self.log = store, audit, log
         self.opts, self.run_id, self.lease, self.keeper = opts, run_id, lease, keeper
         self.attempt_id, self.root = attempt_id, root
         self.run_dir = store.run_dir(run_id)
-        self.settings = plan.settings
-        self.hooks_config = plan.resolved.values.get("hooks")
-        self.ender = Ender(
-            store,
-            run_id,
-            lease,
-            audit,
-            log,
-            opts.caller,
-            plan.settings,
-            attempt_id=attempt_id,
-            override=plan.request.override_escalation,
-            hooks_config=self.hooks_config,
-            shell=opts.shell,
-            lost=keeper.lost.is_set,
-            teardown_actor=plan.request.actor,
-        )
+        self.settings = settings
+        self.ender = ender
         self.launched = False  # set once the launcher may exist: later failures leave the run
 
     # -- reading, logging and ending (see ``ending.Ender``)
@@ -298,6 +286,124 @@ class _Flow:
         if run.cancel_requested_at is None:
             return None
         return self.end_failed("canceled", run.cancel_exit_code or 143)
+
+    def adopt(self, agent: lc.SpawnResult) -> Run:
+        """Store ``agent_id``, ``csession_id`` and ``awaited_run`` in one transaction. A result
+        that names another agent, session or run than the stored ones never overwrites them."""
+        self.check_lease()
+        run = self.row()
+        awaited = agent.run_number if agent.final else agent.agent_run
+        if (
+            (run.agent_id is not None and run.agent_id != agent.agent_id)
+            or (run.csession_id is not None and run.csession_id != agent.csession_id)
+            or (run.awaited_run is not None and (awaited is None or awaited < run.awaited_run))
+        ):
+            raise ReviewRunError("internal", "the result is not the stored session's")
+        if not self.store.update_fields(
+            self.run_id,
+            run.key,
+            lease=self.lease,
+            agent_id=agent.agent_id,
+            csession_id=agent.csession_id,
+            awaited_run=run.awaited_run if run.awaited_run is not None else awaited,
+        ):
+            raise ReviewRunError("internal", "the run changed while its agent was stored")
+        return self.row()
+
+    def apply(self, disposition: lc.Disposition) -> Run | None:
+        """Apply a mapping row. ``None`` means the run continues (a started session)."""
+        kind = disposition.kind
+        if kind == "started":
+            if disposition.agent is None:
+                raise ReviewRunError("internal", "a started session without a result")
+            self.adopt(disposition.agent)
+            return None
+        agent = disposition.agent
+        if kind in ("finalize", "escalate"):
+            if agent is None:
+                raise ReviewRunError("internal", "a session outcome without a result")
+            self.adopt(agent)
+        if kind == "finalize":
+            assert agent is not None
+            # Finalize is not interrupted: a signal waits for it and the run's own outcome and
+            # exit code stand (interface.md, Signals).
+            with signals.deferred(raise_on_exit=False):
+                finished = self.opts.finalize(
+                    FinalizeRequest(
+                        self.store,
+                        self.run_id,
+                        self.lease,
+                        self.settings,
+                        agent,
+                        self.ender,
+                        self.opts.seams,
+                    )
+                )
+            signals.ignore_rest()
+            return finished
+        if kind == "escalate":
+            assert agent is not None and disposition.reason and disposition.exit_code
+            return self.ender.escalate(agent, disposition.reason, disposition.exit_code)
+        if kind == "interrupted":
+            raise Interrupted(disposition.exit_code or 143)
+        return self.ender.apply_failure(disposition)
+
+    def wait_for_session(self) -> Run:
+        """The blocking ``agent-spawn wait`` of a started session, then its mapping (``apply``).
+        Returns the run as stored; raises ``Interrupted`` for a waiter ended by a signal and
+        ``lower_failed`` (exit 12, the run unchanged) when every wait attempt failed."""
+        run = self.row()
+        if run.agent_id is None:
+            raise ReviewRunError("internal", "the started session has no stored agent")
+        self.check_lease()
+        disposition = lc.wait_session(
+            run.agent_id,
+            self.run_dir,
+            timeout=lc.wait_timeout_seconds(self.settings),
+            sleep=self.opts.sleep,
+            csession_id=run.csession_id,
+            awaited_run=run.awaited_run,
+        )
+        ended = self.apply(disposition)
+        return self.row() if ended is None else ended
+
+
+class _Flow(SessionFlow):
+    """The state of one ``run`` in this process (see ``SessionFlow``)."""
+
+    def __init__(
+        self,
+        plan: RunPlan,
+        store: Store,
+        audit: AuditWriter,
+        log: LogWriter,
+        opts: Options,
+        run_id: str,
+        lease: Lease,
+        keeper: LeaseKeeper,
+        attempt_id: str,
+        root: Path,
+    ) -> None:
+        self.plan = plan
+        self.hooks_config = plan.resolved.values.get("hooks")
+        ender = Ender(
+            store,
+            run_id,
+            lease,
+            audit,
+            log,
+            opts.caller,
+            plan.settings,
+            attempt_id=attempt_id,
+            override=plan.request.override_escalation,
+            hooks_config=self.hooks_config,
+            shell=opts.shell,
+            lost=keeper.lost.is_set,
+            teardown_actor=plan.request.actor,
+        )
+        super().__init__(
+            store, audit, log, opts, run_id, lease, keeper, attempt_id, root, plan.settings, ender
+        )
 
     def prefetch_and_prompt(self) -> tuple[PromptFiles, Manifest] | Run:
         """Run order steps 5 and 6 and the prompt: pre-fetch, manifest, prompt files. Returns the
@@ -417,67 +523,6 @@ class _Flow:
         found = lc.interpret(done.returncode, done.stdout, self.run_dir / lc.LAUNCH_FILE)
         return lc.map_launch(found, done.returncode)
 
-    def adopt(self, agent: lc.SpawnResult) -> Run:
-        """Store ``agent_id``, ``csession_id`` and ``awaited_run`` in one transaction. A result
-        that names another agent, session or run than the stored ones never overwrites them."""
-        self.check_lease()
-        run = self.row()
-        awaited = agent.run_number if agent.final else agent.agent_run
-        if (
-            (run.agent_id is not None and run.agent_id != agent.agent_id)
-            or (run.csession_id is not None and run.csession_id != agent.csession_id)
-            or (run.awaited_run is not None and (awaited is None or awaited < run.awaited_run))
-        ):
-            raise ReviewRunError("internal", "the result is not the stored session's")
-        if not self.store.update_fields(
-            self.run_id,
-            run.key,
-            lease=self.lease,
-            agent_id=agent.agent_id,
-            csession_id=agent.csession_id,
-            awaited_run=run.awaited_run if run.awaited_run is not None else awaited,
-        ):
-            raise ReviewRunError("internal", "the run changed while its agent was stored")
-        return self.row()
-
-    def apply(self, disposition: lc.Disposition) -> Run | None:
-        """Apply a mapping row. ``None`` means the run continues (a started session)."""
-        kind = disposition.kind
-        if kind == "started":
-            if disposition.agent is None:
-                raise ReviewRunError("internal", "a started session without a result")
-            self.adopt(disposition.agent)
-            return None
-        agent = disposition.agent
-        if kind in ("finalize", "escalate"):
-            if agent is None:
-                raise ReviewRunError("internal", "a session outcome without a result")
-            self.adopt(agent)
-        if kind == "finalize":
-            assert agent is not None
-            # Finalize is not interrupted: a signal waits for it and the run's own outcome and
-            # exit code stand (interface.md, Signals).
-            with signals.deferred(raise_on_exit=False):
-                finished = self.opts.finalize(
-                    FinalizeRequest(
-                        self.store,
-                        self.run_id,
-                        self.lease,
-                        self.settings,
-                        agent,
-                        self.ender,
-                        self.opts.seams,
-                    )
-                )
-            signals.ignore_rest()
-            return finished
-        if kind == "escalate":
-            assert agent is not None and disposition.reason and disposition.exit_code
-            return self.ender.escalate(agent, disposition.reason, disposition.exit_code)
-        if kind == "interrupted":
-            raise Interrupted(disposition.exit_code or 143)
-        return self.ender.apply_failure(disposition)
-
 
 def run_review(plan: RunPlan, root: Path, opts: Options) -> Run:
     """Run order steps 3 to 7 for a planned run; returns the run as stored when this process is
@@ -585,23 +630,10 @@ def _run_steps(flow: _Flow) -> Run:
         return ended
     if flow.opts.no_wait:
         return flow.row()
-    run = flow.row()
-    if run.agent_id is None:
-        raise ReviewRunError("internal", "the started session has no stored agent")
-    flow.check_lease()
-    disposition = lc.wait_session(
-        run.agent_id,
-        flow.run_dir,
-        timeout=lc.wait_timeout_seconds(flow.settings),
-        sleep=flow.opts.sleep,
-        csession_id=run.csession_id,
-        awaited_run=run.awaited_run,
-    )
-    ended = flow.apply(disposition)
-    return flow.row() if ended is None else ended
+    return flow.wait_for_session()
 
 
-def _record_cancel(flow: _Flow, sig: signals.SignalExit) -> None:
+def _record_cancel(flow: SessionFlow, sig: signals.SignalExit) -> None:
     """Record the cancellation of a signal (the run's recorded cancellation stands when there is
     one). Called by the gateway before it stops the in-flight child, and again by ``_interrupted``
     (idempotent). SIGHUP after the launch records nothing: the session keeps running."""
@@ -622,7 +654,7 @@ def _launcher_alive(run: Run) -> bool:
     return procid.check(ident) is True
 
 
-def _interrupted(flow: _Flow, sig: signals.SignalExit) -> Run:
+def _interrupted(flow: SessionFlow, sig: signals.SignalExit) -> Run:
     """A signal reached ``run`` after the run record exists (interface.md, Signals). Every child
     the gateway started (the launcher, the waiter, a hook) was stopped while the exception
     unwound (the cancellation was recorded first); further signals are ignored from here on.
@@ -646,7 +678,7 @@ def _interrupted(flow: _Flow, sig: signals.SignalExit) -> Run:
     return _end_canceled(flow, code)
 
 
-def _launch_agent(flow: _Flow) -> tuple[str | None, str | None]:
+def _launch_agent(flow: SessionFlow) -> tuple[str | None, str | None]:
     """The agent id (and session id) the launcher's result file names, when the run has none
     stored (the launcher was ended after it started the agent)."""
     found = lc.interpret_file(flow.run_dir / lc.LAUNCH_FILE)
@@ -657,7 +689,7 @@ def _launch_agent(flow: _Flow) -> tuple[str | None, str | None]:
     return valid_agent_id(agent_id), csession
 
 
-def _end_canceled(flow: _Flow, code: int) -> Run:
+def _end_canceled(flow: SessionFlow, code: int) -> Run:
     """With the cancellation recorded: stop a live agent, then end the run ``canceled`` (the
     terminal transaction, hooks and the teardown of the parked agent are ``Ender.apply_failure``).
     A stop that fails or an agent that stays live leaves the run ``running`` with the
@@ -695,6 +727,7 @@ __all__ = [
     "LeaseKeeper",
     "Options",
     "RENEW_FAILURES_LIMIT",
+    "SessionFlow",
     "default_finalize",
     "pre_run_hooks",
     "run_inputs",

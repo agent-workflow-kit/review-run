@@ -759,18 +759,36 @@ class Store:
             return moved.rowcount == 1
 
     def resume_started(
-        self, run_id: str, *, lease: Lease, previous_awaited: int, awaited_run: int
+        self,
+        run_id: str,
+        *,
+        lease: Lease,
+        previous_awaited: int,
+        awaited_run: int,
+        fields: Mapping[str, Any] | None = None,
     ) -> bool:
-        """The resumed session started: set ``awaited_run`` to its run and clear the record."""
+        """The resumed session started: set ``awaited_run`` to its run and clear the record.
+
+        ``fields`` (``FREE_COLUMNS``: the resume's ``actor``, ``hooks`` and ``decision_ids``)
+        change in the same transaction, so a resume that never started leaves them as they were.
+        """
+        extra = dict(fields or {})
+        _check_columns(extra, FREE_COLUMNS - {"awaited_run"})
+        assignments = "".join(f", {column} = ?" for column in extra)
         with self.transaction() as conn:
             _require_lease(conn, lease, run_id)
             cur = conn.execute(
                 "UPDATE runs SET awaited_run = ?, escalation_reason = NULL,"
                 " escalation_exit_code = NULL, escalation_at = NULL,"
-                " escalation_awaited_run = NULL"
+                f" escalation_awaited_run = NULL{assignments}"
                 " WHERE run_id = ? AND state = 'running' AND phase = 'session'"
                 " AND awaited_run IS ?",
-                (awaited_run, run_id, previous_awaited),
+                (
+                    awaited_run,
+                    *(_encode(c, v) for c, v in extra.items()),
+                    run_id,
+                    previous_awaited,
+                ),
             )
             return cur.rowcount == 1
 

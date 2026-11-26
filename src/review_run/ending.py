@@ -46,6 +46,14 @@ def run_inputs(run: Run, settings: RunSettings, *, override: bool) -> dict[str, 
     }
 
 
+def resume_inputs(run: Run, settings: RunSettings) -> dict[str, Any]:
+    """The ``inputs`` of the audit ``resume`` pair: those of ``run`` without
+    ``override_escalation`` (a resume has none)."""
+    inputs = run_inputs(run, settings, override=False)
+    del inputs["override_escalation"]
+    return inputs
+
+
 def valid_agent_id(value: object) -> str | None:
     """``value`` when it is an agent id, else ``None`` (a corrupt stored value counts as absent)."""
     if isinstance(value, str) and SCHEMA_PATTERNS["agent_id"].fullmatch(value) is not None:
@@ -75,7 +83,7 @@ class Ender:
         payload_actor: str | None = None,
         finalized_by: str = "show",
         cause: str = "finalized",
-        pair_action: Literal["run", "cancel"] = "run",
+        pair_action: Literal["run", "resume", "cancel"] = "run",
         pair_inputs: Mapping[str, Any] | None = None,
     ) -> None:
         self.store, self.run_id, self.lease = store, run_id, lease
@@ -85,7 +93,8 @@ class Ender:
         self.teardown_actor = teardown_actor
         self.payload_actor = payload_actor or caller.actor
         self.finalized_by, self.cause = finalized_by, cause
-        self.pair_action: Literal["run", "cancel"] = pair_action  # ``cancel`` closes its pair
+        # ``cancel`` and ``resume`` close their own pairs
+        self.pair_action: Literal["run", "resume", "cancel"] = pair_action
         self.pair_inputs = pair_inputs
         self.moved = False  # whether an ``end`` of this Ender moved the row
         self.run_dir: Path = store.run_dir(run_id)
@@ -126,11 +135,12 @@ class Ender:
     ) -> dict[str, Any]:
         result = {"status": state, "reason": reason, "exit_code": exit_code}
         if self.attempt_id is not None:
-            inputs = (
-                dict(self.pair_inputs or {})
-                if self.pair_action == "cancel"
-                else run_inputs(run, self.settings, override=self.override)
-            )
+            if self.pair_action == "cancel":
+                inputs = dict(self.pair_inputs or {})
+            elif self.pair_action == "resume":
+                inputs = resume_inputs(run, self.settings)
+            else:
+                inputs = run_inputs(run, self.settings, override=self.override)
             return make_audit_record(
                 self.pair_action,
                 caller=self.caller,
@@ -410,4 +420,4 @@ class Ender:
         return self.row()
 
 
-__all__ = ["FINALIZER_ACTOR", "Ender", "run_inputs"]
+__all__ = ["FINALIZER_ACTOR", "Ender", "resume_inputs", "run_inputs", "valid_agent_id"]
