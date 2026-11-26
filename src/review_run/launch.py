@@ -199,6 +199,30 @@ class Envelope:
     cause: str | None
 
 
+ARTIFACT_PATH_MAX: Final = 4096
+_SHA256: Final = re.compile(r"[0-9a-f]{64}\Z")
+
+
+@dataclass(frozen=True)
+class ArtifactRef:
+    """The frozen artifact a report names (claude-session's ``artifact`` object, closed shape)."""
+
+    name: str
+    path: str
+    sha256: str
+    size: int
+
+
+@dataclass(frozen=True)
+class ReportInfo:
+    """The closed parts of an outcome's ``report``; ``summary`` and ``reason`` (untrusted text)
+    are dropped. ``artifact`` is ``None`` when it is absent or not of the closed shape."""
+
+    status: str
+    implicit: bool
+    artifact: ArtifactRef | None
+
+
 @dataclass(frozen=True)
 class SpawnResult:
     """One agent-spawn answer (``launch``, ``resume`` or ``wait``): a result object or an
@@ -215,6 +239,7 @@ class SpawnResult:
     end_reason: str | None = None
     run_number: int | None = None
     timed_out: bool = False
+    report: ReportInfo | None = None
 
     @property
     def final(self) -> bool:
@@ -227,6 +252,38 @@ def _word(value: object) -> str | None:
 
 def _count(value: object, minimum: int = 1) -> int | None:
     return value if type(value) is int and value >= minimum else None  # noqa: E721
+
+
+def _artifact_ref(value: object) -> ArtifactRef | None:
+    if not isinstance(value, dict):
+        return None
+    name, path, sha, size = (value.get(k) for k in ("name", "path", "sha256", "size"))
+    if not (isinstance(name, str) and 0 < len(name) <= 255 and "\x00" not in name):
+        return None
+    if not (
+        isinstance(path, str)
+        and path.startswith("/")
+        and len(path) <= ARTIFACT_PATH_MAX
+        and "\x00" not in path
+        and not {"", ".", ".."} & set(path[1:].split("/"))
+    ):
+        return None
+    if not (isinstance(sha, str) and _SHA256.match(sha)):
+        return None
+    if type(size) is not int or size < 0:  # noqa: E721
+        return None
+    return ArtifactRef(name, path, sha, size)
+
+
+def parse_report(value: object) -> ReportInfo | None:
+    """The closed shape of an outcome's ``report``, or ``None`` (no report, or one that is not
+    of that shape: both count as no report)."""
+    if not isinstance(value, dict):
+        return None
+    status, implicit = value.get("status"), value.get("implicit")
+    if status not in ("done", "blocked", "needs-input", "failed") or not isinstance(implicit, bool):
+        return None
+    return ReportInfo(status, implicit, _artifact_ref(value.get("artifact")))
 
 
 def parse_envelope(doc: Mapping[str, Any]) -> Envelope | None:
@@ -296,6 +353,7 @@ def parse_result(exit_code: int, doc: Mapping[str, Any] | None) -> SpawnResult |
         end_reason=_word(doc.get("end_reason")),
         run_number=run_number,
         timed_out=doc.get("timed_out") is True,
+        report=parse_report(run.get("report")) if isinstance(run, dict) else None,
     )
 
 
@@ -325,7 +383,20 @@ def interpret(
 
 # Reasons whose parked agent is torn down after the terminal transaction.
 TEARDOWN_REASONS: Final = frozenset(
-    {"launch_failed", "unreported", "killed", "timeout", "lost", "session_failed", "internal"}
+    {
+        "launch_failed",
+        "unreported",
+        "killed",
+        "timeout",
+        "lost",
+        "session_failed",
+        "implicit_done",
+        "artifact_missing",
+        "artifact_mismatch",
+        "skill_missing",
+        "artifact_invalid",
+        "internal",
+    }
 )
 
 # -- the mapping table ---------------------------------------------------------------------------
@@ -355,6 +426,7 @@ def failure_object(
     lower_reason: str | None = None,
     *,
     retryable: bool = False,
+    errors: Sequence[Mapping[str, str]] = (),
 ) -> dict[str, Any]:
     return {
         "tool": tool if tool in _SIBLING_TOOLS else None,
@@ -362,7 +434,7 @@ def failure_object(
         "lower_reason": lower_reason,
         "retryable": retryable,
         "retry_after_s": None,
-        "errors": [],
+        "errors": [dict(e) for e in errors],
     }
 
 
@@ -402,7 +474,7 @@ def _launch_failed(result: SpawnResult) -> Disposition:
     return Disposition("fail", "launch_failed", 12, failure, result, result.agent_id)
 
 
-def _session_outcome(result: SpawnResult) -> Disposition:
+def session_disposition(result: SpawnResult) -> Disposition:
     """A run that ended in its session phase (exits 0, 13, 14 to 18)."""
     code = result.exit_code
     if code == 0 and result.outcome == "done":
@@ -438,7 +510,7 @@ def map_launch(result: SpawnResult | None, exit_code: int) -> Disposition:
             return Disposition("started", agent=result)
         return _internal(result)
     if result.phase == "session":
-        return _session_outcome(result)
+        return session_disposition(result)
     return _internal(result)
 
 
@@ -465,7 +537,7 @@ def map_wait(result: SpawnResult | None, exit_code: int) -> Disposition:
         return _internal(result)  # a wait that timed out (22) cannot happen: no timeout is passed
     if result.phase == "launch":
         return _launch_failed(result)
-    return _session_outcome(result)
+    return session_disposition(result)
 
 
 # -- calls ---------------------------------------------------------------------------------------
@@ -564,6 +636,24 @@ def owns_agent(
 Teardown = Literal["done", "gone", "mismatch", "live", "refused", "failed"]
 
 
+def parked_verdict(
+    doc: Mapping[str, Any], *, run_id: str, pr: str, repo: str, csession_id: str | None
+) -> Literal["owned", "gone", "mismatch", "live"]:
+    """The ownership verdict of an ``agent-spawn show`` document (exit 0): ``gone`` (torn
+    down), ``mismatch`` (not this run's: never touched), ``owned`` (parked, or tearing down: an
+    interrupted teardown continues on retry; this run's) or ``live`` (live, launching or any
+    status not known: never torn down)."""
+    agent = doc.get("agent")
+    status = agent.get("status") if isinstance(agent, dict) else None
+    if status == "torn_down":
+        return "gone"
+    if not owns_agent(doc, run_id=run_id, pr=pr, repo=repo, csession_id=csession_id):
+        return "mismatch"
+    if status not in ("parked", "tearing_down"):
+        return "live"
+    return "owned"
+
+
 def check_parked(
     agent_id: str, *, run_id: str, pr: str, repo: str, csession_id: str | None
 ) -> Literal["owned", "gone", "mismatch", "live", "failed"]:
@@ -581,15 +671,7 @@ def check_parked(
         return "gone"
     if shown.returncode != 0 or doc is None:
         return "failed"
-    agent = doc.get("agent")
-    status = agent.get("status") if isinstance(agent, dict) else None
-    if status == "torn_down":
-        return "gone"
-    if not owns_agent(doc, run_id=run_id, pr=pr, repo=repo, csession_id=csession_id):
-        return "mismatch"
-    if status in ("live", "launching"):
-        return "live"
-    return "owned"
+    return parked_verdict(doc, run_id=run_id, pr=pr, repo=repo, csession_id=csession_id)
 
 
 def teardown_owned(agent_id: str, *, actor: str | None = None) -> Teardown:

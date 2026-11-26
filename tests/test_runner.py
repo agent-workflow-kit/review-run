@@ -689,8 +689,8 @@ def test_the_audit_pair_and_the_outbox_event_are_written_once(world: World) -> N
     world.fb.use("agent-spawn", "outcome", outcome="killed")
     run = world.run(flag_hooks=(f"post-run={cmd}",))
     records = audit_records(world.root)
-    assert [r["action"] for r in records] == ["run", "teardown", "run"]
-    teardown = records.pop(1)
+    assert [r["action"] for r in records] == ["run", "run", "teardown"]
+    teardown = records.pop(2)
     assert teardown["inputs"] == {"agent_id": run.agent_id}
     assert teardown["result"] == {"status": "done"}
     assert teardown["target"] == {"run_id": run.run_id, "pr": PR}
