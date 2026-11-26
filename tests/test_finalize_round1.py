@@ -289,6 +289,44 @@ def test_r11_a_payload_that_cannot_be_built_ends_the_run_internal_once(
     assert MARKER not in json.dumps(run.failure) + (world.root / "audit.jsonl").read_text()
 
 
+def test_f1_a_lost_lease_removes_no_original_json_after_an_artifact_failure(
+    tmp_path: Path,
+) -> None:
+    src, dst = tmp_path / "src", tmp_path / "dst"
+    src.mkdir()
+    dst.mkdir()
+    (src / "review.json").write_bytes(b"{}")
+    (dst / "original.json").write_bytes(b"winner")
+
+    def lost() -> None:
+        raise LeaseLostError()
+
+    with pytest.raises(LeaseLostError):
+        fin.copy_artifact(
+            ref_for(src / "review.json", b"{}", sha256="0" * 64),
+            dst,
+            max_bytes=99,
+            before_commit=lost,
+        )
+    assert (dst / "original.json").read_bytes() == b"winner"
+
+
+def test_f2_a_failure_after_the_terminal_commit_still_delivers_and_tears_down(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real = ending.Ender.note
+
+    def note(self: Any, event: str, *a: Any, **k: Any) -> None:
+        if event == "state_change" and a and "ended done" in a[0]:
+            raise RuntimeError(MARKER)
+        real(self, event, *a, **k)
+
+    monkeypatch.setattr(ending.Ender, "note", note)
+    run = world.run(seams=SEAMS)
+    assert (run.state, run.reason, run.exit_code) == ("done", None, 0)
+    assert run.teardown == "done"
+
+
 # -- R12: parked_verdict --------------------------------------------------------------------------------
 
 

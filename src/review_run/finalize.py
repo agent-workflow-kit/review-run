@@ -219,6 +219,8 @@ def copy_artifact(
     try:
         return _copy_artifact(ref, run_dir, max_bytes, before_commit)
     except FinalizeFailure:
+        if before_commit is not None:
+            before_commit()  # a holder that lost the lease removes nothing (LeaseLostError wins)
         (run_dir / ORIGINAL_NAME).unlink(missing_ok=True)
         raise
 
@@ -451,7 +453,13 @@ def _finalize_done(ender: Ender, result: lc.SpawnResult, seams: Seams, verdict: 
     except Exception:  # a payload that cannot be built ends the run once, never a crash loop
         if ender.lost():
             raise
-        return _internal(ender, result, verdict, extra)
+        try:
+            run = ender.row()
+        except Exception:
+            return _internal(ender, result, verdict, extra)
+        if run.state not in ("done", "failed"):
+            return _internal(ender, result, verdict, extra)
+        moved = True  # the commit stood and a later step failed: delivery and teardown follow
     if not moved:
         return run  # another process ended the run: it owns the teardown and the delivery
     ender.deliver()  # right after the commit: a slow or failing teardown never delays the hook
