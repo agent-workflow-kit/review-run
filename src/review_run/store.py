@@ -684,6 +684,20 @@ class Store:
             _require_lease(conn, lease, run_id)
             return _cas(conn, run_id, expect, {"phase": "finalize"}, no_cancel=True) == 1
 
+    def assert_holds(
+        self, run_id: str, lease: Lease, phases: tuple[str, ...] = ("session", "finalize")
+    ) -> None:
+        """Authoritative check, in the database, that ``lease`` is still the run's lease and the
+        run is still ``running`` in one of ``phases``; ``LeaseLostError`` otherwise. Used before a
+        file of the run directory is replaced, since the keeper's flag lags behind a takeover."""
+        with self.transaction() as conn:
+            _require_lease(conn, lease, run_id)
+            row = conn.execute(
+                "SELECT state, phase FROM runs WHERE run_id = ?", (run_id,)
+            ).fetchone()
+            if row is None or row[0] != "running" or row[1] not in phases:
+                raise LeaseLostError()
+
     def request_cancel(self, run_id: str, expect: Expect, *, actor: str, exit_code: int) -> bool:
         """Record a cancellation, keyed on the key the canceler read.
 

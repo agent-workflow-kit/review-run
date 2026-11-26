@@ -16,7 +16,11 @@ finds the run already moved returns the stored row and changes nothing (the proc
 terminal transaction committed owns teardown and delivery). A finalizer that died after the copy
 or after the terminal transaction is repeated from the files: ``original.json`` and
 ``review.json`` are replaced atomically, the terminal transaction records ``teardown: pending``
-and the hook event in the outbox, so ``reconcile`` can finish teardown and delivery.
+and the hook event in the outbox, so ``reconcile`` can finish teardown and delivery. In code the
+order is: classification (step 1), the ownership verdict, the phase compare-and-set, then steps 2
+to 14 in phase ``finalize``; the lease is verified in the database before ``original.json`` and
+``review.json`` are replaced. After the terminal transaction the hook is delivered first, then the
+agent is torn down.
 
 The artifact is untrusted. It is opened with ``O_NOFOLLOW`` and ``O_NONBLOCK`` and fstat-ed (a
 regular file with one link), read at most its reported size plus one byte, compared with the
@@ -194,7 +198,13 @@ def _read_at_most(fd: int, limit: int) -> bytes:
     return b"".join(chunks)
 
 
-def copy_artifact(ref: lc.ArtifactRef, run_dir: Path, *, max_bytes: int) -> tuple[bytes, str]:
+def copy_artifact(
+    ref: lc.ArtifactRef,
+    run_dir: Path,
+    *,
+    max_bytes: int,
+    before_commit: Callable[[], None] | None = None,
+) -> tuple[bytes, str]:
     """Step 4: copy the frozen artifact to ``<run dir>/original.json`` and return its verified
     bytes and sha256.
 
@@ -203,7 +213,22 @@ def copy_artifact(ref: lc.ArtifactRef, run_dir: Path, *, max_bytes: int) -> tupl
     hash that differs, a read error). ``artifact_invalid``: the reported size is above
     ``max_bytes`` (nothing is read). The copy is written to a private temporary file (0600,
     ``O_EXCL|O_NOFOLLOW``), fsynced and renamed, then read back and hashed again; a destination
-    error propagates (``internal``)."""
+    error propagates (``internal``). ``before_commit`` runs after the temporary file is complete
+    and before it replaces ``original.json`` (the lease check). Whenever the copy fails with an
+    artifact failure no ``original.json`` is left: a file whose hash the row does not store."""
+    try:
+        return _copy_artifact(ref, run_dir, max_bytes, before_commit)
+    except FinalizeFailure:
+        (run_dir / ORIGINAL_NAME).unlink(missing_ok=True)
+        raise
+
+
+def _copy_artifact(
+    ref: lc.ArtifactRef,
+    run_dir: Path,
+    max_bytes: int,
+    before_commit: Callable[[], None] | None,
+) -> tuple[bytes, str]:
     if ref.name != ARTIFACT_NAME or os.path.basename(ref.path) != ref.name:
         raise FinalizeFailure("artifact_missing")
     if ref.size > max_bytes:
@@ -238,6 +263,8 @@ def copy_artifact(ref: lc.ArtifactRef, run_dir: Path, *, max_bytes: int) -> tupl
             os.fsync(out)
         finally:
             os.close(out)
+        if before_commit is not None:
+            before_commit()
         os.replace(tmp, run_dir / ORIGINAL_NAME)
     finally:
         os.close(source)
@@ -278,6 +305,21 @@ def _check_processed(processed: Processed) -> None:
         raise ReviewRunError("internal", "the run summary is not of the closed shape")
 
 
+def _check_session(check: SessionCheck) -> None:
+    def flag(value: object) -> bool:
+        return value is None or type(value) is bool  # noqa: E721
+
+    count = check.tools_unexpected
+    if (
+        not isinstance(check, SessionCheck)
+        or not flag(check.skill_checked)
+        or not flag(check.tools_checked)
+        or not (count is None or (type(count) is int and count >= 0))  # noqa: E721
+        or not isinstance(check.warnings, tuple)
+    ):
+        raise ReviewRunError("internal", "the session check is not of the closed shape")
+
+
 def finalize_session(
     ender: Ender,
     result: lc.SpawnResult,
@@ -293,10 +335,12 @@ def finalize_session(
     ``agent-spawn show`` is read. ``live``: nothing changes. A ``show`` that fails raises
     ``lower_failed`` (exit 12, the run unchanged).
 
-    Steps 1 to 3 (``escalated`` for 13, ``failed`` for the other non-``done`` outcomes, the
-    implicit-done and missing-artifact checks) end the run without entering phase ``finalize``;
-    a ``done`` outcome moves into it (a compare-and-set that fails while a cancellation is
-    recorded: the run then ends ``canceled``)."""
+    Step 1 (``escalated`` for 13, ``failed`` for the other non-``done`` outcomes) ends the run
+    without entering phase ``finalize``. A ``done`` outcome whose agent is gone (``torn_down``,
+    unknown) ends the run ``agent_gone``, and a look-alike agent ``agent_gone`` with a warning,
+    both before anything is copied. Otherwise the run moves into phase ``finalize`` (a
+    compare-and-set that fails while a cancellation is recorded: the run then ends
+    ``canceled``) and steps 2 and 3 (implicit done, missing artifact) and the rest follow."""
     store, run_id = ender.store, ender.run_id
     run = ender.row()
     if run.state != "running" or run.phase not in ("session", "finalize"):
@@ -336,6 +380,8 @@ def finalize_session(
         return ender.apply_failure(
             lc.Disposition("fail", "agent_gone", 12, agent=result), verdict=verdict
         )
+    if verdict == "gone":
+        return ender.apply_failure(lc.Disposition("fail", "agent_gone", 12), verdict=verdict)
     if run.cancel_requested_at is not None:
         return _canceled(ender, result)
     if run.phase == "session":
@@ -368,19 +414,22 @@ def _finalize_done(ender: Ender, result: lc.SpawnResult, seams: Seams, verdict: 
         if report is None or report.artifact is None:
             raise FinalizeFailure("artifact_missing")
         max_bytes = int(ender.settings.value("limits.max_artifact_bytes"))
-        original, original_sha = copy_artifact(report.artifact, run_dir, max_bytes=max_bytes)
+        ender.verify_lease()  # also when re-entering phase finalize after a crashed finalizer
+        original, original_sha = copy_artifact(
+            report.artifact, run_dir, max_bytes=max_bytes, before_commit=ender.verify_lease
+        )
         extra["original_sha256"] = original_sha
         ender.check_lease()
         session = seams.check_session(SessionContext(run, ender.settings, result, run_dir))
+        _check_session(session)
         ender.check_lease()
         processed = seams.process(
             ArtifactContext(run, ender.settings, result, run_dir, original, original_sha, session)
         )
         _check_processed(processed)
         warnings = _closed_warnings([*session.warnings, *processed.warnings])
-        ender.check_lease()
         review_path = run_dir / REVIEW_NAME
-        write_private_file(review_path, processed.review)
+        write_private_file(review_path, processed.review, before_commit=ender.verify_lease)
     except FinalizeFailure as exc:
         return ender.apply_failure(
             lc.Disposition("fail", exc.reason, exc.exit_code, exc.failure, agent=result),
@@ -395,10 +444,38 @@ def _finalize_done(ender: Ender, result: lc.SpawnResult, seams: Seams, verdict: 
         return _internal(ender, result, verdict, extra)
     for code in warnings:
         ender.warn(code)
-    run, moved = ender.end(
+    try:
+        run, moved = _end_done(ender, result, session, processed, extra, review_path)
+    except LeaseLostError:
+        raise
+    except Exception:  # a payload that cannot be built ends the run once, never a crash loop
+        if ender.lost():
+            raise
+        return _internal(ender, result, verdict, extra)
+    if not moved:
+        return run  # another process ended the run: it owns the teardown and the delivery
+    ender.deliver()  # right after the commit: a slow or failing teardown never delays the hook
+    assert run.agent_id is not None
+    if run.state == "failed":  # a cancellation recorded after the last check converted the end
+        ender.teardown_after(run.agent_id, run.csession_id, run)
+    else:
+        ender.finish_teardown(verdict, run.agent_id, run)
+    return ender.row()
+
+
+def _end_done(
+    ender: Ender,
+    result: lc.SpawnResult,
+    session: SessionCheck,
+    processed: Processed,
+    extra: Mapping[str, Any],
+    review_path: Path,
+) -> tuple[Run, bool]:
+    return ender.end(
         "done",
         None,
         0,
+        teardown_on_cancel=True,
         fields={
             **extra,
             "artifact_path": str(review_path),
@@ -412,16 +489,6 @@ def _finalize_done(ender: Ender, result: lc.SpawnResult, seams: Seams, verdict: 
         tools_checked=session.tools_checked,
         tools_unexpected=session.tools_unexpected,
     )
-    if not moved:
-        return run  # another process ended the run: it owns the teardown and the delivery
-    if run.state == "failed":  # unreachable while in phase finalize, kept as a guard
-        assert run.agent_id is not None
-        ender.teardown_after(run.agent_id, run.csession_id, run)
-    else:
-        assert run.agent_id is not None
-        ender.finish_teardown(verdict, run.agent_id, run)
-    ender.deliver()
-    return ender.row()
 
 
 def _internal(ender: Ender, result: lc.SpawnResult, verdict: str, extra: dict[str, Any]) -> Run:

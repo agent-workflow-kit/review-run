@@ -95,6 +95,12 @@ class Ender:
         if self.lost():
             raise ReviewRunError("internal", "the run lease is no longer held by this process")
 
+    def verify_lease(self) -> None:
+        """The lease check of the database (the keeper's flag lags): before a file of the run
+        directory is replaced. ``LeaseLostError`` when another process holds the run."""
+        self.check_lease()
+        self.store.assert_holds(self.run_id, self.lease)
+
     def warn(self, code: str) -> None:
         """A closed run warning, with a ``warning`` log record."""
         self.store.add_warning(self.run_id, code, lease=self.lease)
@@ -122,7 +128,12 @@ class Ender:
             caller=Caller.finalizer(),
             run_id=self.run_id,
             pr=run.pr,
-            inputs={"cause": self.cause, "finalized_by": self.finalized_by},
+            inputs={
+                "cause": "agent_gone"
+                if reason == "agent_gone" and self.cause == "finalized"
+                else self.cause,
+                "finalized_by": self.finalized_by,
+            },
             result=result,
             event_id=event_id,
         )
@@ -215,7 +226,10 @@ class Ender:
             fields=extra,
             events=[NewEvent(event_id, hook, payload, (record,))],
         )
-        remove_prompt_files(self.run_dir)
+        try:
+            remove_prompt_files(self.run_dir)
+        except OSError:  # the commit stands: teardown and delivery still follow
+            self.note("warning", "prompt files could not be removed", level="warn")
         if moved:
             self.note("state_change", f"run ended {state} ({reason})", state=state)
         return self.row(), moved
@@ -251,8 +265,19 @@ class Ender:
         ``mismatch`` is never touched; a ``live`` agent is never torn down (agent-spawn refuses)."""
         outcome = verdict
         if verdict == "owned":
-            outcome = lc.teardown_owned(agent_id, actor=self.teardown_actor)
-            self.audit_teardown(agent_id, run, "done" if outcome in ("done", "gone") else "failed")
+            # the verdict may be old (finalize takes a while): check ownership again right now
+            outcome = lc.teardown_parked(
+                agent_id,
+                run_id=self.run_id,
+                pr=run.pr,
+                repo=run.repo,
+                csession_id=run.csession_id,
+                actor=self.teardown_actor,
+            )
+            if outcome not in ("mismatch", "live"):
+                self.audit_teardown(
+                    agent_id, run, "done" if outcome in ("done", "gone") else "failed"
+                )
         status = "done" if outcome in ("done", "gone") else "failed"
         self.store.set_teardown(self.run_id, status, lease=self.lease)
         warning = {
@@ -350,15 +375,13 @@ class Ender:
         )
         if not moved:
             return run  # another process ended the run: it owns the teardown and the delivery
+        self.deliver()  # right after the commit; a slow or failing teardown never delays the hook
         if verdict == "mismatch":
             self.warn("agent_mismatch")
         elif verdict is not None and agent_id is not None:
-            # intentional order: teardown (step 14) runs after the terminal transaction; the
-            # closing record is delivered from the outbox afterwards
             self.finish_teardown(verdict, agent_id, run)
         elif run.reason == "canceled" and run.teardown == "pending" and agent_id is not None:
             self.teardown_after(agent_id, csession, run)  # a cancellation was recorded meanwhile
-        self.deliver()
         return self.row()
 
 

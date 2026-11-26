@@ -19,8 +19,8 @@ from typing import Any
 import pytest
 
 from review_run import finalize as fin
-from review_run import hooks, runner, runs
 from review_run import launch as lc
+from review_run import runner, runs
 from review_run.errors import ReviewRunError
 from review_run.store import Expect, Store, lease_name
 from tests.conftest import validate_against
@@ -125,10 +125,10 @@ def test_a_done_session_is_finalized_by_run_with_everything_stored(world: World)
     assert obj["state"] == "done" and obj["artifact"]["path"] == str(review)
     # the audit pair is closed by the same attempt, the event is delivered once
     records = audit_records(world.root)
-    assert [r["action"] for r in records] == ["run", "teardown", "run"]
-    assert records[0]["attempt_id"] == records[2]["attempt_id"]
-    assert records[2]["result"] == {"status": "done", "reason": None, "exit_code": 0}
-    assert records[2]["event_id"] == f"{run.run_id}-post-run-1"
+    assert [r["action"] for r in records] == ["run", "run", "teardown"]
+    assert records[0]["attempt_id"] == records[1]["attempt_id"]
+    assert records[1]["result"] == {"status": "done", "reason": None, "exit_code": 0}
+    assert records[1]["event_id"] == f"{run.run_id}-post-run-1"
     payload = json.loads(out.read_text())
     assert (payload["state"], payload["exit_code"], payload["verdict"]) == ("done", 0, "comment")
     assert (payload["tools_checked"], payload["tools_unexpected"]) == (False, 0)
@@ -563,8 +563,8 @@ def test_finalize_agent_finishes_a_run_left_running_and_audits_a_finalize_record
     assert done is not None and (done.state, done.exit_code, done.teardown) == ("done", 0, "done")
     assert done.finalized_run == 1 and (world.root / "runs" / run_id / "review.json").exists()
     records = audit_records(world.root)
-    assert [r["action"] for r in records] == ["run", "teardown", "finalize"]
-    last = records[-1]
+    assert [r["action"] for r in records] == ["run", "finalize", "teardown"]
+    last = records[1]
     assert last["actor"] == "auto:review-run"
     assert last["inputs"] == {"cause": "finalized", "finalized_by": "reconcile"}
     assert last["result"] == {"status": "done", "reason": None, "exit_code": 0}
@@ -699,19 +699,8 @@ def test_a_finalizer_killed_after_the_terminal_transaction_leaves_teardown_and_h
     with Store.open(world.root) as store:
         row = store.get_run(run_id)
         assert row is not None and (row.state, row.teardown) == ("done", "pending")
-        events = store.pending_events(run_id)
-        assert [e["event_id"] for e in events] == [f"{run_id}-post-run-1"]
-        assert (
-            events[0]["audit"][0]["action"] == "finalize"
-            or events[0]["audit"][0]["action"] == "run"
-        )
-        # a later pass (reconcile, #29) delivers the event; the terminal state is never redone
-        from review_run.audit import AuditWriter, LogWriter
-
-        hooks.deliver_pending(
-            store, AuditWriter(world.root), LogWriter(world.root), None,
-            run_id=run_id, shell=(PY, "-c"),
-        )  # fmt: skip
+        # the hook is delivered right after the commit, before teardown (a later reconcile, #29,
+        # finishes the pending teardown; the terminal state is never redone)
         assert store.pending_events(run_id) == []
     assert json.loads(out.read_text())["state"] == "done"
     again = fin.finalize_agent(world.root, run_id, agent_finalize(world))

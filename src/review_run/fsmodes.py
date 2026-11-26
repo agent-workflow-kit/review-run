@@ -12,6 +12,7 @@ import os
 import secrets
 import stat
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 from .errors import ReviewRunError
@@ -94,7 +95,9 @@ def create_private_file(path: Path | str, data: bytes, *, fsync: bool = False) -
         raise
 
 
-def write_private_file(path: Path | str, data: bytes) -> None:
+def write_private_file(
+    path: Path | str, data: bytes, *, before_commit: Callable[[], None] | None = None
+) -> None:
     """Replace ``path`` atomically with a 0600 file holding ``data``.
 
     The data goes to a fresh temporary file in the same directory that is renamed over the
@@ -107,6 +110,8 @@ def write_private_file(path: Path | str, data: bytes) -> None:
     tmp = target.with_name(f".{stem}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
     try:
         create_private_file(tmp, data, fsync=True)
+        if before_commit is not None:
+            before_commit()  # e.g. the lease check: a stale holder must not replace the file
         os.replace(tmp, target)
     except BaseException:
         tmp.unlink(missing_ok=True)

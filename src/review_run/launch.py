@@ -265,6 +265,7 @@ def _artifact_ref(value: object) -> ArtifactRef | None:
         and path.startswith("/")
         and len(path) <= ARTIFACT_PATH_MAX
         and "\x00" not in path
+        and not {"", ".", ".."} & set(path[1:].split("/"))
     ):
         return None
     if not (isinstance(sha, str) and _SHA256.match(sha)):
@@ -639,15 +640,16 @@ def parked_verdict(
     doc: Mapping[str, Any], *, run_id: str, pr: str, repo: str, csession_id: str | None
 ) -> Literal["owned", "gone", "mismatch", "live"]:
     """The ownership verdict of an ``agent-spawn show`` document (exit 0): ``gone`` (torn
-    down), ``mismatch`` (not this run's: never touched), ``live`` (live, launching or tearing
-    down: never torn down) or ``owned`` (parked, this run's)."""
+    down), ``mismatch`` (not this run's: never touched), ``owned`` (parked, or tearing down: an
+    interrupted teardown continues on retry; this run's) or ``live`` (live, launching or any
+    status not known: never torn down)."""
     agent = doc.get("agent")
     status = agent.get("status") if isinstance(agent, dict) else None
     if status == "torn_down":
         return "gone"
     if not owns_agent(doc, run_id=run_id, pr=pr, repo=repo, csession_id=csession_id):
         return "mismatch"
-    if status != "parked":
+    if status not in ("parked", "tearing_down"):
         return "live"
     return "owned"
 
