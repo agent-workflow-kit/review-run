@@ -17,14 +17,17 @@ from __future__ import annotations
 import hashlib
 import importlib.resources
 import json
+import math
 import os
+import re
 import stat
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
 
-from .config import Resolved
+from .config import Resolved, _deref, _repo_schema, _schema
+from .config_yaml import writable_by_others
 from .errors import ReviewRunError
 from .fsmodes import create_private_file
 from .plugin_hash import PluginTreeError, plugin_dirs_sha256
@@ -56,11 +59,6 @@ def bundled_plugin_dir() -> Path:
     return Path(__file__).resolve().parents[2] / "plugin"
 
 
-def bundled_header_template() -> str:
-    """The bundled prompt header template (``plugin/header.md``, rendered by ``prompt``)."""
-    return (bundled_plugin_dir() / "header.md").read_text(encoding="utf-8")
-
-
 def bundled_profile_bytes() -> bytes:
     return (bundled_plugin_dir() / "permission_profile.json").read_bytes()
 
@@ -75,9 +73,31 @@ class ProfilePlan:
     sha256: str
 
 
+def reject_non_finite(value: object) -> None:
+    """Raise ``ValueError`` when a parsed JSON value holds a float that is not finite (``1e999``
+    parses to infinity; ``strict_json`` only refuses the ``Infinity`` and ``NaN`` words)."""
+    pending = [value]
+    while pending:
+        item = pending.pop()
+        if isinstance(item, float):
+            if not math.isfinite(item):
+                raise ValueError("non-finite number")
+        elif isinstance(item, dict):
+            pending.extend(item.values())
+        elif isinstance(item, list):
+            pending.extend(item)
+
+
+def strict_finite_json(text: str) -> Any:
+    """``strict_json`` that also refuses non-finite numbers (``ValueError``)."""
+    doc = strict_json(text)
+    reject_non_finite(doc)
+    return doc
+
+
 def _json_object(data: bytes) -> dict[str, Any]:
     try:
-        doc = strict_json(data.decode("utf-8"))
+        doc = strict_finite_json(data.decode("utf-8"))
     except (ValueError, RecursionError):
         raise ValueError("not strict JSON") from None
     if not isinstance(doc, dict):
@@ -90,7 +110,7 @@ def variant_profile(bundled: bytes) -> bytes:
     doc = _json_object(bundled)
     deny = doc["permissions"]["deny"]
     doc["permissions"]["deny"] = [d for d in deny if d not in SUBAGENT_DENIES]
-    return (json.dumps(doc, indent=2, ensure_ascii=True) + "\n").encode("ascii")
+    return (json.dumps(doc, indent=2, ensure_ascii=True, allow_nan=False) + "\n").encode("ascii")
 
 
 def read_profile_file(path: str) -> bytes:
@@ -115,7 +135,7 @@ def read_profile_file(path: str) -> bytes:
             raise refused("is not a regular file")
         if info.st_uid != os.geteuid():
             raise refused("is not owned by you")
-        if info.st_mode & 0o002:
+        if writable_by_others(info):
             raise refused("is writable by others")
         with os.fdopen(fd, "rb", closefd=False) as handle:
             data = handle.read(MAX_PROFILE_BYTES + 1)
@@ -188,12 +208,16 @@ class RunSettings:
         }
 
     def to_bytes(self) -> bytes:
-        return (json.dumps(self.document(), indent=2, sort_keys=True) + "\n").encode("ascii")
+        return (
+            json.dumps(self.document(), indent=2, sort_keys=True, allow_nan=False) + "\n"
+        ).encode("ascii")
 
 
 def config_sha256(resolved: Resolved) -> str:
     """The hash of every resolved value of the run (flags included, ``hooks`` too)."""
-    text = json.dumps(resolved.values, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    text = json.dumps(
+        resolved.values, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False
+    )
     return hashlib.sha256(text.encode("ascii")).hexdigest()
 
 
@@ -242,14 +266,15 @@ def _corrupt() -> ReviewRunError:
 
 
 def _read_regular(directory: Path, name: str, limit: int) -> bytes:
-    """Open ``directory/name`` without following links, a regular file of the user."""
+    """Open ``directory/name`` without following links, a regular file of the user that no
+    group or other can access (mode 0600)."""
     try:
         fd = os.open(directory / name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
     except OSError:
         raise _corrupt() from None
     try:
         info = os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid():
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
             raise _corrupt()
         with os.fdopen(fd, "rb", closefd=False) as handle:
             data = handle.read(limit + 1)
@@ -269,38 +294,98 @@ def _is_sha(value: object) -> bool:
     return isinstance(value, str) and len(value) == 64 and set(value) <= _SHA
 
 
+_KEY = re.compile(r"[a-z_]+(?:\.[a-z_]+)*", re.ASCII)
+_TOP_KEYS: Final = frozenset(
+    {
+        "schema_version",
+        "settings",
+        "plugin_dirs",
+        "plugin_dirs_sha256",
+        "config_sha256",
+        "permission_profile",
+    }
+)
+
+
+def _known_keys() -> frozenset[str]:
+    props = _schema()["properties"]
+    keys = {k for k in (*props, *_repo_schema()["properties"]) if k not in EXCLUDED}
+    keys -= {"limits", "repos"}
+    keys |= {f"limits.{k}" for k in _deref(props["limits"])["properties"]}
+    return frozenset(keys)
+
+
+def _is_int(value: object) -> bool:
+    return type(value) is int  # noqa: E721 (a bool is not an integer here)
+
+
+def _is_words(value: object) -> bool:
+    return isinstance(value, list) and all(
+        isinstance(v, str) and not v.startswith("-") for v in value
+    )
+
+
+def _plain(value: object) -> bool:
+    """A string that cannot be taken for an option by the lower tool."""
+    return isinstance(value, str) and not value.startswith("-")
+
+
+# The values ``launch_flags`` and ``launch_env`` read, each with its type test.
+_REQUIRED: Final = {
+    "mode": lambda v: v in ("headless", "interactive"),
+    "skill": _plain,
+    "sandbox": _plain,
+    "setting_sources": _is_words,
+    "env_allowlist": lambda v: isinstance(v, list) and all(isinstance(n, str) for n in v),
+    "subagents": lambda v: isinstance(v, bool),
+    "max_subagent_depth": _is_int,
+    "model": lambda v: v is None or _plain(v),
+    "timeout": lambda v: v is None or _plain(v),
+    "max_turns": lambda v: v is None or _is_int(v),
+}
+
+
 def _parse_settings(data: bytes) -> RunSettings:
     try:
-        doc = strict_json(data.decode("utf-8"))
+        doc = strict_finite_json(data.decode("utf-8"))
     except (ValueError, RecursionError):
         raise _corrupt() from None
-    if not isinstance(doc, dict) or doc.get("schema_version") != SCHEMA_VERSION:
+    if not isinstance(doc, dict) or set(doc) != _TOP_KEYS or not _is_int(doc["schema_version"]):
         raise _corrupt()
-    profile = doc.get("permission_profile")
-    items = doc.get("settings")
-    dirs = doc.get("plugin_dirs")
+    if doc["schema_version"] != SCHEMA_VERSION:
+        raise _corrupt()
+    profile = doc["permission_profile"]
+    items = doc["settings"]
+    dirs = doc["plugin_dirs"]
     if (
         not isinstance(profile, dict)
-        or profile.get("kind") not in PROFILE_KINDS
-        or not _is_sha(profile.get("sha256"))
-        or not _is_sha(doc.get("plugin_dirs_sha256"))
-        or not _is_sha(doc.get("config_sha256"))
+        or set(profile) != {"kind", "sha256"}
+        or profile["kind"] not in PROFILE_KINDS
+        or not _is_sha(profile["sha256"])
+        or not _is_sha(doc["plugin_dirs_sha256"])
+        or not _is_sha(doc["config_sha256"])
         or not isinstance(items, list)
         or not isinstance(dirs, list)
-        or not all(isinstance(d, str) for d in dirs)
+        or not all(isinstance(d, str) and d.startswith("/") and "\x00" not in d for d in dirs)
     ):
         raise _corrupt()
+    known = _known_keys()
     entries: dict[str, tuple[Any, str]] = {}
     for item in items:
         if (
             not isinstance(item, dict)
             or set(item) != {"key", "value", "origin"}
             or not isinstance(item["key"], str)
+            or not _KEY.fullmatch(item["key"])
+            or item["key"] not in known
             or item["origin"] not in ORIGINS
             or item["key"] in entries
         ):
             raise _corrupt()
         entries[item["key"]] = (item["value"], item["origin"])
+    for key, accepts in _REQUIRED.items():
+        if key not in entries or not accepts(entries[key][0]):
+            raise _corrupt()
     return RunSettings(
         entries=entries,
         plugin_dirs=tuple(dirs),
@@ -423,5 +508,5 @@ def launch_flags(
     if actor is not None:
         flags += ["--actor", actor]
     for decision in decision_ids:
-        flags += ["--decision-id", decision]
+        flags.append(f"--decision-id={decision}")  # one item: an id that starts with "-" is safe
     return [str(f) for f in flags]

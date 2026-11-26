@@ -964,3 +964,34 @@ def test_redact_is_not_quadratic_on_repetitive_text() -> None:
     out = redact("a" * 50000, ["a" * 25000])
     assert out == "<redacted>"
     assert time.perf_counter() - start < 5
+
+
+# --- marking is batched, with the old per-character output ----------------------------------------
+
+
+def _reference_mark(text: str, extra: str) -> str:
+    """The original per-character rule: mark when in ``extra`` or ``_is_marked``."""
+    return "".join(
+        f"<U+{ord(c):04X}>" if c in extra or sanitizer._is_marked(c) else c for c in text
+    )
+
+
+@pytest.mark.parametrize("extra", ["", "|", "|\n", "\n\t"])
+def test_mark_matches_the_per_character_rule(extra: str) -> None:
+    rng = random.Random(8)
+    pool = (
+        list("abc xyz|\t\n<>~")
+        + ["\x00", "\x01", "\x7f", "\x85", " ", "‮", "​", "️", ""]
+        + ["\ud800", "\U000e0001", "\U000e0100", "⠀", "é", "漢", "\U0001f600", "͸"]
+    )
+    for _ in range(200):
+        text = "".join(rng.choice(pool) for _ in range(rng.randint(0, 60)))
+        assert sanitizer._mark(text, extra) == _reference_mark(text, extra)
+
+
+def test_a_long_run_of_one_control_character_is_marked_quickly() -> None:
+    n = 1_000_000
+    start = time.monotonic()
+    out = sanitizer._mark("\x01" * n, "")
+    assert time.monotonic() - start < 5
+    assert out == "<U+0001>" * n

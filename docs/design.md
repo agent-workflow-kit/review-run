@@ -89,7 +89,8 @@ Minimum sibling versions: review-run needs claude-session and agent-spawn releas
 | `cli` | argparse subcommands, global flags, exit-code mapping |
 | `config` | YAML, drop-ins, env, per-repo overrides, validation (PyYAML, jsonschema against `schemas/config.json`) |
 | `gateway` | every subprocess: forgectl, pr-comment, agent-spawn, claude-session, wtctl, bwrap, the `/proc` scan, each with a per-call timeout; the single seam for fakes |
-| `prefetch` | the reads, head comparison, manifest and per-file patch building, size caps |
+| `prefetch` | the reads and the head comparison, then the call to `manifest` |
+| `manifest` | the diff to manifest entries and per-file inputs: section parsing, hunk splitting, size caps, the prompt table (a pure function) |
 | `sanitizer` | the sanitizer (used by `prompt`, `coderun` and human output) |
 | `prompt` | fenced prompt and input files, nonce |
 | `coderun` | throwaway, sandboxed runner, output descriptor, removal (output goes through the sanitizer) |
@@ -100,7 +101,7 @@ Minimum sibling versions: review-run needs claude-session and agent-spawn releas
 | `hooks` | hook execution, payload building and outbox delivery (at least once: every pass re-runs all synchronous entries of an undelivered event, so one that succeeded may run again up to 5 times in all, and `async` entries start only on the pass that ends the event; hooks deduplicate on `event_id`); an `async` entry's timeout is enforced by a small supervisor process the gateway starts (`sys.executable -I`, no dependency) that outlives review-run |
 | `audit` | `audit.jsonl`, `log.jsonl`, `export` |
 | `runs` | `resume`, `wait`, the refresh of `show`, `cancel`, `reconcile` (finalization by another process, expiry, the label recovery, outbox redelivery), `prune`, `cron` |
-| `plugin/` | the bundled skill and permission profile, located with `importlib.resources.files('review_run') / 'plugin'` |
+| `plugin/` | the bundled skill and permission profile, located with `importlib.resources.files('review_run') / 'plugin'`; it is walked like any plugin directory (user-owned, not group- or world-writable), so an install or checkout made at umask 002 needs `chmod -R g-w`; the refusal has its own message and no copy is made (D-27) |
 
 ## Data model
 

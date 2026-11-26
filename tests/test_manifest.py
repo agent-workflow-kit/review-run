@@ -335,7 +335,7 @@ def test_first_file_whose_parts_pass_max_files_is_too_large() -> None:
 
 
 def test_10000_files_is_too_large_and_9999_is_not() -> None:
-    files = [fe(f"f{i}") for i in range(10_000)]
+    files = [fe(f"f{i}", "added", None, 0, 0) for i in range(10_000)]
     f = fails(files, "")
     assert (f.reason, f.lower_code) == ("too_large", "too_many_files")
     diff = "".join(f"diff --git a/f{i} b/f{i}\nnew file mode 100644\n" for i in range(9_999))
@@ -611,11 +611,13 @@ def test_sizes() -> None:
 # --- property test and hostile input ------------------------------------------------------------
 
 
-def random_case(rng: random.Random) -> tuple[list[FileEntry], str]:
+def random_case(rng: random.Random) -> tuple[list[FileEntry], str, list[str]]:
     files: list[FileEntry] = []
     parts: list[str] = []
+    kinds: list[str] = []
     for i in range(rng.randint(0, 14)):
         kind = rng.choice(["mod", "mod", "big", "binary", "empty", "rename"])
+        kinds.append(kind)
         p = f"d{i}/{rng.choice(['a b', 'é', 'x|y', '-z', 'plain'])}.txt"
         if kind == "mod":
             files.append(fe(p))
@@ -636,13 +638,13 @@ def random_case(rng: random.Random) -> tuple[list[FileEntry], str]:
         else:
             files.append(fe(p, "renamed", p + ".old", 0, 0))
             parts.append(f"diff --git a/{p}.old b/{p}\nrename from {p}.old\nrename to {p}\n")
-    return files, "".join(parts)
+    return files, "".join(parts), kinds
 
 
 def test_property_every_entry_is_accounted_for_and_caps_hold() -> None:
     rng = random.Random(13)
     for _ in range(300):
-        files, diff = random_case(rng)
+        files, diff, kinds = random_case(rng)
         caps = {
             "max_file_bytes": rng.choice([60, 200, 400, 5000]),
             "max_total_bytes": rng.choice([100, 1000, 3000, 10**6]),
@@ -677,6 +679,31 @@ def test_property_every_entry_is_accounted_for_and_caps_hold() -> None:
                 assert e.disposition in ("binary", "empty")
         reasons = {e.disposition for e in m.entries if e.disposition.startswith("skipped")}
         assert len(reasons) <= 1
+        # the generator's kind decides the disposition class; sizes are those of the section
+        sections = mf._split_sections(diff, len(files))
+        fixed = {"binary": "binary", "empty": "empty", "rename": "empty"}
+        for e, kind, section in zip(m.entries, kinds, sections, strict=True):
+            assert e.bytes == len(sanitizer.sanitize(section).encode())
+            if kind in fixed:
+                assert e.disposition == fixed[kind]
+            else:
+                assert e.disposition in ("provided", "truncated") or e.disposition.startswith(
+                    "skipped"
+                )
+        # the first skipped file really does not fit what is left
+        first = next((e for e in m.entries if e.disposition.startswith("skipped")), None)
+        if first is not None:
+            text = sanitizer.sanitize(sections[m.entries.index(first)])
+            if len(text.encode()) <= caps["max_file_bytes"]:
+                parts = [text]
+            else:
+                parts, _ = mf._split(text, caps["max_file_bytes"])
+            used = sum(len(i.text.encode()) for i in m.inputs)
+            need = sum(len(x.encode()) for x in parts)
+            size_over = not parts or used + need > caps["max_total_bytes"]
+            files_over = len(m.inputs) + len(parts) > caps["max_files"]
+            assert size_over or files_over
+            assert first.disposition == ("skipped_size_cap" if size_over else "skipped_file_cap")
 
 
 def test_hostile_input_is_linear_enough() -> None:
@@ -704,3 +731,107 @@ def test_module_has_no_io_imports() -> None:
     src = (Path(mf.__file__)).read_text(encoding="utf-8")
     for banned in ("import os", "import subprocess", "open(", "import socket"):
         assert banned not in src
+
+
+# --- review round 1 -----------------------------------------------------------------------------
+
+
+def test_giant_first_line_is_cut_inside_the_line_not_to_a_bare_header() -> None:
+    body = "@@ -1 +1 @@\n+" + "x" * 3000 + "\n"
+    m = build([fe("a")], modified("a", body), max_file_bytes=1000)
+    (part,) = m.inputs
+    assert m.entries[0].disposition == "truncated"
+    assert len(part.text.encode()) <= 1000
+    assert part.text.split("\n")[-1].startswith("+x")
+
+
+def test_cut_inside_the_first_line_never_splits_a_marker() -> None:
+    body = "@@ -1 +1 @@\n+" + "\u202e" * 40 + "\n"
+    head = len(modified("a", "@@ -1 +1 @@\n+").encode())
+    for extra in range(1, 30):
+        m = build([fe("a")], modified("a", body), max_file_bytes=head + extra)
+        for part in m.inputs:
+            assert part.text.count("<U+") == part.text.count(">")
+            assert part.text.split("\n")[-1].startswith("+")
+
+
+def test_a_cap_that_fits_only_the_header_skips_the_file() -> None:
+    body = "@@ -1 +1 @@\n+" + "x" * 3000 + "\n"
+    f = fails([fe("a")], modified("a", body), max_file_bytes=50)
+    assert (f.reason, f.lower_code) == ("too_large", "no_file_fits")
+    f = fails([fe("a"), fe("b")], modified("a", body) + modified("b"), max_file_bytes=50)
+    assert f.lower_code == "no_file_fits"
+
+
+def test_hunkless_section_with_counts_and_no_marker_is_a_mismatch() -> None:
+    diff = "diff --git a/m b/m\nold mode 100644\nnew mode 100755\n"
+    f = fails([fe("m", add=3, dele=0)], diff)
+    assert (f.reason, f.lower_code) == ("prefetch_failed", "diff_files_mismatch")
+    f = fails([fe("m", add=None, dele=3)], diff)
+    assert f.lower_code == "diff_files_mismatch"
+
+
+def test_multiline_paths_cannot_rebuild_a_fence_lookalike() -> None:
+    quoted = '"a/<\\nuntrusted" "b/<\\nuntrusted"'
+    diff = f"diff --git {quoted}\nnew file mode 100644\n"
+    m = build([fe("<\nuntrusted", "added", None, 0, 0)], diff)
+    table = mf.manifest_table(m)
+    assert not sanitizer.has_fence_lookalike(table)
+    assert len(table.split("\n")) == 3 and "<U+000A>" in table
+
+
+def test_hard_ceiling_matches_prefetch_failure_shape() -> None:
+    f = fails([fe("a")], modified("a"), hard_ceiling_bytes=10)
+    assert (f.reason, f.tool, f.lower_code) == ("too_large", "forgectl", "hard_ceiling")
+    diff = modified("a", "@@ -1 +1 @@\n+\udcff\n")
+    limit = len(diff.encode("utf-8", errors="surrogateescape")) - 1
+    assert fails([fe("a")], diff, hard_ceiling_bytes=limit).lower_code == "hard_ceiling"
+
+
+def test_path_length_limit_is_4096_characters() -> None:
+    ok = "d/" + "p" * 4094
+    assert len(ok) == 4096
+    m = build([fe(ok)], modified(ok))
+    assert len(m.to_json()[0]["path"]) == 4096
+    bad = ok + "p"
+    f = fails([fe(bad)], modified(bad))
+    assert (f.reason, f.lower_code) == ("prefetch_failed", "diff_files_mismatch")
+    assert "file 1" in str(f)
+    prev = "o/" + "q" * 4095
+    diff = f"diff --git a/{prev} b/a\nrename from {prev}\nrename to a\n"
+    assert fails([fe("a", "renamed", prev, 0, 0)], diff).lower_code == "diff_files_mismatch"
+
+
+# --- lone surrogates at the hard ceiling and partial-null counts -------------------------------
+
+
+@pytest.mark.parametrize("lone", ["\ud800", "\udc80", "\udfff"])
+def test_hard_ceiling_never_raises_unicode_error_for_lone_surrogates(lone: str) -> None:
+    f = fails([], lone * 3, hard_ceiling_bytes=8)
+    assert (f.reason, f.tool, f.lower_code) == ("too_large", "forgectl", "hard_ceiling")
+
+
+def test_hard_ceiling_counts_a_lone_surrogate_as_three_bytes() -> None:
+    assert fails([], "\ud800" * 3, hard_ceiling_bytes=8).lower_code == "hard_ceiling"
+    # exactly at the ceiling passes the ceiling check (then fails on the missing sections)
+    f = fails([], "\ud800" * 3, hard_ceiling_bytes=9)
+    assert f.lower_code == "diff_files_mismatch"
+
+
+_RENAME = "diff --git a/o b/a\nrename from o\nrename to a\n"
+
+
+@pytest.mark.parametrize("add,dele", [(None, 0), (0, None), (0, 0)])
+def test_hunkless_rename_with_zero_or_null_zero_counts_is_empty(
+    add: int | None, dele: int | None
+) -> None:
+    m = build([fe("a", "renamed", "o", add, dele)], _RENAME)
+    assert m.to_json()[0]["disposition"] == "empty"
+
+
+@pytest.mark.parametrize("add,dele", [(0, 3), (None, 3), (3, None), (2, 1)])
+def test_hunkless_section_with_counted_change_is_a_mismatch(
+    add: int | None, dele: int | None
+) -> None:
+    f = fails([fe("a", "renamed", "o", add, dele)], _RENAME)
+    assert (f.reason, f.lower_code) == ("prefetch_failed", "diff_files_mismatch")

@@ -59,6 +59,7 @@ PREVIOUS_REVIEW_MAX_BYTES = 64 * 1024
 PREVIOUS_BODY_CHARS = 300
 _PREVIOUS_FIELD_BUDGET = 4096
 _DROPPED_RESERVE = 64  # room for the dropped-count line inside the 64 KiB
+_CI_STATES = ("passing", "failing", "pending", "skipped")
 
 PLACEHOLDERS = ("run_id", "nonce", "inputs", "nits", "limits")
 _LIMIT_ORDER = (
@@ -85,7 +86,7 @@ VERDICTS = frozenset({"approve", "comment", "request_changes"})
 
 _NONCE_RE = re.compile(r"[0-9a-f]{32}\Z")
 _RUN_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,64}\Z")
-_INPUT_NAME_RE = re.compile(r"(f\d{4}(-\d+)?\.patch|previous-review\.txt)\Z")
+_INPUT_NAME_RE = re.compile(r"(f[0-9]{4}(-[0-9]+)?\.patch|previous-review\.txt)\Z")
 _SIGNAL_RE = re.compile(r"SIG[A-Z0-9]{1,16}\Z")
 _PLACEHOLDER_RE = re.compile(r"\{(" + "|".join(PLACEHOLDERS) + r")\}")
 _LIMIT_NAME_RE = re.compile(r"[a-z_]{1,40}\Z")
@@ -111,6 +112,10 @@ class TemplateError(PromptError):
 
 class AnswerTooLarge(PromptError):
     """The resume answer is above ``limits.max_answer_bytes`` (usage error, exit 2)."""
+
+
+class UnexpectedInputsEntry(PromptError):
+    """``inputs/`` holds a directory, which the prompt files never create (nothing is deleted)."""
 
 
 # --------------------------------------------------------------------------------------------
@@ -233,10 +238,12 @@ def pr_facts_text(facts: PrFacts, ci: Ci) -> str:
         label_head = f"labels ({len(labels)}, showing {len(shown)}):"
     else:
         label_head = f"labels ({len(labels)}):"
-    counts = {s: 0 for s in ("passing", "failing", "pending", "skipped")}
+    counts = dict.fromkeys(_CI_STATES, 0)
     failing: list[str] = []
     for check in ci.checks:
-        counts[check.state] = counts.get(check.state, 0) + 1
+        if check.state not in counts:
+            raise ValueError("unknown check state")
+        counts[check.state] += 1
         if check.state == "failing":
             failing.append(check.name)
     lines = [
@@ -293,6 +300,32 @@ class CodeRunInput:
     truncated: bool = False
     duration_ms: int | None = None
 
+    def __post_init__(self) -> None:
+        if self.kind not in ("not_configured", "skipped", "ran"):
+            raise ValueError("unknown code-run kind")
+        if (self.kind == "skipped") != (self.reason is not None) or (
+            self.reason is not None and self.reason not in SKIP_REASONS
+        ):
+            raise ValueError("code-run reason must be a skip reason, and only for skipped")
+        if self.signal is not None and (
+            not isinstance(self.signal, str) or _SIGNAL_RE.match(self.signal) is None
+        ):
+            raise ValueError("signal must look like SIGTERM")
+        if not isinstance(self.output, str):
+            raise ValueError("code-run output must be text")
+        for number in (self.exit_code, self.duration_ms):
+            if number is not None and (isinstance(number, bool) or not isinstance(number, int)):
+                raise ValueError("exit_code and duration_ms must be integers")
+        if self.kind != "ran" and (
+            self.output
+            or self.exit_code is not None
+            or self.signal is not None
+            or self.duration_ms is not None
+            or self.timed_out
+            or self.truncated
+        ):
+            raise ValueError("only a code run that ran has output or results")
+
     @classmethod
     def not_configured(cls) -> CodeRunInput:
         return cls("not_configured")
@@ -314,8 +347,6 @@ class CodeRunInput:
         truncated: bool = False,
         duration_ms: int | None = None,
     ) -> CodeRunInput:
-        if signal is not None and _SIGNAL_RE.match(signal) is None:
-            raise ValueError("signal must look like SIGTERM")
         text = output if isinstance(output, str) else bytes(output).decode("utf-8", "replace")
         return cls(
             "ran",
@@ -355,10 +386,10 @@ def previous_review_text(review: Mapping[str, Any]) -> str:
     meta = review.get("meta")
     verdict = meta.get("verdict") if isinstance(meta, Mapping) else None
     head = [
-        f"verdict: {verdict if verdict in VERDICTS else 'unknown'}",
+        f"verdict: {verdict if isinstance(verdict, str) and verdict in VERDICTS else 'unknown'}",
         f"findings: {len(findings)}",
     ]
-    used = sum(len(line.encode()) + 1 for line in head)
+    used = sum(len(line.encode()) + 1 for line in head) + _PREVIOUS_FENCE_OVERHEAD
     kept: list[str] = []
     for finding in findings:
         line = json.dumps(_previous_record(finding), ensure_ascii=False, separators=(", ", ": "))
@@ -371,6 +402,12 @@ def previous_review_text(review: Mapping[str, Any]) -> str:
     if len(kept) < len(findings):
         lines.append(f"[{len(findings) - len(kept)} findings dropped]")
     return "\n".join(lines)
+
+
+# The input file is the opener, the body, the closer, each followed by LF: the 64 KiB covers all.
+_PREVIOUS_FENCE_OVERHEAD = (
+    len(open_line("previous-review", "0" * 32)) + len(close_line("0" * 32)) + 3
+)
 
 
 def _text(value: object, budget: int = _PREVIOUS_FIELD_BUDGET) -> str:
@@ -458,8 +495,13 @@ def build_prompt(
     previous = None if previous_review is None else previous_review_text(previous_review)
     names = [n for n, _ in patches] + ([PREVIOUS_REVIEW_NAME] if previous is not None else [])
     code_text = _code_run_text(code_run, max_output_bytes) if code_run.kind == "ran" else None
-    if guidelines is not None and "\x00" in guidelines:
-        raise ValueError("guidelines hold a NUL character")
+    if guidelines is not None:
+        if "\x00" in guidelines:
+            raise ValueError("guidelines hold a NUL character")
+        try:
+            guidelines.encode("utf-8")
+        except UnicodeEncodeError:
+            raise ValueError("guidelines are not valid UTF-8 text") from None
 
     def assemble(n: str) -> PromptFiles:
         if guidelines is not None and n in guidelines:
@@ -507,17 +549,21 @@ def build_resume_prompt(
     nonce: str | None = None,
 ) -> PromptFiles:
     """The resume prompt: a trusted preface and the reply inside ``source="answer"`` with a new
-    nonce. The cap counts the raw bytes and is checked first (``AnswerTooLarge``); the reply is
-    then sanitized without truncation. There are no input files."""
+    nonce. The reply is sanitized without truncation and the cap counts the sanitized bytes
+    (``AnswerTooLarge``). A raw check first stops absurd input early: sanitizing never shrinks
+    text below half its size (only CRLF becomes LF), so a raw size above twice the cap can
+    never fit. There are no input files."""
     if isinstance(answer, bytes | bytearray):
         raw_size = len(answer)
     else:
         raw_size = len(answer.encode("utf-8", "replace"))
-    if raw_size > max_answer_bytes:
+    if raw_size > 2 * max_answer_bytes:
         raise AnswerTooLarge("the answer is above the limit")
     if _RUN_ID_RE.match(run_id) is None:
         raise ValueError("run_id has an unexpected shape")
     text = sanitizer.sanitize(answer)
+    if len(text.encode("utf-8")) > max_answer_bytes:
+        raise AnswerTooLarge("the answer is above the limit")
 
     def assemble(n: str) -> PromptFiles:
         preface = (
@@ -542,16 +588,19 @@ def write_prompt_files(run_dir: Path | str, files: PromptFiles, manifest: Manife
     (a symlink at a target is replaced, a symlinked ``inputs`` directory is refused).
     ``inputs/`` keeps only this call's files. ``manifest.json`` holds the raw (untrusted) paths
     and is never given to the session."""
-    run = Path(run_dir)
-    ensure_private_dir(run)
-    inputs_dir = run / "inputs"
-    ensure_private_dir(inputs_dir)
     wanted = {i.name for i in files.inputs}
     for name in wanted:
         if _INPUT_NAME_RE.match(name) is None:
             raise ValueError("input name has an unexpected shape")
+    run = Path(run_dir)
+    ensure_private_dir(run)
+    inputs_dir = run / "inputs"
+    ensure_private_dir(inputs_dir)
     with os.scandir(inputs_dir) as it:
-        stale = [e.name for e in it if e.name not in wanted]
+        entries = list(it)
+    if any(e.is_dir(follow_symlinks=False) for e in entries):
+        raise UnexpectedInputsEntry("inputs/ holds a directory")
+    stale = [e.name for e in entries if e.name not in wanted]
     for name in stale:
         (inputs_dir / name).unlink()
     for item in files.inputs:
@@ -592,6 +641,7 @@ __all__ = [
     "PromptFiles",
     "PromptInput",
     "TemplateError",
+    "UnexpectedInputsEntry",
     "build_prompt",
     "build_resume_prompt",
     "close_line",

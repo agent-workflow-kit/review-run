@@ -33,7 +33,7 @@ MARKER = "PLANTED-MARKER-7f3a"
 PINNED = Path(__file__).resolve().parent / "pinned_schemas"
 
 
-class _Routed(gw.SystemGateway):
+class _Routed:
     """Send ``forgectl``/``pr-comment`` to the fake wrappers (the proc guard refuses bare names)."""
 
     def __init__(self, fb: FakeBin) -> None:
@@ -60,6 +60,18 @@ class _Routed(gw.SystemGateway):
             cwd=str(self.fb.dir),
             term_grace=term_grace,
         )
+
+    def spawn_detached(
+        self,
+        argv: Sequence[str],
+        *,
+        timeout: float,
+        stdin: str | None = None,
+        env: Mapping[str, str] | None = None,
+        cwd: str | None = None,
+        term_grace: float = 0.0,
+    ) -> gw.DetachedHandle:
+        raise AssertionError(f"pre-fetch must not spawn a detached process: {argv[0]!r}")
 
 
 @pytest.fixture
@@ -487,7 +499,7 @@ def override(
             if isinstance(answer, GatewayError):
                 raise answer
             return answer
-        assert not isinstance(base, Exception)
+        assert not isinstance(base, (GatewayError, OSError, RuntimeError))
         return base(call) if callable(base) else base
 
     fake.scripts[tool] = [run]

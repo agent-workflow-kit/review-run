@@ -5,6 +5,10 @@ randomness, so the same input always gives the same output. The caller (the run 
 writes ``manifest.json`` and the ``inputs/*.patch`` files, adds the fence lines (#14) and renders
 ``manifest_table`` inside the ``manifest`` fence.
 
+Scope: #14 writes ``inputs/*.patch`` and ``manifest.json`` (from ``Manifest.to_json()``), adds the
+fences, the nonce and the meta; #18 wires ``build_manifest`` into the run orchestration (it is not
+called from ``prefetch()`` yet).
+
 Public API::
 
     build_manifest(files, diff, *, max_file_bytes, max_total_bytes, max_files,
@@ -39,6 +43,7 @@ from review_run.sanitizer import sanitize
 MAX_FILES_IN_PR = 9999
 PATH_BUDGET = 4096  # interface.md, Prompt files: each manifest path
 SKIPPED_ROWS_SHOWN = 50
+MAX_PATH_CHARS = 4096  # schemas/defs.json manifest_entry: path and old_path maxLength
 
 PROVIDED = "provided"
 TRUNCATED = "truncated"
@@ -51,6 +56,8 @@ _DISPLAY = {
     SKIPPED_SIZE_CAP: "skipped(size_cap)",
     SKIPPED_FILE_CAP: "skipped(file_cap)",
 }
+# todo(#18): finalize reads manifest.json dicts only; expose a public Manifest.from_json /
+# coverage-from-entries helper so it does not need a Manifest object.
 _COVERAGE_REASON = {
     TRUNCATED: "truncated",
     SKIPPED_SIZE_CAP: "size_cap",
@@ -156,8 +163,11 @@ class Manifest:
 # --------------------------------------------------------------------------------------------
 
 
-def _mismatch() -> PrefetchFailure:
-    return PrefetchFailure(PREFETCH_FAILED, lower_code="diff_files_mismatch")
+def _mismatch(detail: str | None = None) -> PrefetchFailure:
+    failure = PrefetchFailure(PREFETCH_FAILED, lower_code="diff_files_mismatch")
+    if detail:  # closed words and a file number only, never a path
+        failure.args = (f"{failure.args[0]}: {detail}",)
+    return failure
 
 
 def _too_large(code: str) -> PrefetchFailure:
@@ -395,6 +405,24 @@ def _cut(text: str, limit: int) -> str:
     return prefix
 
 
+def _cut_hunk(unit: str, limit: int) -> str:
+    """``_cut`` for one oversize hunk unit (the file header may precede its ``@@ `` line): the
+    result always holds at least one content byte after the ``@@ `` line, or is empty when not
+    even that fits. When no whole content line fits, the first one is cut on a character
+    boundary (never inside a ``<U+XXXX>`` marker)."""
+    at = 0 if unit.startswith(_HUNK) else unit.find("\n" + _HUNK) + 1
+    nl = unit.find("\n", at)
+    head_len = len(unit) if nl < 0 else nl + 1
+    piece = _cut(unit, limit)
+    if len(piece) > head_len:
+        return piece
+    room = limit - _size(unit[:head_len])
+    if room <= 0:
+        return ""
+    body = _cut(unit[head_len:], room)
+    return unit[:head_len] + body if body else ""
+
+
 def _units(text: str) -> list[str]:
     """Split at hunk starts; the header block travels with the first hunk."""
     starts: list[int] = []
@@ -415,7 +443,8 @@ def _units(text: str) -> list[str]:
 def _split(text: str, limit: int) -> tuple[list[str], bool]:
     """The parts of a sanitized patch of more than ``limit`` bytes: whole hunks packed greedily
     into parts of at most ``limit`` bytes; a hunk above ``limit`` gets a part of its own, cut at
-    a line boundary (the rest is dropped), and the file is truncated."""
+    a line boundary (inside its first line when none fits; nothing when not even one content byte
+    fits after the header), the rest is dropped, and the file is truncated."""
     parts: list[str] = []
     cur: list[str] = []
     cur_bytes = 0
@@ -426,7 +455,7 @@ def _split(text: str, limit: int) -> tuple[list[str], bool]:
             if cur:
                 parts.append("".join(cur))
                 cur, cur_bytes = [], 0
-            piece = _cut(unit, limit)
+            piece = _cut_hunk(unit, limit)
             truncated = True
             if piece:
                 parts.append(piece)
@@ -466,19 +495,30 @@ def build_manifest(
     parts all come out empty (a cap smaller than one character) is skipped as ``size_cap``.
     Sizes are UTF-8 bytes of the sanitized text. Nothing provided with something skipped raises
     ``too_large``; nothing provided with only ``binary`` and ``empty`` entries (or no files at
-    all) is a valid, empty result.
+    all) is a valid, empty result. A section with no hunk is ``binary`` (a binary marker, or
+    both counts null), ``empty`` (no change counted: each count 0 or null) or a
+    ``diff_files_mismatch`` (a count above 0: the diff lacks the patch forgectl counted). A path
+    or previous path above 4096 characters is a
+    ``diff_files_mismatch`` too (it could not be written to ``manifest.json``).
     """
     if len(files) > MAX_FILES_IN_PR:
         raise _too_large("too_many_files")
-    if len(diff.encode("utf-8", errors="replace")) > hard_ceiling_bytes:
-        raise _too_large("hard_ceiling")
+    if len(diff.encode("utf-8", errors="surrogatepass")) > hard_ceiling_bytes:
+        raise PrefetchFailure(TOO_LARGE, tool="forgectl", lower_code="hard_ceiling")
     raws = _split_sections(diff, len(files))
     headers = []
-    for entry, raw in zip(files, raws, strict=True):
+    for number, (entry, raw) in enumerate(zip(files, raws, strict=True), start=1):
         header = _parse_header(raw.replace("\r\n", "\n"))
+        if len(entry.path) > MAX_PATH_CHARS or (
+            entry.previous_path is not None and len(entry.previous_path) > MAX_PATH_CHARS
+        ):
+            raise _mismatch(f"path of file {number} is longer than {MAX_PATH_CHARS} characters")
         want_old = entry.previous_path if entry.previous_path is not None else entry.path
         if any(p != entry.path for p in header.new) or any(p != want_old for p in header.old):
             raise _mismatch()
+        if not header.has_hunk and not header.binary_marker:
+            if (entry.additions or 0) + (entry.deletions or 0) > 0:
+                raise _mismatch(f"file {number} has counted changes but no patch")
         headers.append(header)
 
     entries: list[ManifestEntry] = []
@@ -492,7 +532,7 @@ def build_manifest(
         names: tuple[str, ...] = ()
         if not header.has_hunk:
             nulls = entry.additions is None and entry.deletions is None
-            disposition = BINARY if (nulls or header.binary_marker) else EMPTY
+            disposition = BINARY if (nulls or header.binary_marker) else EMPTY  # counts checked
         elif stop is not None:
             disposition = stop
         else:
@@ -535,8 +575,12 @@ def build_manifest(
 
 
 def _cell(value: str, budget: int | None = None) -> str:
-    """One table cell: sanitized with ``|`` marked as ``<U+007C>``, on one line."""
-    return sanitize(value, budget=budget, mark_extra="|").replace("\n", " ")
+    """One table cell: sanitized with ``|`` and LF marked (``<U+007C>``, ``<U+000A>``) before
+    anything can be neutralized, so the cell is one line and no fence look-alike can be
+    rebuilt. Only the sanitizer's own ``[... N bytes omitted ...]`` line breaks remain; each is
+    followed by the ``[...`` of that line, so replacing them with a space joins no ``<`` to
+    ``untrusted``."""
+    return sanitize(value, budget=budget, mark_extra="|\n").replace("\n", " ")
 
 
 def manifest_table(manifest: Manifest) -> str:

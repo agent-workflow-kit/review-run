@@ -32,7 +32,7 @@ from .config_semantic import _plugin_name as plugin_name
 from .errors import ReviewRunError
 from .fsmodes import DIR_MODE, create_private_file, ensure_private_dir
 from .plugin_hash import PluginTreeError, plugin_dirs_sha256
-from .prefetch import PrFacts, check_pr_argument, resolve_pr, strict_json
+from .prefetch import PrFacts, check_pr_argument, resolve_pr
 from .settings import (
     ProfilePlan,
     RunSettings,
@@ -40,6 +40,7 @@ from .settings import (
     effective_profile,
     launch_env,
     launch_flags,
+    strict_finite_json,
 )
 from .store import Run, Store, default_state_root, ensure_state_root
 
@@ -56,7 +57,7 @@ VERSION_TIMEOUT: Final = 15.0
 DRY_RUN_TIMEOUT: Final = 60.0
 PLACEHOLDER_RUN_ID: Final = "rr-aaaaaaaa"  # the dry run names no real run: none exists yet
 _VERSION_RE: Final = re.compile(
-    r"[A-Za-z][A-Za-z0-9_-]* v?([0-9]{1,6})\.([0-9]{1,6})\.([0-9]{1,6})"
+    r"([A-Za-z][A-Za-z0-9_-]*) v?([0-9]{1,6})\.([0-9]{1,6})\.([0-9]{1,6})", re.ASCII
 )
 _REPO_URL: Final = "https://github.com/agent-workflow-kit/"
 
@@ -139,7 +140,9 @@ def check_override(request: RunRequest, *, stdin_is_tty: bool) -> None:
 
 def check_previous(root: Path, ref: str) -> Run:
     """``--previous``: an unknown or pruned run exits 10, a run that is not ``done`` exits 2
-    (``previous_not_done``, ``details.state``). Reads the store only when it exists."""
+    (``previous_not_done``, ``details.state``). Reads the store only when it exists and the
+    state root is safe (an unsafe one is ``state_unsafe``)."""
+    check_state_root(root)
     if not (Path(root) / "state.db").is_file():
         # Still validate the reference's shape so a malformed one is a usage error.
         _shape_only(ref)
@@ -171,11 +174,17 @@ def _shape_only(ref: str) -> None:
 # -- step 1 (b): tools and state ----------------------------------------------------------------
 
 
-def parse_version(text: str) -> Version | None:
-    """``<tool> X.Y.Z`` (the first line of ``--version``) as a tuple, else ``None``."""
-    first = text.strip().splitlines()[0] if text.strip() else ""
-    match = _VERSION_RE.match(first)
-    return None if match is None else (int(match[1]), int(match[2]), int(match[3]))
+def parse_version(text: str, tool: str | None = None) -> Version | None:
+    """``<tool> [v]X.Y.Z`` (the whole first line of ``--version``) as a tuple, else ``None``.
+
+    Each number has one to six digits; a prerelease or build suffix, an extra part or a longer
+    number makes the line unparsable (never truncated). With ``tool`` given, the leading name
+    must be that tool."""
+    first = text.strip().splitlines()[0].strip() if text.strip() else ""
+    match = _VERSION_RE.fullmatch(first)
+    if match is None or (tool is not None and match[1] != tool):
+        return None
+    return (int(match[2]), int(match[3]), int(match[4]))
 
 
 def _lower_failed(tool: str, lower_code: str) -> ReviewRunError:
@@ -221,7 +230,7 @@ def check_tools(required: Sequence[str] = REQUIRED_TOOLS) -> dict[str, Version |
     outputs = {tool: tool_version(tool) for tool in required}
     versions: dict[str, Version | None] = {}
     for tool, text in outputs.items():
-        found = parse_version(text)
+        found = parse_version(text, tool)
         versions[tool] = found
         minimum = MIN_VERSIONS.get(tool)
         if minimum is None:
@@ -243,16 +252,21 @@ def check_tools(required: Sequence[str] = REQUIRED_TOOLS) -> dict[str, Version |
     return versions
 
 
-def check_state_root(root: Path) -> None:
-    """A state root that is a symlink or not owned by the user is ``state_unsafe`` (exit 12).
-    A root that does not exist yet is fine: nothing is created here."""
+def state_root_is_unsafe(root: Path) -> bool:
+    """The test of ``check_state_root`` without raising."""
     try:
         info = os.lstat(root)
     except FileNotFoundError:
-        return
+        return False
     except OSError:
-        raise ReviewRunError("failed", "state path is unsafe", reason="state_unsafe") from None
-    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid():
+        return True
+    return not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid()
+
+
+def check_state_root(root: Path) -> None:
+    """A state root that is a symlink or not owned by the user is ``state_unsafe`` (exit 12).
+    A root that does not exist yet is fine: nothing is created here."""
+    if state_root_is_unsafe(root):
         raise ReviewRunError("failed", "state path is unsafe", reason="state_unsafe")
 
 
@@ -316,6 +330,28 @@ def plugin_dirs_for(skill: str, plugin_dirs: Sequence[str]) -> tuple[str, ...]:
     return tuple(sorted(passed, key=os.fsencode))
 
 
+_BUNDLED_REFUSALS: Final = {
+    "writable": "the bundled plugin directory is writable by group or others "
+    "(an install or checkout made at umask 002 needs chmod -R g-w)",
+    "foreign_owner": "the bundled plugin directory is owned by someone else",
+}
+
+
+def _bundled_refusal(directories: Sequence[str], exc: PluginTreeError) -> None:
+    """Raise a message of its own when the refused tree is the bundled plugin directory (the
+    user did not configure it, so ``plugin_dirs`` is not to blame)."""
+    if exc.reason not in _BUNDLED_REFUSALS:
+        return
+    bundled = os.path.realpath(run_settings.bundled_plugin_dir())
+    if bundled not in {os.path.realpath(d) for d in directories}:
+        return
+    try:
+        plugin_dirs_sha256([bundled])
+    except PluginTreeError as own:
+        if own.reason in _BUNDLED_REFUSALS:
+            raise ReviewRunError("config_invalid", _BUNDLED_REFUSALS[own.reason]) from None
+
+
 def hash_plugin_dirs(directories: Sequence[str]) -> str:
     """``plugin_dirs_sha256`` of the directories; a refused entry (a symlink, a foreign owner,
     group or world write, a special file, an oversize tree) is ``config_invalid`` (exit 2,
@@ -323,6 +359,7 @@ def hash_plugin_dirs(directories: Sequence[str]) -> str:
     try:
         return plugin_dirs_sha256(directories)
     except PluginTreeError as exc:
+        _bundled_refusal(directories, exc)
         raise ReviewRunError(
             "config_invalid",
             f"a plugin directory holds a refused entry ({exc.reason})",
@@ -332,6 +369,7 @@ def hash_plugin_dirs(directories: Sequence[str]) -> str:
 
 # -- step 2: agent-spawn's dry run ---------------------------------------------------------------
 
+_SIBLINGS: Final = (*REQUIRED_TOOLS, "wtctl", "termctl")
 _AGENT_SPAWN_REFUSALS: Final = frozenset(
     {"third_party_cwd", "third_party_run", "live", "tearing_down"}
 )
@@ -339,7 +377,7 @@ _AGENT_SPAWN_REFUSALS: Final = frozenset(
 
 def _envelope(stdout: str) -> dict[str, Any] | None:
     try:
-        doc = strict_json(stdout)
+        doc = strict_finite_json(stdout)
     except (ValueError, RecursionError):
         return None
     error = doc.get("error") if isinstance(doc, dict) else None
@@ -362,15 +400,20 @@ def map_dry_run(returncode: int, stdout: str) -> None:
     tool = "agent-spawn"
     if returncode == 0:
         try:
-            plan = strict_json(stdout)
+            plan = strict_finite_json(stdout)
         except (ValueError, RecursionError):
             plan = None
-        if not isinstance(plan, dict):
+        if (
+            not isinstance(plan, dict)
+            or plan.get("dry_run") is not True
+            or plan.get("would_refuse") is not None
+            or "error" in plan
+        ):
             raise _lower_failed(tool, "invalid_output")
         return
     if returncode == 20:
         try:
-            plan = strict_json(stdout)
+            plan = strict_finite_json(stdout)
         except (ValueError, RecursionError):
             plan = None
         reason = _word(plan.get("would_refuse")) if isinstance(plan, dict) else None
@@ -398,9 +441,9 @@ def map_dry_run(returncode: int, stdout: str) -> None:
             lower_code=lower,
         )
     if returncode == 12 and code == "tool_missing":
-        missing = source if source in (*REQUIRED_TOOLS, "wtctl", "termctl") else tool
+        missing = source if source in _SIBLINGS else tool
         raise _tool_missing(missing)
-    raise _lower_failed(tool, code or lower or "failed")
+    raise _lower_failed(source if source in _SIBLINGS else tool, lower or code or "failed")
 
 
 def launch_dry_run(
@@ -502,10 +545,19 @@ def plan_run(
     config.resolve(None, request.flags())  # a bad flag value is a usage error naming its key
     check_override(request, stdin_is_tty=stdin_is_tty)
     check_labels(request.labels)
-    previous = check_previous(root, request.previous) if request.previous is not None else None
+    # --previous reads the store, so an unsafe state root defers it until the tools and the
+    # state root were checked (tool_missing, then state_unsafe); its shape is checked now.
+    previous: Run | None = None
+    if request.previous is not None:
+        if state_root_is_unsafe(root):
+            _shape_only(request.previous)
+        else:
+            previous = check_previous(root, request.previous)
     # 1 (b) tools and state
     check_tools()
     check_state_root(root)
+    if request.previous is not None and previous is None:
+        previous = check_previous(root, request.previous)
     # 2 resolve, repo checks and preflight
     facts = resolve_pr(request.pr)
     if len(facts.pr) > MAX_PR_LABEL_VALUE:

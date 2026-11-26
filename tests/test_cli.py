@@ -18,8 +18,9 @@ COMMANDS: list[list[str]] = [
     ["cron", "install"],
     ["cron", "uninstall"],
 ]
-# `export` (tests/test_audit.py), `list` and `show` (tests/test_runs.py) are implemented and `run`
-# has its own tests (tests/test_preflight.py); the others are stubs of later issues.
+# `export` (tests/test_audit.py), `list` and `show` (tests/test_runs.py) are implemented and
+# `run` has its own tests (tests/test_preflight.py: its checks reach sibling tools); the others
+# are stubs of later issues.
 
 
 def test_version_prints_version_and_exits_zero(capsys: pytest.CaptureFixture[str]) -> None:
