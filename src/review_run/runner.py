@@ -9,7 +9,7 @@ and removes the prompt files; ``run`` never ends a run it does not hold the leas
 Seams, each with its owner:
 
 * ``finalize`` (a ``done`` session): the pipeline of ``finalize`` (#19) with ``Options.seams``
-  for the checks that other issues own (TODO(#21): ``Seams.derive``, TODO(#22)). While a seam
+  for the checks that other issues own (``Seams.derive`` is #21's, TODO(#22)). While a seam
   is missing
   the default leaves the run ``running`` in phase ``session`` (its agent and ``awaited_run``
   stored, so ``show``, ``wait`` and ``reconcile`` can finalize it later) and raises ``internal``.
@@ -42,6 +42,7 @@ from .errors import MAX_DECISION_IDS, ReviewRunError
 from .finalize import Seams, finalize_session
 from .keeper import RENEW_FAILURES_LIMIT, LeaseKeeper
 from .manifest import Manifest, build_manifest
+from .meta import production_seams
 from .prefetch import PrefetchFailure, load_previous, persist_prefetch, prefetch
 from .preflight import RunPlan
 from .prompt import (
@@ -112,10 +113,9 @@ FinalizeFn = Callable[["FinalizeRequest"], Run]
 
 
 def default_finalize(request: FinalizeRequest) -> Run:
-    """The finalize pipeline of issue #19. While ``request.seams`` is incomplete (TODO(#21),
-    TODO(#22)) it raises ``internal`` before changing anything: the run stays
-    ``running`` in phase ``session`` with its agent stored, so ``show``, ``wait`` and
-    ``reconcile`` can finalize it later."""
+    """The finalize pipeline of issue #19. While ``request.seams`` is incomplete (TODO(#22)) it
+    raises ``internal`` before changing anything: the run stays ``running`` in phase ``session``
+    with its agent stored, so ``show``, ``wait`` and ``reconcile`` can finalize it later."""
     return finalize_session(request.ender, request.result, request.seams)
 
 
@@ -127,7 +127,7 @@ class Options:
     flag_hooks: Sequence[str] = ()
     no_wait: bool = False
     finalize: FinalizeFn = default_finalize
-    seams: Seams = field(default_factory=Seams)
+    seams: Seams = field(default_factory=production_seams)
     shell: Sequence[str] = hooks.SHELL
     sleep: Callable[[float], None] = time.sleep
     lease_interval: float = float(LEASE_RENEW_SECONDS)

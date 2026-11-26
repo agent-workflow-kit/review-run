@@ -523,6 +523,13 @@ def _read(tool: str, args: list[str], parse: Callable[[Any], Any]) -> Any:
 # --------------------------------------------------------------------------------------------
 
 
+def show_facts(pr: str) -> PrFacts:
+    """``forgectl show <pr> --json`` as closed facts, whatever the PR's state (the end head read of
+    finalize). Raises ``LowerFailure`` (closed codes only)."""
+    facts: PrFacts = _read("forgectl", ["show", pr, "--json"], _parse_show)
+    return facts
+
+
 def check_pr_argument(arg: object) -> str:
     """The shape check of run order step 1: a URL or ``host/<project path>#N``, one line, ASCII.
 
