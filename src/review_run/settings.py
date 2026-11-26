@@ -59,6 +59,11 @@ def bundled_plugin_dir() -> Path:
     return Path(__file__).resolve().parents[2] / "plugin"
 
 
+def bundled_header_template() -> str:
+    """The bundled prompt header template (``plugin/header.md``, rendered by ``prompt``)."""
+    return (bundled_plugin_dir() / "header.md").read_text(encoding="utf-8")
+
+
 def bundled_profile_bytes() -> bytes:
     return (bundled_plugin_dir() / "permission_profile.json").read_bytes()
 
