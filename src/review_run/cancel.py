@@ -46,10 +46,10 @@ from typing import Any, Final
 from . import gateway, procid
 from . import launch as lc
 from .audit import AuditWriter, Caller, LogWriter
-from .ending import Ender
+from .ending import FINALIZER_ACTOR, Ender
 from .errors import ReviewRunError
 from .keeper import LeaseKeeper
-from .runs import SCHEMA_PATTERNS, run_object
+from .runs import SCHEMA_PATTERNS, CorruptRunError, run_object
 from .settings import load_run_settings
 from .store import LEASE_RENEW_SECONDS, Lease, Run, Store, lease_name
 from .waiting import Clock, _LazyHooks, refresh_run, resolve, wait_run
@@ -59,15 +59,46 @@ RUNNER_WAIT_SECONDS: Final = 120.0
 LAUNCHER_WINDOW_SECONDS: Final = 120.0
 POLL_SECONDS: Final = 1.0
 STOP_GRACE: Final = "10s"
-STOP_TIMEOUT: Final = 300.0
+STOP_TIMEOUT: Final = 45.0  # agent-spawn stop's documented bound (10 s grace + 30 s) + margin
+MAX_PID: Final = 2**31
 CANCEL_EXIT: Final = 143
 MAX_ROUNDS: Final = 8
 _TERMINAL: Final = ("done", "failed")
 _CODE_WORD: Final = "abcdefghijklmnopqrstuvwxyz0123456789_"
 
 
-def _kill(pid: int) -> None:
-    os.kill(pid, signal.SIGTERM)
+def _kill(ident: procid.ProcIdentity) -> None:
+    """SIGTERM to exactly the process ``ident`` names. Where pidfds exist (Linux 5.3+) the PID is
+    pinned first, the identity (PID plus start ticks) is verified after that and the signal goes
+    through the pidfd, so a PID reused between the check and the signal is never hit; elsewhere
+    the identity is checked right before ``os.kill``. Never pid <= 0, this process or pid >= 2**31;
+    a process that is already gone is not an error."""
+    pid = ident.pid
+    if not 0 < pid < MAX_PID or pid == os.getpid():
+        return
+    pidfd_open = getattr(os, "pidfd_open", None)
+    pidfd_send = getattr(signal, "pidfd_send_signal", None)
+    fd: int | None = None
+    if pidfd_open is not None and pidfd_send is not None:
+        try:
+            fd = pidfd_open(pid)
+        except ProcessLookupError:
+            return
+        except OSError:
+            fd = None  # pidfds are unavailable here (ENOSYS, EPERM): the fallback below
+    try:
+        if procid.check(ident) is not True:
+            return
+        if fd is not None:
+            assert pidfd_send is not None
+            pidfd_send(fd, signal.SIGTERM)
+        else:
+            os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    finally:
+        if fd is not None:
+            os.close(fd)
 
 
 def _now() -> dt.datetime:
@@ -77,14 +108,15 @@ def _now() -> dt.datetime:
 @dataclass
 class CancelOptions:
     """Who cancels, and the clock, the clock of the wall and the signal sender (tests replace
-    them)."""
+    them). ``kill`` receives the verified identity of the process to SIGTERM; ``None`` is the
+    module's ``_kill``, looked up when it is needed."""
 
     caller: Caller
     dry_run: bool = False
     config_path: Path | None = None
     clock: Clock = field(default_factory=Clock)
     now: Callable[[], dt.datetime] = _now
-    kill: Callable[[int], None] = _kill
+    kill: Callable[[procid.ProcIdentity], None] | None = None
     lease_interval: float = float(LEASE_RENEW_SECONDS)
     shell: tuple[str, ...] | None = None
 
@@ -118,23 +150,36 @@ def _closed_code(doc: dict[str, Any] | None) -> str:
     return "failed"
 
 
-def stop_agent(agent_id: str, actor: str) -> None:
-    """``agent-spawn stop <agent> --grace 10s --actor A --json``. Exit 10 (the agent is gone)
-    continues; any other failure is ``lower_failed`` (exit 12) with the closed code."""
+def stop_agent(agent_id: str, actor: str) -> bool:
+    """``agent-spawn stop <agent> --grace 10s --actor A --json``. ``True`` when the stop
+    succeeded, ``False`` on exit 10 (the agent is gone: the caller continues); any other failure
+    is ``lower_failed`` (exit 12) with the closed code."""
     argv = ["agent-spawn", "stop", agent_id, "--grace", STOP_GRACE, "--actor", actor, "--json"]
     try:
         done = gateway.run(argv, timeout=STOP_TIMEOUT)
     except gateway.GatewayError as exc:
         raise _lower_failed(exc.lower_code) from None
     if done.returncode in (0, 10):
-        return
+        return done.returncode == 0
     raise _lower_failed(_closed_code(lc.parse_document(done.stdout)))
 
 
-def _identity(pid: int | None, start: str | None) -> procid.ProcIdentity | None:
-    if pid is None or start is None or pid == os.getpid():
+def _identity(pid: object, start: object) -> procid.ProcIdentity | None:
+    """The stored identity, or ``None`` for anything that is not a plausible one (a text or bytes
+    value in the INTEGER column, a PID outside 1..2**31-1, no start) and for this process."""
+    if type(pid) is not int or not 0 < pid < MAX_PID or not isinstance(start, str):
+        return None
+    if pid == os.getpid():
         return None  # never this process: it is not another invocation's runner
     return procid.ProcIdentity(pid, start)
+
+
+def _stored_agent(run: Run) -> str | None:
+    """The stored agent id, or ``None`` when absent or not an agent id (it never reaches argv)."""
+    agent = run.agent_id
+    if isinstance(agent, str) and SCHEMA_PATTERNS["agent_id"].fullmatch(agent) is not None:
+        return agent
+    return None
 
 
 def _live(ident: procid.ProcIdentity | None) -> bool:
@@ -153,6 +198,9 @@ class _Cancel:
         self.recorded = False
         self.action = "none"
         self.signaled: set[tuple[str, int]] = set()
+        self.stopped: set[str] = set()  # agent ids this invocation's ``stop`` succeeded for
+        self.gone: set[str] = set()  # agent ids ``stop`` answered 10 for
+        self.look_alike: str | None = None  # a launch.json agent that failed the ownership check
         self.pair_inputs: dict[str, Any] = {}
 
     # -- reading
@@ -170,8 +218,11 @@ class _Cancel:
         return _identity(run.launcher_pid, run.launcher_start)
 
     def launcher_pending(self, run: Run) -> bool:
-        """A launcher whose PID is not stored yet, within the window of its start."""
-        if run.launcher_pid is not None or run.launch_started_at is None:
+        """A launcher whose PID or start is not stored (so it cannot be verified), within the
+        window of its start: never signaled, but the run is not ended before the window ends."""
+        if run.launcher_pid is not None and run.launcher_start is not None:
+            return False
+        if run.launch_started_at is None:
             return False
         try:
             started = dt.datetime.fromisoformat(run.launch_started_at)
@@ -196,6 +247,13 @@ class _Cancel:
         )
         self.pair_inputs = {"agent_id": obj["agent_id"], "state": run.state}
 
+    def last_row(self, known: Run) -> Run:
+        """The stored row, or ``known`` when it cannot be read (the error being reported wins)."""
+        try:
+            return self.row()
+        except ReviewRunError:
+            return known
+
     def close(self, run: Run, error: ReviewRunError | None = None) -> None:
         """Close the pair unless the terminal transaction carried the closing record. Never
         decides the command: a failing audit write is dropped (the opening record stands)."""
@@ -203,7 +261,11 @@ class _Cancel:
             return
         self.pair_closed = True
         if error is not None:
-            result: dict[str, Any] = {"status": "failed", "reason": None, "exit_code": 12}
+            result: dict[str, Any] = {
+                "status": "failed",
+                "reason": None,
+                "exit_code": error.exit_code,
+            }
         elif run.state == "done":
             result = {"status": "done", "reason": None, "exit_code": 0}
         elif run.state == "escalated":
@@ -233,9 +295,10 @@ class _Cancel:
 
     def verdict(self, run: Run) -> str:
         """The ownership verdict of the stored agent (``agent-spawn show``)."""
-        assert run.agent_id is not None
+        agent = _stored_agent(run)
+        assert agent is not None
         found = lc.check_parked(
-            run.agent_id,
+            agent,
             run_id=run.run_id,
             pr=run.pr,
             repo=run.repo,
@@ -247,7 +310,7 @@ class _Cancel:
 
     def decide(self, run: Run) -> str:
         """The one action for the facts now (step 5), without taking it."""
-        if run.agent_id is not None:
+        if _stored_agent(run) is not None:
             return "stop" if self.verdict(run) == "live" else "none"
         if _live(self.runner(run)):
             return "signal_runner"
@@ -256,17 +319,24 @@ class _Cancel:
         return "none"
 
     def act(self, run: Run) -> str:
-        """Take the action ``decide`` chooses; returns its name."""
+        """Take the action ``decide`` chooses; returns its name, or ``live`` when this invocation
+        already stopped the agent and ``show`` still reports it live (no second stop is sent)."""
         chosen = self.decide(run)
         if chosen == "stop":
-            assert run.agent_id is not None
-            stop_agent(run.agent_id, self.caller.actor)
+            agent = _stored_agent(run)
+            assert agent is not None
+            if agent in self.stopped:
+                return "live"
+            if agent not in self.gone and stop_agent(agent, self.caller.actor):
+                self.stopped.add(agent)
+            else:
+                self.gone.add(agent)  # exit 10: gone for agent-spawn, whatever ``show`` says now
         elif chosen in ("signal_runner", "signal_launcher"):
             ident = self.runner(run) if chosen == "signal_runner" else self.launcher(run)
             if ident is not None and (chosen, ident.pid) not in self.signaled and _live(ident):
                 self.signaled.add((chosen, ident.pid))
                 try:
-                    self.opts.kill(ident.pid)
+                    (self.opts.kill or _kill)(ident)
                 except ProcessLookupError:
                     pass
         if self.action == "none":
@@ -299,11 +369,13 @@ class _Cancel:
 
     # -- the steps
 
-    def adopt_agent(self, run: Run, lease: Lease) -> Run:
+    def adopt_agent(self, run: Run, lease: Lease) -> Run | None:
         """An agent id that only ``launch.json`` knows (the runner died after the launcher
-        started it) is stored, so that it is stopped and torn down like a stored one. The
-        ownership check of the labels still applies before anything touches it."""
-        if run.agent_id is not None:
+        started it) is stored, so that it is stopped and torn down like a stored one, but only
+        after the ownership check: a look-alike is never stored (the run ends ``canceled`` with
+        the warning ``agent_mismatch``). ``None`` when the compare-and-set was lost: the caller
+        starts again with the fresh row."""
+        if _stored_agent(run) is not None or self.look_alike is not None:
             return run
         found = lc.interpret_file(self.store.run_dir(run.run_id) / lc.LAUNCH_FILE)
         if found is None:
@@ -312,14 +384,26 @@ class _Cancel:
         if not agent_id or SCHEMA_PATTERNS["agent_id"].fullmatch(agent_id) is None:
             return run
         csession = found.csession_id if found.envelope is None else None
-        self.store.update_fields(
+        verdict = lc.check_parked(
+            agent_id,
+            run_id=run.run_id,
+            pr=run.pr,
+            repo=run.repo,
+            csession_id=csession,
+        )
+        if verdict == "failed":
+            raise _lower_failed("failed")
+        if verdict == "mismatch":
+            self.look_alike = agent_id
+            return run
+        stored = self.store.update_fields(
             run.run_id,
             run.key,
             lease=lease,
             agent_id=agent_id,
             csession_id=csession,
         )
-        return self.row()
+        return self.row() if stored else None
 
     def quiesce(self, run: Run, lease: Lease) -> Run | None:
         """With the lease held: stop or signal whatever is live. ``None`` when a runner or a
@@ -328,8 +412,13 @@ class _Cancel:
             run = self.row()
             if run.state in _TERMINAL:
                 return run
-            run = self.adopt_agent(run, lease)
+            adopted = self.adopt_agent(run, lease)
+            if adopted is None:
+                continue  # the row moved under the adopt: read it again
+            run = adopted
             chosen = self.act(run)
+            if chosen == "live":
+                return None  # stopped by this invocation, still live: the row stays as it is
             if chosen == "signal_runner":
                 if not self.wait_gone(self.runner(run), pending=lambda: False):
                     return None
@@ -361,14 +450,17 @@ class _Cancel:
             hooks_config=hooks,
             lost=keeper.lost.is_set,
             teardown_actor=self.caller.actor,
-            payload_actor=self.caller.actor,
+            payload_actor=run.actor or FINALIZER_ACTOR,  # the stored actor, not the canceler's
             pair_action="cancel",
             pair_inputs=self.pair_inputs,
             **extra,
         )
         stored = ender.row()
         code = stored.cancel_exit_code or CANCEL_EXIT
-        ended = ender.apply_failure(lc.Disposition("fail", "canceled", code))
+        ended = ender.apply_failure(
+            lc.Disposition("fail", "canceled", code, teardown_agent=self.look_alike),
+            verdict="mismatch" if self.look_alike is not None else None,
+        )
         if ender.moved:
             self.pair_closed = True  # the closing record travels with the terminal transaction
             self.recorded = True
@@ -396,13 +488,18 @@ class _Cancel:
 
     def refreshed(self, run: Run) -> Run:
         """Step 2: the refresh of ``show``, an escalated run included."""
-        refresh_run(
-            self.root,
-            run.run_id,
-            by="show",
-            config_path=self.opts.config_path,
-            escalated=True,
-        )
+        try:
+            refresh_run(
+                self.root,
+                run.run_id,
+                by="show",
+                config_path=self.opts.config_path,
+                escalated=True,
+            )
+        except CorruptRunError:
+            raise
+        except ReviewRunError:
+            pass  # as in ``show``: any other refresh failure continues with the stored row
         return self.row()
 
     def drive(self) -> CancelResult:
@@ -454,10 +551,14 @@ def cancel_run(root: Path, ref: str, opts: CancelOptions) -> CancelResult:
         job.begin(run)
         try:
             result = job.drive()
+            final = job.row()
         except ReviewRunError as err:
-            job.close(job.row(), err)
+            job.close(job.last_row(run), err)
             raise
-        final = job.row()
+        except Exception:  # never a traceback and never a pair left open
+            err = ReviewRunError("internal", "cancel failed unexpectedly")
+            job.close(job.last_row(run), err)
+            raise err from None
         job.close(final)
         return CancelResult(final, result.changed, result.action, False)
 

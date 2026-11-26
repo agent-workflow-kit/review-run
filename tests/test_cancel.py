@@ -5,9 +5,12 @@
 from __future__ import annotations
 
 import json
+import os
+import signal
 import subprocess
 import sys
 import threading
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -19,8 +22,58 @@ from review_run.runs import run_object
 from review_run.store import Expect, Run, Store, default_state_root, lease_name
 from tests.conftest import validate_against
 from tests.helpers import Result, run_cli
-from tests.run_helpers import PR_URL, World
+from tests.run_helpers import PR_URL, PY, World
 from tests.test_outcome import FakeClock, live, started, stored
+
+REAL_KILL = cancel_mod._kill  # noqa: SLF001 - the unit tests of the default sender use it
+ORIG_KILL = os.kill
+STARTED: set[int] = set()  # the PIDs of the children these tests started: the only ones to signal
+
+
+def _pidfd_target(fd: int) -> int | None:
+    try:
+        for line in Path(f"/proc/self/fdinfo/{fd}").read_text().splitlines():
+            if line.startswith("Pid:"):
+                return int(line.split()[1])
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+@pytest.fixture(autouse=True)
+def no_real_signals(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The default sender of cancel, and any direct os.kill, os.killpg or pidfd_send_signal call
+    made from review_run.cancel, fail unless the target is a child a test started."""
+
+    def refuse(*_a: Any, **_k: Any) -> None:
+        raise AssertionError("cancel's default signal sender was used without a test seam")
+
+    def from_cancel() -> bool:
+        return sys._getframe(2).f_globals.get("__name__") == "review_run.cancel"  # noqa: SLF001
+
+    real_pidfd = getattr(signal, "pidfd_send_signal", None)
+
+    def guard_kill(pid: int, sig: int) -> None:
+        if from_cancel() and pid not in STARTED:
+            refuse()
+        ORIG_KILL(pid, sig)
+
+    def guard_killpg(pgid: int, sig: int) -> None:
+        if from_cancel():
+            refuse()
+        os.killpg(pgid, sig)  # pragma: no cover
+
+    def guard_pidfd(fd: int, sig: int, *a: Any) -> None:
+        if from_cancel() and _pidfd_target(fd) not in STARTED:
+            refuse()
+        assert real_pidfd is not None
+        real_pidfd(fd, sig, *a)
+
+    monkeypatch.setattr(cancel_mod, "_kill", refuse)
+    monkeypatch.setattr(os, "kill", guard_kill)
+    monkeypatch.setattr(os, "killpg", guard_killpg)
+    if real_pidfd is not None:
+        monkeypatch.setattr(signal, "pidfd_send_signal", guard_pidfd)
 
 
 @pytest.fixture
@@ -118,14 +171,34 @@ def test_a_bad_actor_is_a_usage_error_and_changes_nothing(world: World, cli) -> 
     assert stored(run_id).state == "running" and cancel_records() == []
 
 
-def test_post_run_hook_fires_once_for_a_cancel(world: World, cli) -> None:  # type: ignore[no-untyped-def]
-    run_id = live(cli)
-    cli("cancel", run_id, "--actor", "human:alice")
+def test_post_run_hook_fires_once_for_a_cancel_with_the_stored_actor(world: World, cli) -> None:  # type: ignore[no-untyped-def]
+    out = world.tmp / "hook.jsonl"
+    code = f"import sys;open({str(out)!r},'a').write(sys.stdin.read()+'\\n')"
+    world.config_text += f"hooks:\n  post-run:\n    - cmd: {json.dumps(code)}\n"
+    world.config()
+    res = cli(
+        "--json", "run", PR_URL, "--no-wait", "--actor", "human:starter", "--decision-id", "d-start"
+    )
+    run_id = str(res.envelope()["run_id"])
+    result = cancel_mod.cancel_run(
+        default_state_root(),
+        run_id,
+        cancel_mod.CancelOptions(
+            caller=_caller(),  # human:alice cancels
+            clock=cli.clock.clock(),
+            config_path=world.tmp / "config.yaml",
+            shell=(PY, "-c"),
+        ),
+    )
+    assert result.run.reason == "canceled"
+    payloads = [json.loads(x) for x in out.read_text().splitlines()]
+    assert len(payloads) == 1
+    hook = payloads[0]
+    assert (hook["state"], hook["reason"], hook["exit_code"]) == ("failed", "canceled", 143)
+    assert hook["actor"] == "human:starter" and hook["decision_ids"] == ["d-start"]
+    assert cancel_records()[0]["actor"] == "human:alice"  # the canceler is in the audit record
     with Store.open(default_state_root()) as store:
-        events = store.pending_events(run_id)
-    assert events == []  # delivered
-    log = (default_state_root() / "log.jsonl").read_text()
-    assert "canceled" in log
+        assert store.pending_events(run_id) == []
 
 
 def test_cancel_is_idempotent(world: World, cli) -> None:  # type: ignore[no-untyped-def]
@@ -537,6 +610,7 @@ def dead_pid_identity() -> tuple[int, str]:
 
 def sleeper() -> tuple[subprocess.Popen[bytes], procid.ProcIdentity]:
     proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    STARTED.add(proc.pid)
     threading.Thread(target=proc.wait, daemon=True).start()  # reaped as soon as it ends
     ident = procid.identity_of(proc.pid)
     assert ident is not None
@@ -609,14 +683,10 @@ def test_cancel_signals_a_live_runner_by_its_exact_pid_and_waits_for_it(
         store.update_fields(run_id, row.key, runner_pid=ident.pid, runner_start=ident.start)
     sent: list[int] = []
 
-    def kill(pid: int) -> None:
-        sent.append(pid)
+    def kill(target: procid.ProcIdentity) -> None:
+        sent.append(target.pid)
         proc.terminate()
 
-    monkeypatch.setattr(cancel_mod, "_kill", kill)
-    monkeypatch.setattr(
-        cancel_mod.CancelOptions.__dataclass_fields__["kill"], "default", kill, raising=False
-    )
     result = cancel_mod.cancel_run(
         default_state_root(),
         run_id,
@@ -653,7 +723,7 @@ def test_a_runner_alive_after_the_wait_is_not_ended(world: World, cli) -> None: 
             cancel_mod.CancelOptions(
                 caller=_caller(),
                 clock=cli.clock.clock(),
-                kill=lambda _pid: None,
+                kill=lambda _ident: None,
                 config_path=world.tmp / "config.yaml",  # type: ignore[attr-defined]
             ),
         )
@@ -679,7 +749,9 @@ def test_a_run_is_never_signaled_through_a_reused_pid(world: World, cli) -> None
         result = cancel_mod.cancel_run(
             default_state_root(),
             run_id,
-            cancel_mod.CancelOptions(caller=_caller(), clock=cli.clock.clock(), kill=sent.append),  # type: ignore[attr-defined]
+            cancel_mod.CancelOptions(
+                caller=_caller(), clock=cli.clock.clock(), kill=_record_pid(sent)
+            ),  # type: ignore[attr-defined]
         )
         assert sent == [] and result.run.reason == "canceled"
     finally:
@@ -717,8 +789,8 @@ def test_a_live_launcher_is_signaled_and_a_launch_json_agent_is_adopted_and_stop
     }
     sent: list[int] = []
 
-    def kill(pid: int) -> None:
-        sent.append(pid)
+    def kill(target: procid.ProcIdentity) -> None:
+        sent.append(target.pid)
         proc.terminate()
         (default_state_root() / "runs" / run_id / "launch.json").write_text(json.dumps(launch_doc))
 
@@ -735,6 +807,10 @@ def test_a_live_launcher_is_signaled_and_a_launch_json_agent_is_adopted_and_stop
     assert sent == [ident.pid] and result.action == "signal_launcher"
     assert (result.run.state, result.run.reason) == ("failed", "canceled")
     assert len(calls(world, "stop")) == 1 and agent_status(world, agent) == "torn_down"
+
+
+def _record_pid(sent: list[int]):  # type: ignore[no-untyped-def]
+    return lambda ident: sent.append(ident.pid)
 
 
 def _caller():  # type: ignore[no-untyped-def]
@@ -815,7 +891,7 @@ def test_cancel_never_signals_its_own_process(world: World, cli) -> None:  # typ
     result = cancel_mod.cancel_run(
         default_state_root(),
         run_id,
-        cancel_mod.CancelOptions(caller=_caller(), clock=cli.clock.clock(), kill=sent.append),  # type: ignore[attr-defined]
+        cancel_mod.CancelOptions(caller=_caller(), clock=cli.clock.clock(), kill=_record_pid(sent)),  # type: ignore[attr-defined]
     )
     assert sent == [] and result.run.reason == "canceled"
 
@@ -832,3 +908,254 @@ def test_envelopes_and_logs_carry_no_untrusted_text(world: World, cli) -> None: 
     for name in ("audit.jsonl", "log.jsonl"):
         path = default_state_root() / name
         assert not path.exists() or "SECRET-TEXT" not in path.read_text()
+
+
+# -- round 1 --------------------------------------------------------------------------------------
+
+
+def _stamp(seconds_ago: float = 0.0) -> str:
+    import datetime as dt
+
+    from review_run.store import format_time  # noqa: PLC0415
+
+    return format_time(dt.datetime.now(dt.UTC) - dt.timedelta(seconds=seconds_ago))
+
+
+def _options(world: World, cli, **kw: Any) -> cancel_mod.CancelOptions:  # type: ignore[no-untyped-def]
+    kw.setdefault("kill", _record_pid([]))
+    return cancel_mod.CancelOptions(
+        caller=_caller(),
+        clock=cli.clock.clock(),
+        config_path=world.tmp / "config.yaml",
+        **kw,
+    )
+
+
+def orphan_agent_run(cli, world: World) -> tuple[str, str]:  # type: ignore[no-untyped-def]
+    """A live run whose runner is dead and whose agent only ``launch.json`` knows."""
+    run_id = live(cli)
+    agent = stored(run_id).agent_id or ""
+    csession = stored(run_id).csession_id or ""
+    with Store.open(default_state_root()) as store:
+        row = store.get_run(run_id)
+        assert row is not None
+        store.update_fields(
+            run_id, row.key, runner_pid=dead_pid_identity()[0], runner_start="gone:0"
+        )
+        store._conn.execute(  # noqa: SLF001 - test-only: forget the stored agent
+            "UPDATE runs SET agent_id = NULL, csession_id = NULL WHERE run_id = ?", (run_id,)
+        )
+    launch_doc = {
+        "agent": {"agent_id": agent, "csession_id": csession, "status": "live", "run": 1},
+        "phase": "session",
+        "outcome": None,
+        "run": None,
+    }
+    (default_state_root() / "runs" / run_id / "launch.json").write_text(json.dumps(launch_doc))
+    return run_id, agent
+
+
+def test_a_lost_adopt_compare_and_set_is_retried_with_the_fresh_row(  # F5a
+    world: World, cli, monkeypatch: pytest.MonkeyPatch
+) -> None:  # type: ignore[no-untyped-def]
+    run_id, agent = orphan_agent_run(cli, world)
+    real = Store.update_fields
+    seen: list[str] = []
+
+    def lose_first(self: Store, rid: str, expect: Expect, /, **kw: Any) -> bool:
+        if "agent_id" in kw and not seen:
+            seen.append(kw["agent_id"])
+            return False  # the row moved under the adopt
+        return real(self, rid, expect, **kw)
+
+    monkeypatch.setattr(Store, "update_fields", lose_first)
+    result = cancel_mod.cancel_run(default_state_root(), run_id, _options(world, cli))
+    assert seen == [agent]
+    assert (result.run.state, result.run.reason) == ("failed", "canceled")
+    assert result.run.agent_id == agent and len(calls(world, "stop")) == 1
+    assert agent_status(world, agent) == "torn_down"
+
+
+def test_a_look_alike_launch_json_agent_is_never_stored_or_touched(  # F5b
+    world: World, cli
+) -> None:  # type: ignore[no-untyped-def]
+    run_id, agent = orphan_agent_run(cli, world)
+    state = world.fb.state()
+    state["agents"][agent]["settings"]["labels"] = ["owner=review-run", "run=rr-bbbbbbbb"]
+    world.fb.seed_state(state)
+    result = cancel_mod.cancel_run(default_state_root(), run_id, _options(world, cli))
+    assert (result.run.state, result.run.reason) == ("failed", "canceled")
+    assert result.run.agent_id is None and "agent_mismatch" in result.run.warnings
+    assert calls(world, "stop") == [] and calls(world, "teardown") == []
+    assert agent_status(world, agent) == "live"
+
+
+def test_the_failing_command_closes_its_pair_with_its_own_exit_code_and_a_missing_settings_file_still_records_the_cancellation(  # F7, F11
+    world: World, cli
+) -> None:  # type: ignore[no-untyped-def]
+    run_id = live(cli)
+    (default_state_root() / "runs" / run_id / "settings.json").unlink()
+    res = cli("--json", "cancel", run_id)
+    assert res.code == 1, res.out
+    row = stored(run_id)
+    assert row.cancel_requested_at is not None  # recorded although the refresh failed
+    pair = cancel_records()
+    assert [r["result"]["status"] for r in pair] == ["attempted", "failed"]
+    assert pair[1]["result"]["exit_code"] == 1
+
+
+def test_a_vanished_row_does_not_mask_the_error_and_the_pair_is_closed(  # F8
+    world: World, cli, monkeypatch: pytest.MonkeyPatch
+) -> None:  # type: ignore[no-untyped-def]
+    from review_run.errors import ReviewRunError
+
+    run_id = live(cli)
+
+    def vanish(_agent: str, _actor: str) -> None:
+        with Store.open(default_state_root()) as store:
+            store._conn.execute("DELETE FROM runs WHERE run_id = ?", (run_id,))  # noqa: SLF001
+        raise cancel_mod._lower_failed("failed")  # noqa: SLF001
+
+    monkeypatch.setattr(cancel_mod, "stop_agent", vanish)
+    with pytest.raises(ReviewRunError) as caught:
+        cancel_mod.cancel_run(default_state_root(), run_id, _options(world, cli))
+    assert caught.value.code == "failed"
+    pair = cancel_records()
+    assert [r["result"]["status"] for r in pair] == ["attempted", "failed"]
+    assert pair[1]["result"]["exit_code"] == 12
+
+
+def test_an_unexpected_exception_closes_the_pair_and_is_internal(  # F10c
+    world: World, cli, monkeypatch: pytest.MonkeyPatch
+) -> None:  # type: ignore[no-untyped-def]
+    from review_run.errors import ReviewRunError
+
+    run_id = live(cli)
+
+    def boom(self: Any, run: Run) -> Run:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(cancel_mod._Cancel, "settle", boom)  # noqa: SLF001
+    with pytest.raises(ReviewRunError) as caught:
+        cancel_mod.cancel_run(default_state_root(), run_id, _options(world, cli))
+    assert caught.value.code == "internal"
+    pair = cancel_records()
+    assert [r["result"]["status"] for r in pair] == ["attempted", "failed"]
+    assert pair[1]["result"]["exit_code"] == 1
+
+
+def test_a_corrupt_stored_pid_is_taken_as_no_process(world: World, cli) -> None:  # type: ignore[no-untyped-def]  # F10a
+    run_id = live_run_without_agent(world)
+    with Store.open(default_state_root()) as store:
+        store._conn.execute(  # noqa: SLF001
+            "UPDATE runs SET runner_pid = 'abc', runner_start = 'x', launcher_pid = 'def',"
+            " launcher_start = 'y' WHERE run_id = ?",
+            (run_id,),
+        )
+    result = cancel_mod.cancel_run(default_state_root(), run_id, _options(world, cli))
+    assert (result.run.state, result.run.reason) == ("failed", "canceled")
+    assert [r["result"]["status"] for r in cancel_records()] == ["attempted", "failed"]
+
+
+def test_a_stored_agent_id_that_is_not_an_agent_id_never_reaches_argv(  # F10b
+    world: World, cli
+) -> None:  # type: ignore[no-untyped-def]
+    run_id = live_run_without_agent(world)
+    with Store.open(default_state_root()) as store:
+        store._conn.execute(  # noqa: SLF001
+            "UPDATE runs SET agent_id = '--force' WHERE run_id = ?", (run_id,)
+        )
+    try:
+        result = cancel_mod.cancel_run(default_state_root(), run_id, _options(world, cli))
+    except Exception as err:  # a corrupt row may be refused before any write
+        assert getattr(err, "code", None) == "internal"
+        assert cancel_records() == [] and stored(run_id).cancel_requested_at is None
+    else:
+        assert (result.run.state, result.run.reason) == ("failed", "canceled")
+        assert [r["result"]["status"] for r in cancel_records()] == ["attempted", "failed"]
+    assert all("--force" not in c.argv for c in world.fb.all_calls())
+
+
+def test_a_second_stop_is_never_sent_and_a_still_live_agent_keeps_the_run_running(  # F13
+    world: World, cli
+) -> None:  # type: ignore[no-untyped-def]
+    run_id = live(cli)
+    world.fb.script("agent-spawn", "stop", {"json": {}, "exit": 0, "schema": None})  # no effect
+    res = cli("--json", "cancel", run_id)
+    doc = res.envelope()
+    assert res.code == 0, res.out
+    assert len(calls(world, "stop")) == 1
+    assert (doc["run"]["state"], doc["changed"], doc["action"]) == ("running", True, "stop")
+    assert doc["run"]["cancel_requested_at"] is not None and calls(world, "teardown") == []
+
+
+def test_a_launcher_pid_without_a_start_is_unknown_and_waited_out_not_signaled(  # F14
+    world: World, cli
+) -> None:  # type: ignore[no-untyped-def]
+    run_id = live_run_without_agent(world)
+    with Store.open(default_state_root()) as store:
+        row = store.get_run(run_id)
+        assert row is not None
+        store.update_fields(
+            run_id, row.key, launcher_pid=dead_pid_identity()[0], launch_started_at=_stamp()
+        )
+    sent: list[int] = []
+    result = cancel_mod.cancel_run(
+        default_state_root(), run_id, _options(world, cli, kill=_record_pid(sent))
+    )
+    assert sent == [] and result.action == "signal_launcher"
+    assert result.run.state == "running" and result.run.cancel_requested_at is not None
+
+
+def test_a_launcher_pid_without_a_start_after_the_window_is_gone(  # F14
+    world: World, cli
+) -> None:  # type: ignore[no-untyped-def]
+    run_id = live_run_without_agent(world)
+    with Store.open(default_state_root()) as store:
+        row = store.get_run(run_id)
+        assert row is not None
+        store.update_fields(
+            run_id, row.key, launcher_pid=dead_pid_identity()[0], launch_started_at=_stamp(600)
+        )
+    result = cancel_mod.cancel_run(default_state_root(), run_id, _options(world, cli))
+    assert (result.run.state, result.run.reason, result.action) == ("failed", "canceled", "none")
+
+
+def test_the_default_kill_signals_through_a_pidfd_after_verifying_the_identity() -> None:  # F12
+    proc, ident = sleeper()
+    REAL_KILL(ident)
+    assert proc.wait(timeout=10) == -signal.SIGTERM
+
+
+def test_the_default_kill_never_signals_a_reused_or_own_pid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # F12
+    sent: list[Any] = []
+
+    def kill(pid: int, sig: int) -> None:
+        if sys._getframe(1).f_globals.get("__name__") == "review_run.cancel":  # noqa: SLF001
+            sent.append((pid, sig))
+        else:
+            ORIG_KILL(pid, sig)  # the test's own cleanup
+
+    monkeypatch.setattr(os, "kill", kill)
+    if hasattr(signal, "pidfd_send_signal"):
+        monkeypatch.setattr(signal, "pidfd_send_signal", lambda *a: sent.append(a))
+    proc, ident = sleeper()
+    try:
+        REAL_KILL(procid.ProcIdentity(ident.pid, ident.start + "9"))  # the start differs
+        REAL_KILL(procid.current())
+        REAL_KILL(procid.ProcIdentity(0, ident.start))
+        REAL_KILL(procid.ProcIdentity(2**31, ident.start))
+        assert sent == []
+    finally:
+        proc.terminate()
+
+
+def test_the_default_kill_falls_back_to_os_kill_without_pidfd(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # F12
+    monkeypatch.delattr(os, "pidfd_open", raising=False)
+    proc, ident = sleeper()
+    REAL_KILL(ident)
+    assert proc.wait(timeout=10) == -signal.SIGTERM

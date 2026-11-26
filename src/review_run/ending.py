@@ -24,6 +24,7 @@ from . import launch as lc
 from .audit import FINALIZER_ACTOR, AuditWriter, Caller, LogWriter, make_audit_record
 from .errors import ReviewRunError
 from .prompt import remove_prompt_files
+from .runs import SCHEMA_PATTERNS
 from .settings import RunSettings
 from .store import Expect, Lease, NewEvent, Run, Store
 
@@ -43,6 +44,13 @@ def run_inputs(run: Run, settings: RunSettings, *, override: bool) -> dict[str, 
         else None,
         "override_escalation": override,
     }
+
+
+def valid_agent_id(value: object) -> str | None:
+    """``value`` when it is an agent id, else ``None`` (a corrupt stored value counts as absent)."""
+    if isinstance(value, str) and SCHEMA_PATTERNS["agent_id"].fullmatch(value) is not None:
+        return value
+    return None
 
 
 class Ender:
@@ -186,7 +194,7 @@ class Ender:
         number = escalated_run if state == "escalated" and escalated_run else 1
         event_id = hooks.event_id_for(self.run_id, hook, number)
         record = self._record(run, state, reason, exit_code, event_id)
-        agent_id = extra.get("agent_id", run.agent_id)
+        agent_id = valid_agent_id(extra.get("agent_id", run.agent_id))  # hook payloads only
         warnings = list(run.warnings)
         if state == "escalated":
             payload = hooks.post_escalate_payload(
@@ -347,12 +355,14 @@ class Ender:
         assert disposition.reason is not None and disposition.exit_code is not None
         reason, exit_code, failure = disposition.reason, disposition.exit_code, disposition.failure
         stored = self.row()
+        # a stored value that is not an agent id never reaches argv: it counts as absent
+        stored_agent = valid_agent_id(stored.agent_id)
         agent = disposition.agent
         agent_id = disposition.teardown_agent or (agent.agent_id if agent else None)
         csession = agent.csession_id if agent else None
-        if agent_id is None or (stored.agent_id is not None and agent_id != stored.agent_id):
+        if agent_id is None or (stored_agent is not None and agent_id != stored_agent):
             # never store or tear down an id other than the stored one
-            agent_id, csession = stored.agent_id, stored.csession_id
+            agent_id, csession = stored_agent, (stored.csession_id if stored_agent else None)
         out: dict[str, Any] = dict(fields or {})
         if agent_id is not None and (reason in lc.TEARDOWN_REASONS or verdict == "mismatch"):
             if verdict is None:
@@ -372,7 +382,7 @@ class Ender:
                     out["csession_id"] = csession
         else:
             verdict = None
-            if agent_id is not None and agent_id != stored.agent_id:
+            if agent_id is not None and agent_id != stored_agent:
                 out["agent_id"] = agent_id
                 if csession:
                     out["csession_id"] = csession
