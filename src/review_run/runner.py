@@ -32,24 +32,22 @@ import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Final
+from typing import Any
 
 from . import gateway, hooks, procid
 from . import launch as lc
 from .audit import AuditWriter, Caller, LogWriter
-from .config_semantic import read_guidelines_file
 from .ending import Ender, run_inputs
 from .errors import MAX_DECISION_IDS, ReviewRunError
 from .finalize import Seams, finalize_session
+from .inputs import compose_prompt, fetch_and_manifest
 from .keeper import RENEW_FAILURES_LIMIT, LeaseKeeper
-from .manifest import Manifest, build_manifest
+from .manifest import Manifest
 from .meta import production_seams
-from .prefetch import PrefetchFailure, load_previous, persist_prefetch, prefetch
+from .prefetch import PrefetchFailure, persist_prefetch
 from .preflight import RunPlan
 from .prompt import (
-    CodeRunInput,
     PromptFiles,
-    build_prompt,
     input_paths,
     remove_prompt_files,
     write_prompt_files,
@@ -57,7 +55,6 @@ from .prompt import (
 from .settings import (
     PluginChanged,
     RunSettings,
-    bundled_header_template,
     launch_env,
     load_run_settings,
     verify_plugin_dirs,
@@ -72,15 +69,6 @@ from .store import (
     Store,
     format_time,
     lease_name,
-)
-
-DEFAULT_MAX_OUTPUT_BYTES: Final = 1024 * 1024  # run_pr_code.max_output_bytes' default
-_LIMIT_KEYS: Final = (
-    "max_file_bytes",
-    "max_total_bytes",
-    "max_files",
-    "hard_ceiling_bytes",
-    "max_answer_bytes",
 )
 
 
@@ -305,25 +293,9 @@ class _Flow:
         """Run order steps 5 and 6 and the prompt: pre-fetch, manifest, prompt files. Returns the
         ended run when a step failed."""
         values = self.plan.resolved.values
-        facts, s = self.plan.facts, self.settings
-        limits = {k: int(s.value(f"limits.{k}")) for k in _LIMIT_KEYS}
+        facts = self.plan.facts
         try:
-            previous = None
-            if self.plan.previous is not None:
-                previous = load_previous(
-                    self.store,
-                    self.plan.previous.run_id,
-                    max_bytes=int(s.value("limits.max_artifact_bytes")),
-                )
-            fetched = prefetch(facts.pr, hard_ceiling_bytes=limits["hard_ceiling_bytes"])
-            manifest = build_manifest(
-                fetched.files,
-                fetched.diff,
-                max_file_bytes=limits["max_file_bytes"],
-                max_total_bytes=limits["max_total_bytes"],
-                max_files=limits["max_files"],
-                hard_ceiling_bytes=limits["hard_ceiling_bytes"],
-            )
+            fetched, manifest, previous = fetch_and_manifest(self.plan, self.store, self.settings)
         except PrefetchFailure as exc:
             return self.end_failed(exc.reason, exc.exit_code, exc.failure())
         run = self.row()
@@ -331,9 +303,6 @@ class _Flow:
             return self.row()  # another process moved the row: its state stands
         if (ended := self.canceled_row()) is not None:
             return ended
-        guidelines_path = s.value("guidelines_file")
-        guidelines = None if guidelines_path is None else read_guidelines_file(guidelines_path)
-        code_run = values.get("run_pr_code") or {}
         # TODO(#35): the code run (phase code_run, throwaway, sandbox, code-run.json); until then
         # no output exists and the prompt says no code run is configured. The "in every case"
         # step 6 (write code-run.json, whatever the outcome) is TODO(#35) too: no fake file is
@@ -345,18 +314,13 @@ class _Flow:
                 level="warn",
                 code="code_run_pending",
             )
-        files = build_prompt(
-            template=bundled_header_template(),
+        files = compose_prompt(
+            self.plan,
             run_id=self.run_id,
-            pr_facts=facts,
-            ci=fetched.ci,
+            fetched=fetched,
             manifest=manifest,
-            code_run=CodeRunInput.not_configured(),
-            previous_review=None if previous is None else previous.review,
-            guidelines=guidelines,
-            nits=bool(s.value("nits")),
-            limits=limits,
-            max_output_bytes=int(code_run.get("max_output_bytes", DEFAULT_MAX_OUTPUT_BYTES)),
+            previous=previous,
+            settings=self.settings,
         )
         write_prompt_files(self.run_dir, files, manifest)
         return files, manifest

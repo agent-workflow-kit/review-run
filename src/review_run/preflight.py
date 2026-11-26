@@ -19,7 +19,8 @@ import re
 import secrets
 import shutil
 import stat
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
@@ -446,6 +447,21 @@ def map_dry_run(returncode: int, stdout: str) -> None:
     raise _lower_failed(source if source in _SIBLINGS else tool, lower or code or "failed")
 
 
+@contextmanager
+def scratch_dir(root: Path) -> Iterator[Path]:
+    """A private (0700) directory ``<root>/tmp/dry-<random>`` for a dry run, removed when the block
+    ends however it ends (``reconcile`` removes leftovers of a killed process)."""
+    tmp = Path(root) / "tmp"
+    ensure_state_root(Path(root))
+    ensure_private_dir(tmp)
+    scratch = tmp / f"dry-{secrets.token_hex(8)}"
+    os.mkdir(scratch, DIR_MODE)
+    try:
+        yield scratch
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
 def launch_dry_run(
     settings: RunSettings,
     profile: ProfilePlan,
@@ -462,12 +478,7 @@ def launch_dry_run(
     The effective profile is written into a private directory under the state root that is
     removed before this returns.
     """
-    tmp = Path(root) / "tmp"
-    ensure_state_root(Path(root))
-    ensure_private_dir(tmp)
-    scratch = tmp / f"dry-{secrets.token_hex(8)}"
-    os.mkdir(scratch, DIR_MODE)
-    try:
+    with scratch_dir(Path(root)) as scratch:
         profile_path = scratch / "permission-profile.json"
         create_private_file(profile_path, profile.data)
         argv = [
@@ -493,8 +504,6 @@ def launch_dry_run(
         except gateway.GatewayError as exc:
             raise _lower_failed("agent-spawn", exc.lower_code) from None
         map_dry_run(done.returncode, done.stdout)
-    finally:
-        shutil.rmtree(scratch, ignore_errors=True)
 
 
 # -- the orchestrator ---------------------------------------------------------------------------

@@ -1,0 +1,202 @@
+{
+  "schema_version": 1,
+  "dry_run": true,
+  "pr": "github.com/o/r#1",
+  "repo": "github.com/o/r",
+  "skill": "review-run:review-pr",
+  "mode": "headless",
+  "previous_run": null,
+  "head_sha": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+  "settings": [
+    {
+      "key": "env_allowlist",
+      "value": [
+        "PATH"
+      ],
+      "origin": "default"
+    },
+    {
+      "key": "guidelines_file",
+      "value": null,
+      "origin": "default"
+    },
+    {
+      "key": "limits.hard_ceiling_bytes",
+      "value": 8388608,
+      "origin": "default"
+    },
+    {
+      "key": "limits.max_answer_bytes",
+      "value": 65536,
+      "origin": "default"
+    },
+    {
+      "key": "limits.max_artifact_bytes",
+      "value": 8388608,
+      "origin": "default"
+    },
+    {
+      "key": "limits.max_file_bytes",
+      "value": 200000,
+      "origin": "default"
+    },
+    {
+      "key": "limits.max_files",
+      "value": 300,
+      "origin": "default"
+    },
+    {
+      "key": "limits.max_total_bytes",
+      "value": 1048576,
+      "origin": "default"
+    },
+    {
+      "key": "max_subagent_depth",
+      "value": 1,
+      "origin": "default"
+    },
+    {
+      "key": "max_turns",
+      "value": null,
+      "origin": "default"
+    },
+    {
+      "key": "mode",
+      "value": "headless",
+      "origin": "default"
+    },
+    {
+      "key": "model",
+      "value": null,
+      "origin": "default"
+    },
+    {
+      "key": "nits",
+      "value": false,
+      "origin": "default"
+    },
+    {
+      "key": "permission_profile",
+      "value": null,
+      "origin": "default"
+    },
+    {
+      "key": "plugin_dirs",
+      "value": [],
+      "origin": "default"
+    },
+    {
+      "key": "run_pr_code",
+      "value": null,
+      "origin": "default"
+    },
+    {
+      "key": "sandbox",
+      "value": "required",
+      "origin": "default"
+    },
+    {
+      "key": "setting_sources",
+      "value": [],
+      "origin": "default"
+    },
+    {
+      "key": "skill",
+      "value": "review-run:review-pr",
+      "origin": "config"
+    },
+    {
+      "key": "subagents",
+      "value": false,
+      "origin": "default"
+    },
+    {
+      "key": "timeout",
+      "value": null,
+      "origin": "default"
+    }
+  ],
+  "launch_argv": [
+    "agent-spawn",
+    "launch",
+    "--mode",
+    "headless",
+    "--kind",
+    "review",
+    "--no-implicit-done",
+    "--cwd",
+    "session-dir",
+    "--repo",
+    "github.com/o/r",
+    "--skill",
+    "review-run:review-pr",
+    "--plugin-dir",
+    "/TMP/bundled-plugin",
+    "--permission-profile",
+    "/TMP/xdg-state/review-run/runs/rr-aaaaaaaa/permission-profile.json",
+    "--sandbox",
+    "required",
+    "--setting-sources",
+    "",
+    "--env-allowlist-only",
+    "PATH",
+    "--no-promote",
+    "--label",
+    "owner=review-run",
+    "--label",
+    "run=rr-aaaaaaaa",
+    "--label",
+    "pr=github.com/o/r#1",
+    "--label",
+    "repo=github.com/o/r",
+    "--result-file",
+    "/TMP/xdg-state/review-run/runs/rr-aaaaaaaa/launch.json",
+    "--json",
+    "--prompt-file",
+    "/TMP/xdg-state/review-run/runs/rr-aaaaaaaa/prompt.md",
+    "--input-file",
+    "/TMP/xdg-state/review-run/runs/rr-aaaaaaaa/inputs/f0001.patch"
+  ],
+  "plugin_dirs": [
+    "/TMP/bundled-plugin"
+  ],
+  "tools": [],
+  "manifest": [
+    {
+      "file": "f0001",
+      "path": "src/app.py",
+      "status": "modified",
+      "old_path": null,
+      "additions": 1,
+      "deletions": 1,
+      "bytes": 158,
+      "inputs": [
+        "f0001.patch"
+      ],
+      "disposition": "provided"
+    }
+  ],
+  "coverage_preview": {
+    "status": "full",
+    "reviewed": [
+      "f0001"
+    ],
+    "skipped": [],
+    "ignored_ids": 0
+  },
+  "sizes": {
+    "files": 1,
+    "diff_bytes": 158,
+    "provided_bytes": 158,
+    "provided_files": 1
+  },
+  "code_run_plan": {
+    "configured": false,
+    "sandbox": null,
+    "sandbox_probe": "not_applicable",
+    "would_skip": null
+  },
+  "would_fail": [],
+  "would_exit": 0,
+  "warnings": []
+}
