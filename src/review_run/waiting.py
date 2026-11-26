@@ -12,7 +12,10 @@ Seams, each with its owner:
   an expired one ends ``expired``) and the runner check of ``reconcile`` (a run whose runner and
   launcher are gone ends ``runner_lost``; label recovery of a missing agent id). ``refresh_run``
   is the one place they join; until then a ``wait`` on a run whose runner died before the launch
-  blocks until its timeout.
+  blocks until its timeout. Also TODO(#29): ``wait`` without ``--timeout`` polls forever when
+  ``agent-spawn show`` cannot run (``finalize_agent`` treats a gateway failure as "row
+  unchanged"); the diagnosis of repeated refresh failures (``tool_missing``) belongs to the runner
+  check and recovery work.
 * TODO(#27): signals; an interrupted waiter prints nothing (``KeyboardInterrupt``) and changes
   nothing: no lease or process is held while sleeping.
 """
@@ -20,7 +23,7 @@ Seams, each with its owner:
 from __future__ import annotations
 
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
@@ -28,7 +31,7 @@ from typing import Any, Final
 from .config import load_config
 from .errors import ReviewRunError
 from .finalize import AgentFinalize, finalize_agent
-from .runs import run_object
+from .runs import SCHEMA_PATTERNS, CorruptRunError, run_object, show_run
 from .store import Run, Store
 
 POLL_SECONDS: Final = 2.0
@@ -56,25 +59,92 @@ def resolve(root: Path, ref: str) -> str:
 
 
 def needs_refresh(run: Run) -> bool:
-    """Whether a refresh can do anything: a ``running`` run that has an agent."""
-    return run.state == "running" and run.agent_id is not None
+    """Whether a refresh can do anything: a ``running`` run whose stored agent id is an agent id
+    (the same pattern ``run_object`` applies; any other value never reaches a sibling's argv)."""
+    return (
+        run.state == "running"
+        and isinstance(run.agent_id, str)
+        and SCHEMA_PATTERNS["agent_id"].fullmatch(run.agent_id) is not None
+    )
+
+
+class _LazyHooks(Mapping[str, Any]):
+    """The ``hooks`` of the acting process's config, loaded on first use.
+
+    ``finalize_agent`` reads it only when it delivers the hooks of a run it just ended, so a poll
+    of a live agent never loads (or fails on) the config. A config that does not load raises
+    ``ReviewRunError`` at that point; delivery treats it as not delivered (the events stay in the
+    outbox for ``reconcile``) and the finalization stands.
+    """
+
+    def __init__(self, config_path: Path | None, repo: str) -> None:
+        self._path, self._repo = config_path, repo
+        self._values: Mapping[str, Any] | None = None
+
+    def _hooks(self) -> Mapping[str, Any]:
+        if self._values is None:
+            hooks = load_config(self._path).resolve(self._repo).values.get("hooks")
+            self._values = hooks if isinstance(hooks, Mapping) else {}
+        return self._values
+
+    def __getitem__(self, key: str) -> Any:
+        return self._hooks()[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._hooks())
+
+    def __len__(self) -> int:
+        return len(self._hooks())
+
+    def __bool__(self) -> bool:  # truth must not load the config
+        return True
 
 
 def refresh_run(root: Path, run_id: str, *, by: str, config_path: Path | None = None) -> Run | None:
     """The run as stored after finalizing it when its agent has ended; ``None`` when it is gone.
 
-    ``by`` is ``show`` or ``wait`` (the audit ``finalized_by``). The config is loaded only when a
-    finalization is possible, for the ``post-run`` hooks of the run's repo; a config that does not
-    load, a missing or corrupt ``settings.json`` and the like raise ``ReviewRunError`` and leave
-    the run unchanged (it recurs on every call; nothing loops inside).
+    ``by`` is ``show`` or ``wait`` (the audit ``finalized_by``). A row that cannot be shown as a
+    run raises ``CorruptRunError`` before any sibling is called. The config is read lazily, only
+    when the finalization ends the run and hooks are delivered. A missing or corrupt
+    ``settings.json`` and any other failure of the refresh (an unreadable stored value, the
+    database) raise ``ReviewRunError`` (``internal`` for the unexpected ones, with a closed
+    message) and leave the run unchanged; it recurs on every call, nothing loops inside.
     """
     run = _read(root, run_id)
     if run is None or not needs_refresh(run):
         return run
-    config = load_config(config_path)
-    hooks = config.resolve(run.repo).values.get("hooks")
-    finalize_agent(root, run_id, AgentFinalize(finalized_by=by, hooks_config=hooks))
+    run_object(run)  # CorruptRunError for a row that cannot be shown: no sibling call
+    try:
+        finalize_agent(
+            root,
+            run_id,
+            AgentFinalize(finalized_by=by, hooks_config=_LazyHooks(config_path, run.repo)),
+        )
+    except ReviewRunError:
+        raise
+    except Exception:  # a ValueError of a stored value, sqlite3.Error, ...; never a traceback
+        raise ReviewRunError("internal", "the run could not be refreshed") from None
     return _read(root, run_id)
+
+
+def refresh_for_show(
+    root: Path,
+    ref: str,
+    *,
+    config_path: Path | None = None,
+    on_refresh_error: Callable[[ReviewRunError], None] | None = None,
+) -> str:
+    """The run id of ``ref`` after the refresh of ``show``. A refresh that fails is reported
+    through ``on_refresh_error`` and the run stays as stored; a corrupt row still raises."""
+    run_id = resolve(root, ref)
+    try:
+        refresh_run(root, run_id, by="show", config_path=config_path)
+    except CorruptRunError:
+        raise
+    except ReviewRunError as err:
+        if on_refresh_error is not None:
+            on_refresh_error(err)
+    return run_id
 
 
 def show_refreshed(
@@ -87,18 +157,13 @@ def show_refreshed(
 ) -> dict[str, Any]:
     """The run object of ``show``. A refresh that fails is reported through ``on_refresh_error``
     and the object is built from the row as stored: ``show`` still prints what it knows."""
-    run_id = resolve(root, ref)
-    run = _read(root, run_id)
-    if run is not None and refresh:
-        try:
-            run = refresh_run(root, run_id, by="show", config_path=config_path)
-        except ReviewRunError as err:
-            if on_refresh_error is not None:
-                on_refresh_error(err)
-            run = _read(root, run_id)
-    if run is None:
-        raise ReviewRunError("not_found", "no such run")
-    return run_object(run)
+    run_id = (
+        refresh_for_show(root, ref, config_path=config_path, on_refresh_error=on_refresh_error)
+        if refresh
+        else resolve(root, ref)
+    )
+    with Store.open(root) as store:
+        return show_run(store, run_id)
 
 
 def wait_run(
@@ -147,6 +212,7 @@ __all__ = [
     "POLL_SECONDS",
     "Clock",
     "needs_refresh",
+    "refresh_for_show",
     "refresh_run",
     "resolve",
     "show_refreshed",

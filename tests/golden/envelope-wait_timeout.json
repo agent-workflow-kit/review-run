@@ -1,7 +1,0 @@
-{
-  "error": {
-    "code": "failed",
-    "message": "closed message",
-    "reason": "wait_timeout"
-  }
-}

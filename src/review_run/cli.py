@@ -24,7 +24,7 @@ from .outcome import render_run
 from .preflight import RunRequest, plan_run
 from .runner import Interrupted, Options, run_review
 from .store import Store, default_state_root
-from .waiting import Clock, show_refreshed, wait_run
+from .waiting import Clock, refresh_for_show, show_refreshed, wait_run
 
 DESCRIPTION = "Run a review skill on a pull request and store the resulting review draft."
 STATES = ("running", "done", "escalated", "failed")
@@ -376,6 +376,10 @@ def _show(args: argparse.Namespace) -> int:
     root = default_state_root()
     config_path = None if args.config is None else Path(args.config)
     if args.draft:
+        if not args.no_refresh:
+            refresh_for_show(
+                root, args.run, config_path=config_path, on_refresh_error=_refresh_failed
+            )
         with Store.open(root) as store:
             data = runs_mod.read_draft(store, args.run)
         print(f"{PROG}: printing the stored draft as stored (untrusted text)", file=sys.stderr)
