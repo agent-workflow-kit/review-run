@@ -186,9 +186,10 @@
             "ok",
             "unavailable",
             "unsupported",
+            "unknown",
             "not_applicable"
           ],
-          "description": "The bubblewrap probe result; not_applicable when no code run is configured."
+          "description": "The bubblewrap probe result; unknown when a code run is configured but the probe has not run (until the readiness facts land); not_applicable when no code run is configured."
         },
         "would_skip": {
           "enum": [

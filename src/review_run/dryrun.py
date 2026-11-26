@@ -10,13 +10,21 @@ A failure of the pre-fetch or the manifest (``prefetch_failed``, ``stale_head``,
 not an error of the dry run: it is the plan's ``would_fail`` with ``would_exit`` 12, and the dry run
 itself exits 0. Its manifest, coverage and sizes are then empty (nothing was built).
 
-Seams: ``tools`` stays empty and ``code_run_plan`` reports no sandbox probe until the readiness
-facts land (TODO(#41)); the code run itself is TODO(#35).
+Any other failure while the plan is built (an unreadable guidelines file, a prompt that does not
+fit, a write error) is the plan's ``would_fail`` ``["internal"]``, as a real run ends ``internal``
+(exit 12) there. A SIGTERM unwinds (exit 143) so the scratch directory is still removed.
+
+Seams: ``tools`` stays empty and ``code_run_plan`` reports the sandbox probe as ``unknown`` until
+the readiness facts land (TODO(#41)); the code run itself is TODO(#35).
 """
 
 from __future__ import annotations
 
 import json
+import signal
+import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -25,7 +33,7 @@ from .errors import ExitCode
 from .inputs import compose_prompt, fetch_and_manifest
 from .prefetch import PrefetchFailure
 from .preflight import PLACEHOLDER_RUN_ID, RunPlan, scratch_dir
-from .prompt import PromptError, input_paths, write_prompt_files
+from .prompt import input_paths, write_prompt_files
 from .sanitizer import sanitize_inline
 from .store import Store
 
@@ -41,8 +49,8 @@ _EMPTY_SIZES = {"files": 0, "diff_bytes": 0, "provided_bytes": 0, "provided_file
 
 def code_run_plan(plan: RunPlan) -> dict[str, Any]:
     """What the code-run step would do. TODO(#41): the bubblewrap probe and ``would_skip`` (the
-    step itself is TODO(#35)); until then a configured code run reports the probe as
-    ``unavailable`` without a skip reason, and none configured is ``not_applicable``."""
+    step itself is TODO(#35)); until then a configured code run reports the probe as ``unknown``
+    (not probed yet) without a skip reason, and none configured is ``not_applicable``."""
     config = plan.resolved.values.get("run_pr_code")
     if config is None:
         return {
@@ -54,9 +62,55 @@ def code_run_plan(plan: RunPlan) -> dict[str, Any]:
     return {
         "configured": True,
         "sandbox": config.get("sandbox", "required"),
-        "sandbox_probe": "unavailable",
+        "sandbox_probe": "unknown",
         "would_skip": None,
     }
+
+
+@contextmanager
+def _sigterm_unwinds() -> Iterator[None]:
+    """A SIGTERM raises ``SystemExit(143)`` for the block (main thread only), so the scratch
+    directory's ``finally`` runs; the previous handler is restored afterwards."""
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+
+    def unwind(signum: int, frame: Any) -> None:
+        raise SystemExit(int(ExitCode.SIGTERM))
+
+    previous = signal.signal(signal.SIGTERM, unwind)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+
+
+def _build(
+    plan: RunPlan, root: Path, run_dir: Path, store: Store | None
+) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, int], list[str]]:
+    fetched, manifest, previous = fetch_and_manifest(plan, store)
+    with scratch_dir(Path(root)) as scratch:
+        files = compose_prompt(
+            plan,
+            run_id=PLACEHOLDER_RUN_ID,
+            fetched=fetched,
+            manifest=manifest,
+            previous=previous,
+        )
+        write_prompt_files(scratch, files, manifest)  # the same writer a run uses
+    argv = lc.launch_argv(
+        plan.settings,
+        repo=plan.repo,
+        pr=plan.pr,
+        run_id=PLACEHOLDER_RUN_ID,
+        run_dir=run_dir,
+        input_paths=input_paths(run_dir, files),
+        labels=plan.request.labels,
+        actor=plan.request.actor,
+        decision_ids=plan.request.decision_ids,
+    )
+    sizes = manifest.sizes(len(fetched.diff.encode("utf-8", errors="surrogatepass")))
+    return manifest.to_json(), manifest.coverage_preview(), sizes, argv
 
 
 def build_plan(plan: RunPlan, root: Path) -> dict[str, Any]:
@@ -69,37 +123,16 @@ def build_plan(plan: RunPlan, root: Path) -> dict[str, Any]:
     argv: list[str] = []
     would_fail: list[str] = []
     try:
-        if plan.previous is None:
-            fetched, manifest, previous = fetch_and_manifest(plan, None)
-        else:
-            with Store.open(Path(root)) as store:
-                fetched, manifest, previous = fetch_and_manifest(plan, store)
-        with scratch_dir(Path(root)) as scratch:
-            files = compose_prompt(
-                plan,
-                run_id=PLACEHOLDER_RUN_ID,
-                fetched=fetched,
-                manifest=manifest,
-                previous=previous,
-            )
-            write_prompt_files(scratch, files, manifest)  # the same writer a run uses
-        manifest_json = manifest.to_json()
-        coverage = manifest.coverage_preview()
-        sizes = manifest.sizes(len(fetched.diff.encode("utf-8", errors="surrogatepass")))
-        argv = lc.launch_argv(
-            plan.settings,
-            repo=plan.repo,
-            pr=plan.pr,
-            run_id=PLACEHOLDER_RUN_ID,
-            run_dir=run_dir,
-            input_paths=input_paths(run_dir, files),
-            labels=plan.request.labels,
-            actor=plan.request.actor,
-            decision_ids=plan.request.decision_ids,
-        )
+        with _sigterm_unwinds():
+            if plan.previous is None:
+                built = _build(plan, root, run_dir, None)
+            else:
+                with Store.open(Path(root)) as store:  # a store error is step 1's, not the plan's
+                    built = _build(plan, root, run_dir, store)
+        manifest_json, coverage, sizes, argv = built
     except PrefetchFailure as exc:
         would_fail = [exc.reason]
-    except PromptError:  # a real run ends ``internal`` here (the runner's catch-all)
+    except Exception:  # a real run ends ``internal`` (the runner's catch-all) wherever this fails
         would_fail = ["internal"]
     would_exit = ExitCode.FAILED if would_fail else ExitCode.OK
     return {
@@ -156,6 +189,8 @@ def human_plan(doc: dict[str, Any]) -> str:
         f"coverage preview: {coverage['status']}, {len(coverage['reviewed'])} reviewed, "
         f"{len(coverage['skipped'])} skipped"
     )
+    for skip in coverage["skipped"]:
+        lines.append(f"  skipped {_s(skip['file'])}: {_s(skip['reason'])}")
     lines.append(f"manifest ({len(doc['manifest'])}):")
     for entry in doc["manifest"]:
         old = f" (from {_s(entry['old_path'], 400)})" if entry["old_path"] else ""
@@ -164,8 +199,20 @@ def human_plan(doc: dict[str, Any]) -> str:
             f"{entry['bytes']} bytes {_s(entry['path'], 400)}{old}"
         )
     code = doc["code_run_plan"]
-    lines.append(
-        "code run: "
-        + (f"configured, sandbox {_s(code['sandbox'])}" if code["configured"] else "not configured")
-    )
+    if code["configured"]:
+        skip = "none" if code["would_skip"] is None else _s(code["would_skip"])
+        lines.append(
+            f"code run: configured, sandbox {_s(code['sandbox'])}, "
+            f"probe {_s(code['sandbox_probe'])}, would skip {skip}"
+        )
+    else:
+        lines.append("code run: not configured")
+    if doc["tools"]:
+        lines.append("tools:")
+        for tool in doc["tools"]:
+            path = "missing" if tool["path"] is None else _s(tool["path"], 400)
+            version = "" if tool["version"] is None else f" {_s(tool['version'], 64)}"
+            lines.append(f"  {_s(tool['name'])} {path}{version}")
+    for code_name in doc["warnings"]:
+        lines.append(f"warning: {_s(code_name)}")
     return "\n".join(lines) + "\n"
