@@ -8,10 +8,12 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
+from review_run import gateway
 from review_run import session_check as sc
 from review_run.errors import ReviewRunError
 from review_run.finalize import FinalizeFailure
@@ -42,6 +44,7 @@ def test_a_good_session_ends_done_with_review_json(world: World) -> None:
     assert "tools_unexpected" not in run.warnings and "skill_unchecked" not in run.warnings
     (call,) = world.fb.calls("claude-session", "status")
     assert call.argv[0:4] == ["status", run.csession_id, "--run", "1"]
+    assert "--json" in call.argv
 
 
 @pytest.mark.parametrize(
@@ -80,6 +83,9 @@ def test_a_failing_status_ends_internal_without_its_text(world: World) -> None:
     run = run_with(world, "status_error")
     assert (run.state, run.reason, run.exit_code) == ("failed", "internal", 12)
     assert run.failure["tool"] == "claude-session"
+    assert run.failure["lower_code"] == "failed"
+    assert "fake failure" not in json.dumps(run.failure)
+    assert "fake failure" not in json.dumps(world.only_run().failure)
 
 
 # -- units over hostile init objects ------------------------------------------------------------
@@ -112,7 +118,7 @@ def test_read_init_stops_at_the_first_init_and_at_garbage(tmp_path: Path) -> Non
         is None
     )
     assert sc.read_init(write(tmp_path / "d", '{"type":"system","subtype":"init","x":NaN}')) is None
-    assert sc.read_init(write(tmp_path / "e", "[1]", INIT)) == INIT
+    assert sc.read_init(write(tmp_path / "e", "[1]", INIT)) is None  # step 6 wants an object
     (tmp_path / "f").write_bytes(b"\xff\xfe\n")
     assert sc.read_init(str(tmp_path / "f")) is None
 
@@ -168,9 +174,14 @@ def test_task_and_agent_are_one_name_allowed_only_with_subagents() -> None:
     assert sc.unexpected_tools({"tools": base + ["Task", "Agent"]}, subagents=True) == 0
 
 
-def test_a_huge_tool_list_is_bounded_by_the_file_and_counted() -> None:
+def test_a_huge_tool_list_is_counted_name_by_name() -> None:
     tools = [f"T{i}" for i in range(50000)]
     assert sc.unexpected_tools({"tools": tools}, subagents=False) == 50000
+
+
+def test_non_string_entries_count_one_each_and_repeated_names_one() -> None:
+    assert sc.unexpected_tools({"tools": [{}, {}, 3]}, subagents=False) == 3
+    assert sc.unexpected_tools({"tools": ["X", "X", "X"]}, subagents=False) == 1
 
 
 @pytest.mark.parametrize("tools", [None, "Read", {"Read": 1}, 5])
@@ -221,19 +232,172 @@ def test_the_variant_profile_compares_with_task_allowed(tmp_path: Path) -> None:
 def test_a_status_about_another_run_or_mode_is_internal(
     tmp_path: Path, over: dict[str, Any]
 ) -> None:
-    with pytest.raises(ReviewRunError):
+    with pytest.raises(FinalizeFailure) as info:
         evaluate(status(tmp_path, **over))
+    assert info.value.reason == "internal" and info.value.failure["tool"] == "claude-session"
 
 
 def test_a_status_of_another_session_or_shape_is_internal(tmp_path: Path) -> None:
     doc = status(tmp_path)
     for bad in ({**doc, "csession_id": "cs-bbbbbbbb"}, {"csession_id": "cs-aaaaaaaa"},
                 {**doc, "run": []}):  # fmt: skip
-        with pytest.raises(ReviewRunError):
+        with pytest.raises(FinalizeFailure) as info:
             evaluate(bad)
+        assert info.value.failure["tool"] == "claude-session"
 
 
 def test_headless_without_a_result_path_is_skill_missing(tmp_path: Path) -> None:
     with pytest.raises(FinalizeFailure) as info:
         evaluate(status(tmp_path, result_path=None))
     assert info.value.reason == "skill_missing" and info.value.exit_code == 22
+
+
+# -- strict step-6 parsing of every line of the init search ---------------------------------------
+
+DEEP = "[" * 40 + "]" * 40
+BAD_LINES = [
+    "",
+    "   ",
+    "\x0b",
+    "\x0c",
+    '{"a":' + DEEP + "}",
+    '{"a":' + "1" * 21 + "}",
+    '{"a":0.' + "1" * 70 + "}",
+    '{"a":"\\ud800"}',
+]
+
+
+@pytest.mark.parametrize("bad", BAD_LINES)
+def test_a_line_that_fails_step_6_before_the_init_ends_the_search(tmp_path: Path, bad: str) -> None:
+    assert sc.read_init(write(tmp_path / "x", bad, INIT)) is None
+
+
+@pytest.mark.parametrize("bad", BAD_LINES[4:])
+def test_an_init_line_that_fails_step_6_is_not_an_init(tmp_path: Path, bad: str) -> None:
+    line = bad[:-1] + ',"type":"system","subtype":"init"}'
+    assert sc.read_init(write(tmp_path / "y", line)) is None
+
+
+def test_garbage_after_the_init_line_is_never_read(tmp_path: Path) -> None:
+    assert sc.read_init(write(tmp_path / "z", INIT, "{bad", "")) == INIT
+
+
+# -- check_session with a fake gateway ------------------------------------------------------------
+
+
+class Ctx:
+    def __init__(self, *, mode: str = "headless", csid: Any = "cs-aaaaaaaa", kind: str = "bundled",
+                 subagents: bool = False, skill: Any = SKILL, awaited: Any = 1) -> None:  # fmt: skip
+        self.run = SimpleNamespace(csession_id=csid, awaited_run=awaited, mode=mode)
+        self.settings = SimpleNamespace(
+            profile_kind=kind,
+            value=lambda name: {"skill": skill, "subagents": subagents}[name],
+        )
+
+
+def stub(monkeypatch: pytest.MonkeyPatch, reply: Any) -> list[list[str]]:
+    seen: list[list[str]] = []
+
+    def fake(argv: list[str], *, timeout: float) -> Any:
+        seen.append(argv)
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
+
+    monkeypatch.setattr(gateway, "run", fake)
+    return seen
+
+
+def done(stdout: str, code: int = 0) -> gateway.CompletedRun:
+    return gateway.CompletedRun(("claude-session",), code, stdout, "")
+
+
+def test_check_session_interactive_is_unchecked(monkeypatch: pytest.MonkeyPatch) -> None:
+    doc = {"csession_id": "cs-aaaaaaaa", "run": {"run": 1, "mode": "interactive"}}
+    seen = stub(monkeypatch, done(json.dumps(doc)))
+    out = sc.check_session(cast(Any, Ctx(mode="interactive")))
+    assert out.warnings == ("skill_unchecked", "tools_unchecked") and out.skill_checked is False
+    assert seen == [["claude-session", "status", "cs-aaaaaaaa", "--run", "1", "--json"]]
+
+
+def test_check_session_custom_profile_with_subagents(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    doc = status(tmp_path)
+    stub(monkeypatch, done(json.dumps(doc)))
+    out = sc.check_session(cast(Any, Ctx(kind="custom", subagents=True)))
+    assert (out.skill_checked, out.tools_checked, out.warnings) == (
+        True,
+        False,
+        ("tools_unchecked",),
+    )
+
+
+@pytest.mark.parametrize(
+    "kw",
+    [{"csid": "cs-x"}, {"csid": None}, {"awaited": 0}, {"awaited": True}, {"mode": "weird"},
+     {"skill": "nocolon"}, {"skill": None}],
+)  # fmt: skip
+def test_check_session_invalid_session_facts_are_internal(
+    monkeypatch: pytest.MonkeyPatch, kw: dict[str, Any]
+) -> None:
+    seen = stub(monkeypatch, done("{}"))
+    with pytest.raises(ReviewRunError):
+        sc.check_session(cast(Any, Ctx(**kw)))
+    assert seen == []
+
+
+def test_check_session_gateway_error_is_internal_with_its_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stub(monkeypatch, gateway.CallTimeout("claude-session"))
+    with pytest.raises(FinalizeFailure) as info:
+        sc.check_session(cast(Any, Ctx()))
+    assert info.value.reason == "internal"
+    assert info.value.failure["tool"] == "claude-session"
+    assert info.value.failure["lower_code"] == "timeout"
+
+
+def test_check_session_non_json_status_is_invalid_output(monkeypatch: pytest.MonkeyPatch) -> None:
+    stub(monkeypatch, done("SECRET not json"))
+    with pytest.raises(FinalizeFailure) as info:
+        sc.check_session(cast(Any, Ctx()))
+    assert info.value.reason == "internal"
+    assert info.value.failure["lower_code"] == "invalid_output"
+    assert "SECRET" not in repr(info.value.failure)
+
+
+def test_check_session_non_object_status_is_invalid_output(monkeypatch: pytest.MonkeyPatch) -> None:
+    stub(monkeypatch, done("[1]"))
+    with pytest.raises(FinalizeFailure) as info:
+        sc.check_session(cast(Any, Ctx()))
+    assert info.value.failure["lower_code"] == "invalid_output"
+
+
+def test_check_session_non_zero_exit_keeps_the_envelope_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stub(monkeypatch, done(json.dumps({"error": {"code": "not_found"}}), 10))
+    with pytest.raises(FinalizeFailure) as info:
+        sc.check_session(cast(Any, Ctx()))
+    assert info.value.failure["lower_code"] == "not_found"
+
+
+@pytest.mark.parametrize("tools", [None, "Read", {"Read": 1}, 5])
+def test_evaluate_tools_missing_or_not_a_list_is_tools_unchecked(
+    tmp_path: Path, tools: Any
+) -> None:
+    doc = status(tmp_path)
+    init = {k: v for k, v in INIT.items() if k != "tools"}
+    write(tmp_path / "res.json", init if tools is None else dict(init, tools=tools))
+    out = evaluate(doc)
+    assert (out.skill_checked, out.tools_checked, out.tools_unexpected, out.warnings) == (
+        True, False, None, ("tools_unchecked",),
+    )  # fmt: skip
+
+
+def test_evaluate_a_pinned_tool_absent_from_the_list_is_not_flagged(tmp_path: Path) -> None:
+    doc = status(tmp_path)
+    write(tmp_path / "res.json", dict(INIT, tools=["Read"]))
+    out = evaluate(doc)
+    assert (out.tools_checked, out.tools_unexpected, out.warnings) == (True, 0, ())

@@ -3,7 +3,8 @@
 ``check_session`` is ``finalize.Seams.check_session``. It asks ``claude-session status
 <csession_id> --run <awaited_run> --json`` for the run's ``mode`` and ``result_path`` and, for a
 headless run, reads the first ``system``/``init`` object of the result file (opened without
-following a final link, regular file, at most 1 MiB in all, each line parsed strictly):
+following a final link, regular file, at most 1 MiB in all, each line parsed with the strict rules
+of step 6):
 
 * the init object's ``skills`` must contain the run's configured ``<plugin>:<skill>`` by exact
   string equality, else ``skill_missing`` (a missing or unreadable file, no init object within the
@@ -28,11 +29,10 @@ import stat
 from collections.abc import Mapping
 from typing import Any, Final
 
-from . import gateway
+from .artifact import Invalid, parse_artifact
 from .errors import ReviewRunError
 from .finalize import FinalizeFailure, SessionCheck, SessionContext
-from .prefetch import lower_failure
-from .settings import strict_finite_json
+from .prefetch import LowerFailure, call_json
 
 MAX_RESULT_BYTES: Final = 1024 * 1024
 STATUS_TIMEOUT: Final = 30.0
@@ -97,15 +97,14 @@ def read_init(path: object) -> dict[str, Any] | None:
 
 
 def _init_line(line: bytes) -> tuple[bool, dict[str, Any] | None]:
-    """``(stop, init)``: ``(False, None)`` reads on; ``(True, None)`` stops with nothing usable
-    (a line that does not parse strictly: fail closed); ``(True, doc)`` is the init object."""
-    if not line.strip():
-        return False, None
+    """``(stop, init)``: ``(False, None)`` reads on (a strict object that is not the init
+    object); ``(True, None)`` stops with nothing usable (any line, an empty one too, that step 6
+    does not parse: fail closed); ``(True, doc)`` is the init object."""
     try:
-        doc = strict_finite_json(line.decode("utf-8"))
-    except (ValueError, RecursionError):
+        doc = parse_artifact(line, max_bytes=MAX_RESULT_BYTES)
+    except Invalid:
         return True, None
-    if isinstance(doc, dict) and doc.get("type") == "system" and doc.get("subtype") == "init":
+    if doc.get("type") == "system" and doc.get("subtype") == "init":
         return True, doc
     return False, None
 
@@ -154,7 +153,7 @@ def evaluate(
         or run.get("run") != awaited_run
         or run.get("mode") != mode
     ):
-        raise _internal("claude-session status is not about the awaited run")
+        raise FinalizeFailure("internal", tool="claude-session")  # not about the awaited run
     if mode == "interactive":
         return UNCHECKED
     init = read_init(run.get("result_path"))
@@ -199,20 +198,13 @@ def check_session(ctx: SessionContext) -> SessionCheck:
     ):
         raise _internal("the run cannot be checked: its session facts are not valid")
     try:
-        done = gateway.run(
-            ["claude-session", "status", csid, "--run", str(awaited), "--json"],
+        status = call_json(
+            "claude-session",
+            ["status", csid, "--run", str(awaited), "--json"],
             timeout=STATUS_TIMEOUT,
         )
-    except gateway.GatewayError as exc:
-        code = exc.lower_code
-        raise FinalizeFailure("internal", tool="claude-session", lower_code=code) from None
-    if done.returncode != 0:
-        failure = lower_failure("claude-session", done)
-        raise FinalizeFailure("internal", tool="claude-session", lower_code=failure.code)
-    try:
-        status = strict_finite_json(done.stdout)
-    except (ValueError, RecursionError):
-        status = None
+    except LowerFailure as exc:
+        raise FinalizeFailure("internal", tool="claude-session", lower_code=exc.code) from None
     if not isinstance(status, dict):
         raise FinalizeFailure("internal", tool="claude-session", lower_code="invalid_output")
     return evaluate(

@@ -10,9 +10,9 @@ Seams, each with its owner:
 
 * ``finalize`` (a ``done`` session): the pipeline of ``finalize`` (#19) with ``Options.seams``
   for the checks that other issues own (``meta.production_seams`` supplies them all). While a seam
-  is missing
-  the default leaves the run ``running`` in phase ``session`` (its agent and ``awaited_run``
-  stored, so ``show``, ``wait`` and ``reconcile`` can finalize it later) and raises ``internal``.
+  is missing the default leaves the run ``running`` in phase ``session`` (its agent and
+  ``awaited_run`` stored, so ``show``, ``wait`` and ``reconcile`` can finalize it later) and
+  raises ``internal``.
 * The code run (phase ``code_run``, ``code-run.json``): TODO(#35). Until it lands (#35 writes
   ``code-run.json`` in every case) a run that configures ``run_pr_code`` is not supported end to
   end: the session still runs (a ``warning`` log record says so) but finalize finds no
