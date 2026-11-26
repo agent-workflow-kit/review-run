@@ -493,7 +493,7 @@ The `review-pr` slot (architecture section 5.5; kind `review`, default mode head
 
 **Reporting.** The skill writes its summary with the Write tool to a file and runs `claude-session report done --summary-file <absolute path> --artifact <absolute path of review.json>`, using absolute paths in the report command (a command containing `$CSESSION_DIR` is denied under `dontAsk`; this one sentence is a deliberate exception to design guide 11.3's no-wrapper-instructions rule, since the standard instructions alone fail there); it attaches `review.json` on every report once it exists (a `needs-input` report made before `review.json` exists omits `--artifact`; finalize needs no artifact for `needs-input`). It reports `needs-input` with a reason file when it needs a human's judgment. It never mentions subagents (the bundled profile denies the tools; the model would waste a turn).
 
-**Resume.** On a continuation, read the reply, keep the earlier inputs, and attach `review.json` again on the report.
+**Resume.** On a continuation, read the reply, keep the earlier inputs, and attach `review.json` again on the report once it exists.
 
 **Validation by review-run.** [Finalize](#finalize). The skill's `nits` and `guidelines_file` behaviors are driven by the prompt header.
 

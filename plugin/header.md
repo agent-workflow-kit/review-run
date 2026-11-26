@@ -16,7 +16,7 @@ Read each input file with offset and limit until its end, since one Read returns
 
 ## Limits and nits
 
-Limits in force. `max_file_bytes` (per patch), `max_total_bytes` (all patches together) and `max_files` (number of files) decide which files are skipped or truncated; such a file is marked so in the manifest and is not provided in full. Any other listed limit, such as `hard_ceiling_bytes` or `max_answer_bytes`, is not a per-file limit; `max_artifact_bytes`, if listed, is the largest `review.json` accepted.
+Limits in force. `max_file_bytes` (size of one input file; a larger patch is split into parts), `max_total_bytes` (all input files together) and `max_files` (number of input files, parts included) decide which files are skipped or truncated; such a file is marked so in the manifest and is not provided in full. Any other listed limit, such as `hard_ceiling_bytes` or `max_answer_bytes`, is not a per-file limit; `max_artifact_bytes`, if listed, is the largest `review.json` accepted.
 
 {limits}
 
@@ -35,7 +35,7 @@ Rules for findings:
 
 - Copy `path` exactly from the manifest. For a renamed file use the new path, never the old one, also for `left` findings. Take `line` and `side` from the patch: `right` (the default) is the new version of the file, `left` the old one. `line` is a changed line of the diff. Use `line: null` only for a finding about the whole file; it forbids `start_line`, `side` and `suggestion`.
 - `start_line`, when used, is less than `line` and on the same side.
-- Put replacement code only in the structured `suggestion` field, as `{"lines": [...]}`, on the right side with a non-null `line`. It replaces `start_line` through `line`, or `line` alone without `start_line`. Each element of `lines` is one line of code with no line break.
+- Put replacement code only in the structured `suggestion` field, as `{"lines": [...]}`, on the right side with a non-null `line`. It replaces `start_line` through `line`, or `line` alone without `start_line`. Each element of `lines` is one line of code with no line terminator or control character.
 - Never write a suggestion fence in any text field or suggestion line: a run of three or more backticks or tildes followed by the word suggestion in any letter case, anywhere in a line.
 - At most 200 findings may have a non-null `line` and at most 500 findings in all; make the rest file-level (`line: null`) or drop them.
 - In prose, do not use `<`, `@` or images; they are neutralized when posted. Use plain text: no control, invisible or format characters and no non-ASCII space, in `body`, `summary`, `risk_reasons` and findings. Never quote secrets, tokens or keys in the summary, reason, body or findings; name the file and line instead.
