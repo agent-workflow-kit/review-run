@@ -13,9 +13,10 @@ Seams, each with its owner:
   is missing
   the default leaves the run ``running`` in phase ``session`` (its agent and ``awaited_run``
   stored, so ``show``, ``wait`` and ``reconcile`` can finalize it later) and raises ``internal``.
-* The code run (phase ``code_run``, ``code-run.json``): TODO(#35). Until it lands a repo that
-  configures ``run_pr_code`` is reviewed without one (a ``warning`` log record says so) and the
-  prompt says no code run is configured.
+* The code run (phase ``code_run``, ``code-run.json``): TODO(#35). Until it lands (#35 writes
+  ``code-run.json`` in every case) a run that configures ``run_pr_code`` is not supported end to
+  end: the session still runs (a ``warning`` log record says so) but finalize finds no
+  ``code-run.json`` and ends such a run ``internal`` (todo(#35)).
 * Signals (record the cancellation, stop the launcher and the waiter): TODO(#27). Until it lands
   a SIGTERM or SIGINT outside a gateway call kills the process with the lease held and the prompt
   files on disk; #27 installs handlers around the whole ``run_review``, removes the prompt files on
