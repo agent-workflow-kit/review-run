@@ -274,6 +274,9 @@ def _summary(value: object) -> dict[str, Any] | None:
     }
 
 
+summary_of = _summary  # the closed shape check, for the finalizer
+
+
 def _failure(value: object, reason: str) -> dict[str, Any]:
     raw = value if isinstance(value, dict) else {}
     tool = _enum(raw.get("tool"), TOOLS)
