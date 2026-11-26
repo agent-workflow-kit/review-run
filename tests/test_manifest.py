@@ -835,3 +835,54 @@ def test_hunkless_section_with_counted_change_is_a_mismatch(
 ) -> None:
     f = fails([fe("a", "renamed", "o", add, dele)], _RENAME)
     assert (f.reason, f.lower_code) == ("prefetch_failed", "diff_files_mismatch")
+
+
+# -- Manifest.from_json (for a finalizer in another process) ---------------------------------------
+
+
+def test_from_json_round_trips_every_disposition() -> None:
+    files = [fe("a.py"), fe("b.py", "added", add=2, dele=0), fe("img.png", add=None, dele=None)]
+    diff = (
+        "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -1 +1 @@\n-x\n+y\n"
+        "diff --git a/b.py b/b.py\nnew file mode 100644\n--- /dev/null\n+++ b/b.py\n@@ -0,0 +1,2 @@\n+1\n+2\n"
+        "diff --git a/img.png b/img.png\nBinary files a/img.png and b/img.png differ\n"
+    )
+    built = build(files, diff)
+    again = mf.Manifest.from_json(json.loads(json.dumps(built.to_json())))
+    assert again.entries == built.entries and again.inputs == ()
+    assert again.coverage_preview() == built.coverage_preview()
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda e: e.pop("path"),
+        lambda e: e.update(extra=1),
+        lambda e: e.update(file="f1"),
+        lambda e: e.update(status="odd"),
+        lambda e: e.update(disposition="odd"),
+        lambda e: e.update(bytes=-1),
+        lambda e: e.update(bytes=True),
+        lambda e: e.update(additions="1"),
+        lambda e: e.update(inputs="f0001.patch"),
+        lambda e: e.update(path=""),
+        lambda e: e.update(old_path=""),
+    ],
+)
+def test_from_json_refuses_what_to_json_never_writes(mutate) -> None:  # type: ignore[no-untyped-def]
+    entry = build(
+        [fe("a.py")], "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -1 +1 @@\n-x\n+y\n"
+    ).to_json()[0]
+    mutate(entry)
+    with pytest.raises(ValueError):
+        mf.Manifest.from_json([entry])
+
+
+def test_from_json_refuses_a_non_list_and_duplicate_ids() -> None:
+    entry = build(
+        [fe("a.py")], "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -1 +1 @@\n-x\n+y\n"
+    ).to_json()[0]
+    for bad in (None, {}, "x", [entry, entry], [1]):
+        with pytest.raises(ValueError):
+            mf.Manifest.from_json(bad)
+    assert mf.Manifest.from_json([]).entries == ()

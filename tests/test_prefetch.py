@@ -49,6 +49,7 @@ class _Routed:
         env: Mapping[str, str] | None = None,
         cwd: str | None = None,
         term_grace: float = 0.0,
+        on_start: Callable[[int], None] | None = None,
     ) -> CompletedRun:
         assert env is None, "pre-fetch must not build an environment"
         self.calls.append(tuple(argv))
@@ -984,3 +985,18 @@ def test_previous_that_is_not_one_object_is_invalid(store: Store, data: bytes) -
         fields={"artifact_sha256": hashlib.sha256(data).hexdigest(), "artifact_size": len(data)},
     )  # fmt: skip
     assert previous_failure(store, run_id).lower_code == "previous_invalid"
+
+
+def test_show_keeps_forgectls_size_counts_and_nulls_what_is_missing_or_odd(
+    fake_gateway: FakeGateway,
+) -> None:
+    doc = fg_default_show()
+    doc.update(additions=7, deletions=3, changed_files=2)
+    fake_gateway.script("forgectl", CompletedRun(("x",), 0, json.dumps(doc), ""))
+    facts = pf.resolve_pr(PR)
+    assert (facts.additions, facts.deletions, facts.changed_files) == (7, 3, 2)
+    doc.update(additions=-1, deletions="3", changed_files=True)
+    fake_gateway.scripts.clear()
+    fake_gateway.script("forgectl", CompletedRun(("x",), 0, json.dumps(doc), ""))
+    odd = pf.resolve_pr(PR)
+    assert (odd.additions, odd.deletions, odd.changed_files) == (None, None, None)

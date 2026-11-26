@@ -411,3 +411,32 @@ def test_the_guard_refuses_a_real_program_by_absolute_path() -> None:
 def test_the_guard_refuses_a_shell() -> None:
     with pytest.raises(RealProgramRefused):
         subprocess.run("echo hi", shell=True, check=False)  # noqa: S602
+
+
+def test_on_start_gets_the_childs_pid_before_its_output_is_read() -> None:
+    seen: list[int] = []
+    done = gw.SystemGateway().run(
+        py("import os;print(os.getpid())"), timeout=10, on_start=seen.append
+    )
+    assert seen == [int(done.stdout)]
+
+
+def test_an_exception_from_on_start_ends_the_childs_group_and_propagates() -> None:
+    pids: list[int] = []
+
+    def refuse(pid: int) -> None:
+        pids.append(pid)
+        raise RuntimeError("stop")
+
+    with pytest.raises(RuntimeError):
+        gw.SystemGateway().run(py("import time;time.sleep(60)"), timeout=30, on_start=refuse)
+    assert not alive(pids[0])
+
+
+def test_the_module_run_passes_on_start_only_when_given(fake_gateway: Any) -> None:
+    from tests.fake_gateway import ok
+
+    fake_gateway.script("tool", ok("x"))
+    gw.run(["tool"], timeout=5)
+    gw.run(["tool"], timeout=5, on_start=lambda _pid: None)
+    assert len(fake_gateway.calls) == 2

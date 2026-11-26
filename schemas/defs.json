@@ -770,7 +770,7 @@
             "null"
           ],
           "pattern": "^[a-z][a-z0-9_]*$",
-          "description": "A sibling's closed error code, or one of the gateway codes timeout, tool_missing, output_too_large or failed, or a code review-run itself sets (invalid_output, head_moved, files_incomplete, hard_ceiling, draft_pr_mismatch, diff_files_mismatch, previous_missing, previous_modified, previous_invalid)."
+          "description": "A sibling's closed error code, or one of the gateway codes timeout, tool_missing, output_too_large or failed, or a code review-run itself sets (invalid_output, plugin_changed, head_moved, files_incomplete, hard_ceiling, draft_pr_mismatch, diff_files_mismatch, previous_missing, previous_modified, previous_invalid)."
         },
         "lower_reason": {
           "type": [
@@ -2036,7 +2036,7 @@
             "null"
           ],
           "pattern": "^[a-z][a-z0-9_]*$",
-          "description": "A sibling's closed error code, or one of the gateway codes timeout, tool_missing, output_too_large or failed, or a code review-run itself sets (invalid_output, head_moved, files_incomplete, hard_ceiling, draft_pr_mismatch, diff_files_mismatch, previous_missing, previous_modified, previous_invalid); never a message."
+          "description": "A sibling's closed error code, or one of the gateway codes timeout, tool_missing, output_too_large or failed, or a code review-run itself sets (invalid_output, plugin_changed, head_moved, files_incomplete, hard_ceiling, draft_pr_mismatch, diff_files_mismatch, previous_missing, previous_modified, previous_invalid); never a message."
         },
         "hook": {
           "enum": [

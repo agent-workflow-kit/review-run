@@ -36,7 +36,7 @@ from typing import Any
 from review_run import gateway
 from review_run.errors import ReviewRunError
 from review_run.fsmodes import write_private_file
-from review_run.store import Expect, Store
+from review_run.store import Expect, Lease, Store
 
 #: Seconds allowed to each forgectl and pr-comment read (interface.md, Finalize recovery).
 CALL_TIMEOUT = 60.0
@@ -85,6 +85,10 @@ class PrFacts:
     is_bot: bool | None
     is_fork: bool | None
     base_is_default: bool | None
+    # forgectl's size counts (the ``pre-run`` payload's ``sizes``); null when it gave none.
+    additions: int | None = None
+    deletions: int | None = None
+    changed_files: int | None = None
 
     def run_facts(self) -> dict[str, bool | None]:
         """The four facts stored in ``pr.json`` and ``meta.review_run.pr``."""
@@ -382,6 +386,11 @@ def _ref(value: object, *, limit: int = 1024) -> str:
     return value
 
 
+def _count_or_none(value: object) -> int | None:
+    """An optional size count: a non-negative integer, else null (never a failure)."""
+    return value if type(value) is int and value >= 0 else None  # noqa: E721
+
+
 def _parse_show(doc: object) -> PrFacts:
     d = _obj(doc)
     pr, repo = _str(d.get("pr")), _str(d.get("repo"))
@@ -410,6 +419,9 @@ def _parse_show(doc: object) -> PrFacts:
         is_bot=_flag(author.get("is_bot"), null=True),
         is_fork=_flag(head.get("is_fork"), null=True),
         base_is_default=_flag(base.get("is_default"), null=True),
+        additions=_count_or_none(d.get("additions")),
+        deletions=_count_or_none(d.get("deletions")),
+        changed_files=_count_or_none(d.get("changed_files")),
     )
 
 
@@ -667,7 +679,13 @@ def prefetch(pr: str, *, hard_ceiling_bytes: int) -> Prefetch:
 
 
 def persist_prefetch(
-    store: Store, run_id: str, expect: Expect, facts: PrFacts, result: Prefetch
+    store: Store,
+    run_id: str,
+    expect: Expect,
+    facts: PrFacts,
+    result: Prefetch,
+    *,
+    lease: Lease | None = None,
 ) -> bool:
     """Persist what finalize needs: ``pr.json`` (the four PR facts) in the run directory, then
     ``draft_id`` and ``anchor`` on the run's row in one compare-and-set on ``expect``.
@@ -681,7 +699,7 @@ def persist_prefetch(
     data = json.dumps(facts.run_facts(), sort_keys=True).encode("ascii") + b"\n"
     write_private_file(run_dir / "pr.json", data)
     return store.update_fields(
-        run_id, expect, draft_id=result.draft_id, anchor=result.anchor.to_dict()
+        run_id, expect, lease=lease, draft_id=result.draft_id, anchor=result.anchor.to_dict()
     )
 
 

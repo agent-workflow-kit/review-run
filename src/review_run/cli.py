@@ -13,13 +13,15 @@ from pathlib import Path
 from typing import Any, NoReturn
 
 from . import __version__
+from . import hooks as hooks_mod
 from . import runs as runs_mod
-from .audit import export_lines
+from .audit import Caller, export_lines
 from .config import load_config
 from .durations import DurationError, parse_duration, parse_since
 from .errors import DECISION_ID_RE, MAX_DECISION_IDS, PROG, ExitCode, ReviewRunError, printable
 from .fsmodes import apply_umask
 from .preflight import RunRequest, plan_run
+from .runner import Interrupted, Options, run_review
 from .store import Store, default_state_root
 
 DESCRIPTION = "Run a review skill on a pull request and store the resulting review draft."
@@ -279,8 +281,11 @@ def _export(args: argparse.Namespace) -> int:
 
 
 def _run_command(args: argparse.Namespace) -> int:
-    """``run``: run order steps 1 and 2 (issue #16); the rest belongs to later issues."""
+    """``run``: run order steps 1 and 2 (issue #16), then 3 to 7 (``runner``: the ``pre-run``
+    hooks, the run record, pre-fetch, launch and the wait; issues #17 and #18)."""
     config = load_config(None if args.config is None else Path(args.config))
+    hooks_mod.add_flag_hooks([], args.hook)  # usage (exit 2) before anything is read
+    stdin_tty = sys.stdin.isatty()
     request = RunRequest(
         pr=args.pr,
         skill=args.skill,
@@ -293,14 +298,29 @@ def _run_command(args: argparse.Namespace) -> int:
         decision_ids=tuple(args.decision_id),
         override_escalation=args.override_escalation,
     )
-    plan = plan_run(request, config, default_state_root(), stdin_is_tty=sys.stdin.isatty())
+    root = default_state_root()
+    plan = plan_run(request, config, root, stdin_is_tty=stdin_tty)
     if not args.quiet:
         for code in plan.warnings:
             print(f"{PROG}: warning: {code}", file=sys.stderr)
-    # TODO(#17): fire the pre-run hooks after reserving the id (store.reserve_id).
-    # TODO(#18): create the run record, write the run files (settings.write_run_files), pre-fetch,
-    #   launch and wait; #24 maps the outcome to the exit code; #15 prints the --dry-run plan.
-    raise ReviewRunError("internal", "run is not implemented past its checks yet")
+    if args.dry_run:
+        # TODO(#15): print the dry-run plan (launch_argv, manifest, sizes, would_exit).
+        raise ReviewRunError("internal", "run --dry-run is not implemented yet")
+    caller = Caller.resolve(
+        args.actor, stdin_tty=stdin_tty, decision_ids=args.decision_id, labels=args.label
+    )
+    options = Options(caller=caller, flag_hooks=tuple(args.hook), no_wait=args.no_wait)
+    try:
+        run = run_review(plan, root, options)
+    except Interrupted as stop:
+        return stop.exit_code  # a waiter ended by a signal prints nothing (TODO(#27))
+    # TODO(#24): the outcome-to-output and exit-code mapping of every run state.
+    obj = runs_mod.run_object(run)
+    if run.state == "running":  # --no-wait: the session started
+        _write_stdout(runs_mod.dump(obj) if args.json else f"{run.run_id}\n")
+        return 0
+    _write_stdout(runs_mod.dump(obj) if args.json else runs_mod.human_run(obj))
+    return int(obj["exit_code"])
 
 
 def _write_stdout(text: str | bytes) -> None:
@@ -354,7 +374,7 @@ def _show(args: argparse.Namespace) -> int:
 
 # Each command is replaced by its owning issue's implementation.
 _HANDLERS: dict[str, Handler] = {
-    "run": _run_command,  # steps 1 and 2 (#16); TODO(#18): launch; TODO(#24): outcome mapping
+    "run": _run_command,  # steps 1 to 7 (#16, #17, #18); TODO(#24): outcome mapping; TODO(#15)
     "resume": _stub("resume"),  # TODO(#28): resume
     "wait": _stub("wait"),  # TODO(#24): wait
     "list": _list,

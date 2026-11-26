@@ -67,6 +67,7 @@ class FakeGateway:
         env: Mapping[str, str] | None = None,
         cwd: str | None = None,
         term_grace: float = 0.0,
+        on_start: Callable[[int], None] | None = None,
     ) -> CompletedRun:
         gw.check_call(argv, timeout, stdin=stdin, env=env, cwd=cwd, term_grace=term_grace)
         call = Call(
