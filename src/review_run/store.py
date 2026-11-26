@@ -310,22 +310,36 @@ def ensure_state_root(root: Path) -> None:
 
 def _prepare_db_file(path: Path) -> None:
     """Create ``state.db`` as 0600 (``O_EXCL``) or verify and tighten an existing one."""
-    flags = os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC
+    # An existing file is never opened here: closing any descriptor on it would drop the POSIX
+    # locks SQLite holds through this process's other connections to the same file.
     try:
+        info = os.lstat(path)
+    except FileNotFoundError:
         try:
-            fd = os.open(path, flags | os.O_CREAT | os.O_EXCL, FILE_MODE)
-        except FileExistsError:
-            fd = os.open(path, flags)
+            fd = os.open(
+                path, os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_CREAT | os.O_EXCL, FILE_MODE
+            )
+        except FileExistsError:  # created meanwhile by another process: verify it below
+            info = None
+        except OSError:
+            raise _unsafe() from None
+        else:
+            os.close(fd)  # a new file: no lock of this process can exist on it yet
+            return
     except OSError:
-        raise _unsafe() from None  # a symlink, a directory or no permission
-    try:
-        info = os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid():
-            raise _unsafe()
-        if stat.S_IMODE(info.st_mode) != FILE_MODE:
-            os.fchmod(fd, FILE_MODE)
-    finally:
-        os.close(fd)
+        raise _unsafe() from None
+    if info is None:
+        try:
+            info = os.lstat(path)
+        except OSError:
+            raise _unsafe() from None
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid():
+        raise _unsafe()  # a symlink, a directory or a foreign file
+    if stat.S_IMODE(info.st_mode) != FILE_MODE:
+        try:
+            os.chmod(path, FILE_MODE)
+        except OSError:
+            raise _unsafe() from None
 
 
 # ---------------------------------------------------------------- the store

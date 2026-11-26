@@ -176,7 +176,18 @@ def test_a_recorded_cancellation_refuses_the_resume(world: World) -> None:
     assert fresh(world).cancel_requested_at is not None and fresh(world).state == "escalated"
 
 
-@pytest.mark.parametrize("answer", [b"", b"  \n\t", b"x" * 200_000])
+@pytest.mark.parametrize(
+    "answer",
+    [
+        b"",
+        b"  \n\t",
+        b"x" * 200_000,
+        "\u00a0\u00a0".encode(),  # NBSP only
+        "\u3000\n\u3000".encode(),  # ideographic space only
+        b"\x00\x00\x00",  # NULs only
+        b" \x00\x1b\x07 \n",  # whitespace and control characters only
+    ],
+)
 def test_a_bad_answer_is_usage_before_any_change(world: World, answer: bytes) -> None:
     escalate(world)
     before = fresh(world)
@@ -324,21 +335,25 @@ def test_a_run_ended_in_its_launch_phase_is_recorded_and_reverted(world: World) 
 
 
 def test_a_missing_agent_spawn_reverts(world: World) -> None:
+    from review_run import gateway
+
     escalate(world)
     before = fresh(world)
 
     def hide(argv: Any) -> None:
-        pass
+        if argv[1] == "resume":
+            raise gateway.ToolMissing("agent-spawn not found")
 
-    world.router.missing = set()
-    world.fb.script(
-        "agent-spawn",
-        "resume",
-        *[{"hang": False, "error": {"code": "tool_missing", "message": "m"}, "exit": 12}],
-    )
-    with pytest.raises(ReviewRunError):
+    world.router.on_run = hide
+    with pytest.raises(ReviewRunError) as info:
         do_resume(world)
-    assert unchanged(world, before)
+    assert (info.value.code, info.value.reason, info.value.exit_code) == (
+        "failed",
+        "tool_missing",
+        12,
+    )
+    assert unchanged(world, before) and fresh(world).state == "escalated"
+    assert calls(world, "resume") == []
 
 
 def test_two_resumes_race_and_exactly_one_wins(world: World) -> None:
@@ -357,7 +372,7 @@ def test_two_resumes_race_and_exactly_one_wins(world: World) -> None:
         assert world.sleeps == []
 
 
-def test_a_busy_lease_on_an_escalated_run_is_waited_for_then_refused(world: World) -> None:
+def test_a_busy_lease_on_an_escalated_run_is_waited_for_then_wait_timeout(world: World) -> None:
     escalate(world)
     run = fresh(world)
     with world.store() as store:
@@ -367,10 +382,11 @@ def test_a_busy_lease_on_an_escalated_run_is_waited_for_then_refused(world: Worl
         assert lease is not None
         with pytest.raises(ReviewRunError) as info:
             do_resume(world)
-        assert (
-            info.value.reason == "not_escalated" and len(world.sleeps) == resume_mod.LEASE_ATTEMPTS
-        )
-        assert fresh(world).state == "escalated"
+        err = info.value
+        assert (err.exit_code, err.code, err.reason) == (12, "failed", "wait_timeout")
+        assert err.details == {"retryable": True}
+        assert len(world.sleeps) == resume_mod.LEASE_ATTEMPTS
+        assert fresh(world).state == "escalated" and resume_audit(world) == []
         store.release_lease(lease)
 
 
@@ -584,3 +600,208 @@ def test_a_cancellation_recorded_after_the_session_started_stops_and_ends_it(wor
     assert (ended.state, ended.reason, ended.exit_code) == ("failed", "canceled", 143)
     assert len(calls(world, "stop")) == 1 and ended.teardown == "done"
     del cancel_after
+
+
+# -- round 1 of the review ----------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("entry", ["pre-run=true", "bogus=true", "post-run"])
+def test_only_post_hooks_are_accepted_and_checked_before_anything_changes(
+    world: World, entry: str
+) -> None:
+    escalate(world)
+    before = fresh(world)
+    with pytest.raises(ReviewRunError) as info:
+        do_resume(world, flag_hooks=(entry,))
+    assert (info.value.code, info.value.exit_code) == ("usage", 2)
+    assert fresh(world) == before and resume_audit(world) == []
+    assert calls(world, "resume") == []
+
+
+def test_a_late_external_resume_in_the_window_is_finalized_not_resumed_again(
+    world: World,
+) -> None:
+    from tests.test_meta import artifact_text
+
+    escalate(world)
+    run = fresh(world)
+    assert run.agent_id
+    world.fb.use("agent-spawn", "resume_outcome", outcome="done", artifact_text=artifact_text())
+    shows: list[int] = []
+
+    def late(argv: Any) -> None:
+        if argv[1] == "show":
+            shows.append(1)
+            if len(shows) == 2:  # step 2's read, under the lease: a human's resume finishes now
+                assert run.agent_id
+                world.fb.run("agent-spawn", "resume", run.agent_id, "--wait", "--json")
+
+    world.router.on_run = late
+    with pytest.raises(ReviewRunError) as info:
+        do_resume(world)
+    assert (info.value.reason, info.value.details) == ("not_escalated", {"state": "done"})
+    assert fresh(world).state == "done" and len(calls(world, "resume")) == 1  # the human's only
+
+
+def test_a_signal_after_the_move_commit_takes_the_handed_path(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from review_run import signals
+
+    escalate(world)
+    real = Store.begin_resume
+
+    def wrapped(self: Store, *args: Any, **kwargs: Any) -> bool:
+        moved = real(self, *args, **kwargs)
+        assert moved
+        raise signals.SignalExit(143, 15)  # the deferred exit of the commit's section
+
+    monkeypatch.setattr(Store, "begin_resume", wrapped)
+    ended = do_resume(world)
+    assert (ended.state, ended.reason, ended.exit_code) == ("failed", "canceled", 143)
+    assert calls(world, "resume") == []
+    recs = resume_audit(world)
+    assert [r["result"]["status"] for r in recs] == ["attempted", "failed"]
+
+
+def test_a_signal_while_the_lease_is_set_up_releases_it(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from review_run import signals
+    from review_run.store import lease_name
+
+    escalate(world)
+    run = fresh(world)
+
+    def boom(*args: Any, **kwargs: Any) -> None:
+        raise signals.SignalExit(143, 15)
+
+    monkeypatch.setattr(resume_mod, "LeaseKeeper", boom)
+    with pytest.raises(signals.SignalExit):
+        do_resume(world)
+    with world.store() as store:
+        lease = store.acquire_lease(lease_name(run.run_id))
+        assert lease is not None  # not leaked until its expiry
+        store.release_lease(lease)
+
+
+def test_the_termctl_tool_of_an_envelope_is_copied(world: World) -> None:
+    escalate(world)
+    before = fresh(world)
+    world.fb.script(
+        "agent-spawn",
+        "resume",
+        {"error": {"code": "failed", "message": "m", "tool": "termctl"}, "exit": 12},
+    )
+    with pytest.raises(ReviewRunError) as info:
+        do_resume(world)
+    assert (info.value.tool, info.value.reason) == ("termctl", "lower_failed")
+    assert info.value.envelope()["error"]["tool"] == "termctl"
+    assert unchanged(world, before)
+
+
+def test_an_ending_before_the_session_reports_the_stored_actor(world: World) -> None:
+    out = world.tmp / "hook.json"
+    cmd = f"import sys,pathlib;pathlib.Path({str(out)!r}).write_text(sys.stdin.read())"
+    world.fb.use("agent-spawn", "outcome", outcome="needs-input")
+    run = world.run(flag_hooks=(f"post-run={cmd}",))
+    assert run.state == "escalated" and run.actor == "human:alice"
+    assert run.agent_id
+    world.fb.run("agent-spawn", "teardown", run.agent_id, "--json")
+    bob = CALLER.__class__("human:bob", "flag", False, ("d-9",), ())
+    ended = do_resume(world, caller=bob, flag_hooks=("post-run=true",))
+    assert (ended.state, ended.reason) == ("failed", "agent_gone")
+    payload = json.loads(out.read_text())
+    assert payload["actor"] == "human:alice" and "d-9" not in payload["decision_ids"]
+    assert ended.actor == "human:alice" and "post-run=true" not in ended.hooks
+
+
+def test_a_failed_launch_started_update_reverts_the_move(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    escalate(world)
+    before = fresh(world)
+    real = Store.update_fields
+
+    def wrapped(self: Store, *args: Any, **kwargs: Any) -> bool:
+        if "launch_started_at" in kwargs:
+            return False
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Store, "update_fields", wrapped)
+    with pytest.raises(ReviewRunError) as info:
+        do_resume(world)
+    assert info.value.code == "internal"
+    assert unchanged(world, before) and fresh(world).state == "escalated"
+    assert calls(world, "resume") == []
+    assert resume_audit(world)[-1]["result"]["status"] == "failed"
+
+
+def test_resume_hooks_and_the_runs_stored_hooks_each_fire_once(world: World) -> None:
+    from tests.test_meta import artifact_text
+
+    sink = world.tmp / "hooks.txt"
+
+    def hook(tag: str) -> str:
+        return f"import pathlib;f=open({str(sink)!r},'a');f.write({tag!r});f.close()"
+
+    world.fb.use("agent-spawn", "outcome", outcome="needs-input")
+    run = world.run(flag_hooks=(f"post-run={hook('Y')}",))
+    assert run.state == "escalated"
+    world.fb.use("agent-spawn", "resume_outcome", outcome="done", artifact_text=artifact_text())
+    ended = do_resume(world, flag_hooks=(f"post-run={hook('X')}",))
+    assert ended.state == "done", ended.failure
+    assert sorted(sink.read_text()) == ["X", "Y"]
+
+
+def test_a_cancellation_between_the_lease_and_the_move_refuses_the_resume(world: World) -> None:
+    escalate(world)
+    run = fresh(world)
+    shows: list[int] = []
+
+    def cancel_now(argv: Any) -> None:
+        if argv[1] == "show":
+            shows.append(1)
+            if len(shows) == 2:  # step 2, under the lease
+                with Store.open(world.root) as store:
+                    cur = store.get_run(run.run_id)
+                    assert cur is not None
+                    assert store.request_cancel(run.run_id, cur.key, actor="human:a", exit_code=143)
+
+    world.router.on_run = cancel_now
+    with pytest.raises(ReviewRunError) as info:
+        do_resume(world)
+    assert (info.value.exit_code, info.value.reason) == (20, "not_escalated")
+    assert calls(world, "resume") == []
+    now = fresh(world)
+    assert now.state == "escalated" and now.cancel_requested_at is not None
+
+
+def test_the_answer_marker_appears_nowhere_but_the_prompt_file(
+    world: World, cli: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import sqlite3
+
+    from review_run.store import default_state_root
+
+    marker = "Answer-marker-91c2"
+    rid = cli_escalate(world, cli)
+    world.fb.use("agent-spawn", "resume_outcome", outcome="blocked")
+    res = cli("--json", "resume", rid, "--prompt-file", answer_file(world))
+    assert res.code == 13
+    assert marker not in res.out and marker not in res.err
+    (call,) = calls(world, "resume")
+    assert call.argv.count("--prompt-file") == 1
+    for c in world.fb.all_calls():
+        seen = json.dumps([c.argv, c.env, c.cwd, c.stdin, c.stdout, c.stderr])
+        assert marker not in seen, (c.tool, c.argv)
+    root = default_state_root()
+    assert not (root / "runs" / rid / "prompt.md").exists()
+    for path in root.rglob("*"):
+        if path.is_file():
+            assert marker.encode() not in path.read_bytes(), path
+    conn = sqlite3.connect(f"file:{root / 'state.db'}?mode=ro", uri=True)
+    try:
+        assert marker not in "\n".join(conn.iterdump())
+    finally:
+        conn.close()

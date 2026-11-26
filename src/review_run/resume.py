@@ -42,6 +42,7 @@ import os
 import signal
 import stat
 import sys
+import unicodedata
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -84,7 +85,10 @@ from .waiting import _LazyHooks, refresh_run, resolve
 DEFAULT_ANSWER_LIMIT: Final = 65536  # limits.max_answer_bytes' default (the stored value wins)
 LEASE_ATTEMPTS: Final = 30  # a finalizer that holds the lease is waited for this many polls
 LEASE_POLL_SECONDS: Final = 1.0
-_SIBLINGS: Final = frozenset({"forgectl", "pr-comment", "agent-spawn", "claude-session", "wtctl"})
+LATE_RESUME_ATTEMPTS: Final = 3  # refresh rounds when an external resume lands in the window
+_SIBLINGS: Final = frozenset(
+    {"forgectl", "pr-comment", "agent-spawn", "claude-session", "wtctl", "termctl"}
+)
 _AGENT_SPAWN_REASONS: Final = frozenset(
     {"live", "tearing_down", "third_party_cwd", "third_party_run"}
 )
@@ -217,9 +221,16 @@ def read_answer(source: str, limit: int) -> bytes:
                 os.close(fd)
     except (OSError, ValueError, AttributeError):
         raise _unreadable() from None
-    if not data.strip():
+    if _blank(data):
         raise ReviewRunError("usage", "the answer is empty")
     return data
+
+
+def _blank(data: bytes) -> bool:
+    """Nothing but whitespace (Unicode included) and control or format characters, NULs among
+    them, which the sanitizer would only mark: the answer says nothing."""
+    text = data.decode("utf-8", errors="replace")
+    return all(ch.isspace() or unicodedata.category(ch).startswith("C") for ch in text)
 
 
 def _answer_limit(run_dir: Path) -> int:
@@ -258,28 +269,52 @@ def _refresh(root: Path, run_id: str, opts: ResumeOptions) -> None:
         pass
 
 
-def _take_lease(store: Store, root: Path, run_id: str, opts: ResumeOptions) -> tuple[Lease, Run]:
+def _take_lease(
+    store: Store, run_id: str, opts: ResumeOptions, held: list[Lease]
+) -> tuple[Lease, Run]:
     """The lease of an ``escalated`` run with no recorded cancellation, and the row read under
     it. A holder (a finalizer: ``show``, ``wait``, ``reconcile``, another ``resume``) is waited
-    for ``LEASE_ATTEMPTS`` polls; one that is still there then, or a row that is no longer
-    ``escalated``, is exit 20 ``not_escalated``."""
+    for ``LEASE_ATTEMPTS`` polls; one that is still there then is exit 12 ``wait_timeout`` (the run
+    unchanged), a row that is no longer ``escalated`` exit 20 ``not_escalated``. A lease taken
+    is in ``held`` at once (no signal falls between taking it and the caller's ``finally``)."""
     for attempt in range(LEASE_ATTEMPTS + 1):
         row = store.get_run(run_id, tolerant=True)
         if row is None:
             raise ReviewRunError("not_found", "no such run")
         if row.state != "escalated" or row.cancel_requested_at is not None:
             raise _not_escalated(row)
-        lease = store.acquire_lease(lease_name(run_id))
+        with signals.deferred(raise_on_exit=False):
+            lease = store.acquire_lease(lease_name(run_id))
+            if lease is not None:
+                held.append(lease)
         if lease is not None:
-            held = store.get_run(run_id, tolerant=True)
-            if held is not None and held.state == "escalated" and held.cancel_requested_at is None:
-                return lease, held
-            store.release_lease(lease)
-            raise _not_escalated(held or row)
+            under = store.get_run(run_id, tolerant=True)
+            if (
+                under is not None
+                and under.state == "escalated"
+                and under.cancel_requested_at is None
+            ):
+                return lease, under
+            raise _not_escalated(under or row)  # the caller's ``finally`` releases the lease
         if attempt == LEASE_ATTEMPTS:
-            raise _not_escalated(row)
+            raise ReviewRunError(
+                "failed",
+                "the run's lease is held by another process",
+                reason="wait_timeout",
+                details={"retryable": True},
+            )
         opts.sleep(LEASE_POLL_SECONDS)
     raise AssertionError("unreachable")  # pragma: no cover
+
+
+class _Stale(ReviewRunError):
+    """The agent finished a newer run after the refresh (a late external resume): the run is
+    refreshed again (finalizing it) before anything else happens."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "refused", "the agent moved on", reason="not_escalated", details={"state": "escalated"}
+        )
 
 
 # -- the agent -----------------------------------------------------------------------------------
@@ -500,6 +535,8 @@ def _steps(flow: ResumeFlow, row: Run, files: PromptFiles, entries: Sequence[str
         return _gone(flow, verdict)  # step 2: the run ends, exit 12 with the run object
     if verdict == "live":
         raise ReviewRunError("refused", "the agent is live", reason="live")  # step 3
+    if row.awaited_run is not None and last > row.awaited_run:
+        raise _Stale()  # a late external resume: the refresh finalizes it, the retry reports it
     try:
         verify_plugin_dirs(flow.settings)  # step 4
     except PluginChanged:
@@ -507,7 +544,20 @@ def _steps(flow: ResumeFlow, row: Run, files: PromptFiles, entries: Sequence[str
     flow.awaited = last + 1
     flow.check_lease()
     # step 5: the first effect; no call to agent-spawn happens before it
-    if not store.begin_resume(flow.run_id, row.key, lease=flow.lease, awaited_run=flow.awaited):
+    try:
+        moved = store.begin_resume(flow.run_id, row.key, lease=flow.lease, awaited_run=flow.awaited)
+    except signals.SignalExit:
+        # the signal may be the deferred exit of the commit: when the row moved because of this
+        # resume the run is ours to end (the handed path), otherwise nothing changed
+        current = flow.row()
+        if (
+            current.state == "running"
+            and current.phase == "session"
+            and current.awaited_run == flow.awaited
+        ):
+            flow.handed = True
+        raise
+    if not moved:
         raise _not_escalated(flow.row())
     flow.handed = True
     flow.note("state_change", "run resumed", state="running")
@@ -522,7 +572,9 @@ def _steps(flow: ResumeFlow, row: Run, files: PromptFiles, entries: Sequence[str
         current = flow.row()
         if current.state == "running" and current.cancel_requested_at is not None:
             return _end_canceled(flow, current.cancel_exit_code or 143)
-        raise ReviewRunError("internal", "the run changed before the resume was launched")
+        return _revert(
+            flow, ReviewRunError("internal", "the run changed before the resume was launched")
+        )
     flow.launched = True
     ids = _ids(row, opts)
     launched = _launch_resume(flow, row, agent_id, ids)  # step 6
@@ -542,6 +594,7 @@ def _steps(flow: ResumeFlow, row: Run, files: PromptFiles, entries: Sequence[str
         fields=fields,
     ):
         raise ReviewRunError("internal", "the run changed while the resume was stored")
+    flow.ender.payload_actor = opts.caller.actor  # the session started: this resume's actor
     flow.note("phase_change", "phase session", phase="session")
     current = flow.row()
     if current.cancel_requested_at is not None:
@@ -589,26 +642,22 @@ def _drive(flow: ResumeFlow, row: Run, files: PromptFiles, entries: Sequence[str
         remove_prompt_files(flow.run_dir)  # on every path: the answer never stays on disk
 
 
-def resume_run(root: Path, ref: str, source: str, opts: ResumeOptions) -> Run:
-    """``resume`` for the run ``ref`` with the answer in ``source`` (a path, or ``-``); returns the
-    run as stored when this process is done with it: ``done``, ``failed`` (also ``agent_gone`` and
-    ``canceled``), ``escalated`` again or, for ``--no-wait``, ``running`` with its session
-    started. Raises ``ReviewRunError`` (an envelope: the run did not change, except
-    ``lower_failed`` after the session started) and ``Interrupted`` for a waiter ended by a
-    signal."""
-    entries = hooks.add_flag_hooks([], opts.flag_hooks)  # usage (exit 2) before anything is read
-    run_id = resolve(root, ref)
+def _resume_once(
+    root: Path, run_id: str, files: PromptFiles, entries: Sequence[str], opts: ResumeOptions
+) -> Run:
+    """Steps 1 (the lease) to 7 once; ``_Stale`` when the agent moved on after the refresh."""
     with Store.open(root) as store:
-        run_dir = store.run_dir(run_id)
-        limit = _answer_limit(run_dir)
-        files = build_prompt(run_id, read_answer(source, limit), limit)
-        _refresh(root, run_id, opts)  # step 1
-        lease, row = _take_lease(store, root, run_id, opts)
-        keeper = LeaseKeeper(root, lease, opts.lease_interval)
-        keeper.start()
+        held: list[Lease] = []
+        keeper: LeaseKeeper | None = None
+        flow: ResumeFlow | None = None
+        driven = False
         try:
+            lease, row = _take_lease(store, run_id, opts, held)
+            with signals.deferred(raise_on_exit=False):
+                keeper = LeaseKeeper(root, lease, opts.lease_interval)
+                keeper.start()
             run_object(row)  # CorruptRunError for a row that cannot be shown: before any write
-            settings = load_run_settings(run_dir)
+            settings = load_run_settings(store.run_dir(run_id))
             audit, log = AuditWriter(root), LogWriter(root)
             with signals.deferred(raise_on_exit=False):
                 attempt = audit.begin(
@@ -631,16 +680,54 @@ def resume_run(root: Path, ref: str, source: str, opts: ResumeOptions) -> Run:
                     shell=opts.shell,
                     lost=keeper.lost.is_set,
                     teardown_actor=opts.actor_flag,
+                    # an ending before the session starts reports the run's stored actor
+                    payload_actor=row.actor,
                     pair_action="resume",
                 )
                 flow = ResumeFlow(
                     store, audit, log, opts, run_id, lease, keeper, attempt, root, settings, ender
                 )
+            driven = True
             return _drive(flow, row, files, entries)
+        except signals.SignalExit as sig:
+            if flow is None or driven:
+                raise
+            return _interrupted(flow, sig)  # the window between the section and ``_drive``
         finally:
             signals.ignore_rest()  # the lease is released whatever arrives now
-            keeper.stop()
-            store.release_lease(lease)
+            if keeper is not None:
+                keeper.stop()
+            for lease_held in held:
+                store.release_lease(lease_held)
+
+
+def resume_run(root: Path, ref: str, source: str, opts: ResumeOptions) -> Run:
+    """``resume`` for the run ``ref`` with the answer in ``source`` (a path, or ``-``); returns the
+    run as stored when this process is done with it: ``done``, ``failed`` (also ``agent_gone`` and
+    ``canceled``), ``escalated`` again or, for ``--no-wait``, ``running`` with its session
+    started. Raises ``ReviewRunError`` (an envelope: the run did not change, except
+    ``lower_failed`` after the session started) and ``Interrupted`` for a waiter ended by a
+    signal."""
+    entries = hooks.add_flag_hooks([], opts.flag_hooks)  # usage (exit 2) before anything is read
+    for entry in entries:
+        if entry.split("=", 1)[0] not in hooks.POST_HOOKS:
+            raise ReviewRunError("usage", "resume accepts only post-run and post-escalate hooks")
+    run_id = resolve(root, ref)
+    with Store.open(root) as store:
+        limit = _answer_limit(store.run_dir(run_id))
+    files = build_prompt(run_id, read_answer(source, limit), limit)
+    for _ in range(LATE_RESUME_ATTEMPTS):
+        _refresh(root, run_id, opts)  # step 1, before this process holds a connection
+        try:
+            return _resume_once(root, run_id, files, entries, opts)
+        except _Stale:
+            continue
+    _refresh(root, run_id, opts)
+    with Store.open(root) as store:
+        row = store.get_run(run_id, tolerant=True)
+    if row is None:
+        raise ReviewRunError("not_found", "no such run")
+    raise _not_escalated(row)
 
 
 __all__ = ["ResumeOptions", "build_prompt", "read_answer", "resume_run"]
