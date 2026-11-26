@@ -17,8 +17,8 @@ COMMANDS: list[list[str]] = [
 ]
 # `export` (tests/test_audit.py), `list` and `show` (tests/test_runs.py) are implemented and
 # `run` has its own tests (tests/test_preflight.py: its checks reach sibling tools); the others
-# are stubs of later issues (`resume`: tests/test_resume.py; `cancel`: tests/test_cancel.py; `wait` and the refresh of `show`:
-# tests/test_outcome.py).
+# are stubs of later issues (`resume`: tests/test_resume.py; `cancel`: tests/test_cancel.py;
+# `wait` and the refresh of `show`: tests/test_outcome.py).
 
 
 def test_version_prints_version_and_exits_zero(capsys: pytest.CaptureFixture[str]) -> None:
