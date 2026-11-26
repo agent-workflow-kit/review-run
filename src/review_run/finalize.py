@@ -31,7 +31,7 @@ Seams, each with its owner (a ``Seams`` left incomplete makes ``finalize_session
 ``internal`` before it changes anything, so a ``done`` session stays ``running`` in phase
 ``session`` for a later finalizer):
 
-* ``Seams.check_session``: the skill and tool checks (step 5), TODO(#22).
+* ``Seams.check_session``: the skill and tool checks (step 5), ``session_check`` (#22).
 * ``Seams.derive``: end head and meta derivation (steps 11 and 12), ``meta.derive`` (#21);
   steps 6 to 10 (``validate_step``, the ``artifact`` module) run before it. ``Seams.process``
   overrides all of steps 6 to 12 (tests). It returns the bytes of
@@ -167,7 +167,7 @@ def validate_step(ctx: ArtifactContext) -> artifact.Validated:
 
 @dataclass(frozen=True)
 class Seams:
-    check_session: SessionCheckFn | None = None  # TODO(#22): skill and tool checks
+    check_session: SessionCheckFn | None = None
     # An override of the whole of steps 6 to 12 (tests). Unset, steps 6 to 10 are ``validate_step``
     # and steps 11 and 12 are ``derive``.
     process: ProcessFn | None = None
@@ -395,7 +395,7 @@ def finalize_session(
     if disposition.kind != "finalize":
         return ender.apply_failure(disposition)
     if not seams.complete:
-        # TODO(#22): until the skill check lands a done session stays ``running`` in phase
+        # Until every seam is supplied a done session stays ``running`` in phase
         # ``session`` (agent stored), exactly as before this issue.
         raise ReviewRunError("internal", "finalize is not complete: artifact checks are pending")
     assert run.agent_id is not None

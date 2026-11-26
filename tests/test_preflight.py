@@ -1102,18 +1102,22 @@ def test_cli_run_reports_a_reserved_label_as_a_usage_envelope(
     assert doc["error"]["reason"] == "label_reserved"
 
 
-def test_cli_run_passes_its_checks_then_stops_at_the_finalize_seam(
+def test_cli_run_passes_its_checks_then_completes_the_pipeline(
     capsys: pytest.CaptureFixture[str], fakebin: FakeBin, routed: Routed, plugin: Path
 ) -> None:
     from tests.helpers import run_cli
+    from tests.test_meta import artifact_text
 
+    fakebin.use("agent-spawn", "outcome", outcome="done", artifact_text=artifact_text())
     res = run_cli(capsys, "--json", "run", PR_URL, "--label", "team=x", "--timeout", "10m")
-    assert res.code == 1 and res.envelope()["error"]["code"] == "internal"
+    assert res.code == 0, res.out
     launch = fakebin.calls("agent-spawn", "launch")[0].argv
     assert launch[launch.index("--timeout") + 1] == "10m"
     assert "team=x" in launch
     state = Path(os.environ["XDG_STATE_HOME"]) / "review-run"
-    assert (state / "state.db").exists()  # the run record exists: the session ran, finalize is #19
+    assert (
+        state / "state.db"
+    ).exists()  # the run record exists: the session ran and finalize completed
 
 
 def test_cli_run_prints_profile_warnings_on_stderr(
@@ -1557,4 +1561,4 @@ def test_cli_run_prints_profile_warnings_on_stderr_only(
     res = run_cli(capsys, "--json", "--config", str(cfg), "run", PR_URL)
     assert "custom_profile_subagents" in res.err
     assert "custom_profile_subagents" not in res.out
-    assert res.envelope()["error"]["code"] == "internal"  # stdout is still the one envelope
+    assert json.loads(res.out)["reason"] == "artifact_invalid"  # stdout is still the one document
