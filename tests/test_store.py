@@ -6,6 +6,7 @@ import sqlite3
 import stat
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -513,9 +514,11 @@ def test_update_fields_refuses_transition_columns_and_unknown_names(store: Store
     key = Expect("running", "prefetch", None)
     for column in ("state", "phase", "cancel_requested_at", "finished_at", "reason", "run_id"):
         with pytest.raises(ValueError):
-            store.update_fields(run_id, key, **{column: "x"})
+            bad: dict[str, Any] = {column: "x"}
+            store.update_fields(run_id, key, **bad)
     with pytest.raises(ValueError):
-        store.update_fields(run_id, key, **{"agent_id = 'x', state": "done"})
+        injected: dict[str, Any] = {"agent_id = 'x', state": "done"}
+        store.update_fields(run_id, key, **injected)
 
 
 def test_json_fields_roundtrip(store: Store) -> None:

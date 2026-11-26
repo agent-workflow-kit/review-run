@@ -13,9 +13,12 @@ Seams, each with its owner:
   ``awaited_run`` stored, so ``show``, ``wait`` and ``reconcile`` can finalize it later) and
   raises ``internal``.
 * The code run (phase ``code_run``, ``code-run.json``): TODO(#35). Until it lands a repo that
-  configures ``run_pr_code`` is reviewed without one and the prompt says no code run is
-  configured.
-* Signals (record the cancellation, stop the launcher and the waiter): TODO(#27).
+  configures ``run_pr_code`` is reviewed without one (a ``warning`` log record says so) and the
+  prompt says no code run is configured.
+* Signals (record the cancellation, stop the launcher and the waiter): TODO(#27). Until it lands
+  a SIGTERM or SIGINT outside a gateway call kills the process with the lease held and the prompt
+  files on disk; #27 installs handlers around the whole ``run_review``, removes the prompt files on
+  any ``BaseException``, records the cancellation and stops the launcher.
 * The mapping of an outcome to the printed output and exit code: TODO(#24); ``cli`` prints the run
   object and exits with its code in the meantime.
 """
@@ -88,10 +91,15 @@ class Interrupted(Exception):
 # -- the lease -----------------------------------------------------------------------------------
 
 
+RENEW_FAILURES_LIMIT: Final = 3  # consecutive failed renewals (TTL 300 s, interval 60 s)
+
+
 class LeaseKeeper:
     """Renews the run's lease from a thread of its own (its own connection) every
-    ``interval`` seconds while the main thread is blocked in a call. It stops when
-    ``renew_lease`` returns ``None`` (the lease was taken over) and sets ``lost``."""
+    ``interval`` seconds while the main thread is blocked in a call. It sets ``lost`` and stops
+    when ``renew_lease`` returns ``None`` (the lease was taken over) or after
+    ``RENEW_FAILURES_LIMIT`` consecutive failures (a transient error such as a locked database
+    is retried at the next tick)."""
 
     def __init__(
         self, root: Path, lease: Lease, interval: float = float(LEASE_RENEW_SECONDS)
@@ -111,15 +119,30 @@ class LeaseKeeper:
         self._thread.join(timeout=30)
 
     def _loop(self) -> None:
+        store: Store | None = None
+        failures = 0
         try:
-            with Store.open(self.root) as store:
-                while not self._stop.wait(self.interval):
+            while not self._stop.wait(self.interval):
+                try:
+                    if store is None:
+                        store = Store.open(self.root)
                     renewed = store.renew_lease(self.lease)
-                    if renewed is None:
+                except Exception:  # transient: retried at the next tick
+                    failures += 1
+                    if failures >= RENEW_FAILURES_LIMIT:
                         self.lost.set()
                         return
-        except Exception:  # a store that cannot be opened or written: the lease will lapse
-            self.lost.set()
+                    continue
+                if renewed is None:
+                    self.lost.set()
+                    return
+                failures = 0
+        finally:
+            if store is not None:
+                try:
+                    store.close()
+                except Exception:  # nothing to do for a connection that will not close
+                    pass
 
 
 # -- the context ---------------------------------------------------------------------------------
@@ -323,19 +346,23 @@ class _Flow:
         failure: dict[str, Any] | None = None,
         escalated_run: int | None = None,
         fields: Mapping[str, Any] | None = None,
-    ) -> Run:
+        teardown_on_cancel: bool = False,
+    ) -> tuple[Run, bool]:
         """The terminal (or ``escalated``) transaction: state, the closing audit record and the
-        outbox event in one compare-and-set, then the prompt files go and the hooks are
-        delivered. A recorded cancellation turns a non-failure into ``canceled`` (only
-        ``failed`` may end such a run). When another process already moved the row, its stored
-        row is returned."""
+        outbox event in one compare-and-set, then the prompt files go. A recorded cancellation
+        turns any ending into ``failed`` ``canceled`` with the stored exit code (default 143) and
+        no ``failure``; ``teardown_on_cancel`` marks the teardown ``pending`` then (the run has
+        an agent). Returns the stored row and whether this call moved it: when another process
+        already moved the row, it owns the teardown, warnings and delivery."""
         self.check_lease()
         run = self.row()
-        if state != "failed" and run.cancel_requested_at is not None:
+        extra = dict(fields or {})
+        if run.cancel_requested_at is not None:
             state, reason = "failed", "canceled"
             exit_code = run.cancel_exit_code or 143
             failure = None
-        extra = dict(fields or {})
+            if teardown_on_cancel:
+                extra["teardown"] = "pending"
         if state == "failed":
             extra["failure"] = failure
         hook = "post-escalate" if state == "escalated" else "post-run"
@@ -398,10 +425,9 @@ class _Flow:
             events=[NewEvent(event_id, hook, payload, (record,))],
         )
         remove_prompt_files(self.run_dir)
-        if not moved:
-            return self.row()
-        self.note("state_change", f"run ended {state} ({reason})", state=state)
-        return self.row()
+        if moved:
+            self.note("state_change", f"run ended {state} ({reason})", state=state)
+        return self.row(), moved
 
     def deliver(self) -> None:
         """Right after the commit: the audit records of the transition, then the hooks."""
@@ -417,35 +443,56 @@ class _Flow:
         except (OSError, ReviewRunError):  # redelivered by the next reconcile
             pass
 
-    def teardown_after(self, agent: lc.SpawnResult | str | None, run: Run) -> None:
-        """Tear down the parked agent a failed launch left (ownership-checked), recording the
-        outcome: ``teardown`` on the row and a closed warning."""
-        agent_id = agent if isinstance(agent, str) else (agent.agent_id if agent else None)
-        if agent_id is None or run.state != "failed":
+    def warn(self, code: str) -> None:
+        """A closed run warning, with a ``warning`` log record."""
+        self.store.add_warning(self.run_id, code, lease=self.lease)
+        self.note("warning", f"run warning {code}", level="warn", code=code)
+
+    def teardown_after(self, agent_id: str, csession_id: str | None, run: Run) -> None:
+        """Tear down the parked agent a failed run left (ownership-checked)."""
+        if run.state != "failed":
             return
-        csession = None if isinstance(agent, str) or agent is None else agent.csession_id
-        outcome = lc.teardown_parked(
-            agent_id,
-            run_id=self.run_id,
-            pr=run.pr,
-            repo=run.repo,
-            csession_id=csession,
-            actor=self.plan.request.actor,
+        verdict = lc.check_parked(
+            agent_id, run_id=self.run_id, pr=run.pr, repo=run.repo, csession_id=csession_id
         )
+        self.finish_teardown(verdict, agent_id, run)
+
+    def finish_teardown(self, verdict: str, agent_id: str, run: Run) -> None:
+        """Act on the ownership verdict: ``owned`` is torn down (one audit ``teardown`` record for
+        the attempt), the others only recorded: ``teardown`` on the row and a closed warning. A
+        ``mismatch`` is never touched."""
+        outcome = verdict
+        if verdict == "owned":
+            outcome = lc.teardown_owned(agent_id, actor=self.plan.request.actor)
+            self.audit_teardown(agent_id, run, "done" if outcome in ("done", "gone") else "failed")
         status = "done" if outcome in ("done", "gone") else "failed"
         self.store.set_teardown(self.run_id, status, lease=self.lease)
         warning = {
-            "mismatch": "agent_mismatch",
             "refused": "teardown_refused",
             "live": "teardown_refused",
             "failed": "teardown_failed",
+            "mismatch": "agent_mismatch",
         }.get(outcome)
         if warning:
-            self.store.add_warning(self.run_id, warning)
+            self.warn(warning)
+
+    def audit_teardown(self, agent_id: str, run: Run, status: str) -> None:
+        try:
+            self.audit.record(
+                "teardown",
+                caller=self.opts.caller,
+                run_id=self.run_id,
+                pr=run.pr,
+                inputs={"agent_id": agent_id},
+                result={"status": status},
+            )
+        except (OSError, ReviewRunError, ValueError):  # the audit trail never decides a run
+            pass
 
     def end_failed(self, reason: str, exit_code: int, failure: dict[str, Any] | None = None) -> Run:
-        run = self.end("failed", reason, exit_code, failure=failure)
-        self.deliver()
+        run, moved = self.end("failed", reason, exit_code, failure=failure)
+        if moved:
+            self.deliver()
         return run
 
     # -- the steps
@@ -484,7 +531,7 @@ class _Flow:
         except PrefetchFailure as exc:
             return self.end_failed(exc.reason, exc.exit_code, exc.failure())
         run = self.row()
-        if not persist_prefetch(self.store, self.run_id, run.key, facts, fetched):
+        if not persist_prefetch(self.store, self.run_id, run.key, facts, fetched, lease=self.lease):
             return self.row()  # another process moved the row: its state stands
         if (ended := self.canceled_row()) is not None:
             return ended
@@ -492,7 +539,16 @@ class _Flow:
         guidelines = None if guidelines_path is None else read_guidelines_file(guidelines_path)
         code_run = values.get("run_pr_code") or {}
         # TODO(#35): the code run (phase code_run, throwaway, sandbox, code-run.json); until then
-        # no output exists and the prompt says no code run is configured.
+        # no output exists and the prompt says no code run is configured. The "in every case"
+        # step 6 (write code-run.json, whatever the outcome) is TODO(#35) too: no fake file is
+        # written here.
+        if values.get("run_pr_code") is not None:
+            self.note(
+                "warning",
+                "run_pr_code is configured but the code run is not implemented yet",
+                level="warn",
+                code="code_run_pending",
+            )
         files = build_prompt(
             template=bundled_header_template(),
             run_id=self.run_id,
@@ -513,8 +569,9 @@ class _Flow:
         """Run order step 7, first half: the plugin hash, the argv, the launcher. Returns the
         disposition of its answer, or the ended run for a failure that needs none."""
         s = self.settings
+        self.check_lease()
         run = self.row()
-        if not self.store.advance_phase(self.run_id, run.key, "session"):
+        if not self.store.advance_phase(self.run_id, run.key, "session", lease=self.lease):
             return self.row()
         self.note("phase_change", "phase session", phase="session")
         try:
@@ -535,8 +592,12 @@ class _Flow:
             actor=self.plan.request.actor,
             decision_ids=run.decision_ids,
         )
+        self.check_lease()
         key = self.row().key
-        self.store.update_fields(self.run_id, key, launch_started_at=_now())
+        if not self.store.update_fields(
+            self.run_id, key, lease=self.lease, launch_started_at=_now()
+        ):
+            return self.row()  # another process moved the row: its state stands
         self.launched = True
 
         def started(pid: int) -> None:
@@ -544,6 +605,7 @@ class _Flow:
             self.store.update_fields(
                 self.run_id,
                 key,
+                lease=self.lease,
                 launcher_pid=pid,
                 launcher_start=None if ident is None else ident.start,
             )
@@ -556,10 +618,11 @@ class _Flow:
             )
         except gateway.GatewayError as exc:
             found = lc.interpret_file(self.run_dir / lc.LAUNCH_FILE)
-            if found is None or found.envelope is not None:
-                # The launcher was ended by the gateway (a timeout, too much output): an agent may
-                # exist. The run stays ``running`` so that ``reconcile`` adopts it from
-                # ``launch.json`` or by its labels (TODO(#29)).
+            if found is None:
+                # The launcher was ended by the gateway (a timeout, too much output) and left no
+                # usable launch.json: an agent may exist. The run stays ``running`` so that
+                # ``reconcile`` adopts it by its labels (TODO(#29)). A launch.json that holds an
+                # error envelope or a result is adopted below, like stdout.
                 raise ReviewRunError(
                     "failed",
                     f"agent-spawn failed ({exc.lower_code})",
@@ -574,69 +637,108 @@ class _Flow:
         return lc.map_launch(found, done.returncode)
 
     def adopt(self, agent: lc.SpawnResult) -> Run:
-        """Store ``agent_id``, ``csession_id`` and ``awaited_run`` in one transaction."""
+        """Store ``agent_id``, ``csession_id`` and ``awaited_run`` in one transaction. A result
+        that names another agent, session or run than the stored ones never overwrites them."""
+        self.check_lease()
         run = self.row()
         awaited = agent.run_number if agent.final else agent.agent_run
-        self.store.update_fields(
+        if (
+            (run.agent_id is not None and run.agent_id != agent.agent_id)
+            or (run.csession_id is not None and run.csession_id != agent.csession_id)
+            or (run.awaited_run is not None and run.awaited_run != awaited)
+        ):
+            raise ReviewRunError("internal", "the result is not the stored session's")
+        if not self.store.update_fields(
             self.run_id,
             run.key,
+            lease=self.lease,
             agent_id=agent.agent_id,
             csession_id=agent.csession_id,
             awaited_run=awaited,
-        )
+        ):
+            raise ReviewRunError("internal", "the run changed while its agent was stored")
         return self.row()
 
     def apply(self, disposition: lc.Disposition) -> Run | None:
         """Apply a mapping row. ``None`` means the run continues (a started session)."""
         kind = disposition.kind
         if kind == "started":
-            assert disposition.agent is not None
+            if disposition.agent is None:
+                raise ReviewRunError("internal", "a started session without a result")
             self.adopt(disposition.agent)
             return None
+        agent = disposition.agent
         if kind in ("finalize", "escalate"):
-            assert disposition.agent is not None
-            self.adopt(disposition.agent)
+            if agent is None:
+                raise ReviewRunError("internal", "a session outcome without a result")
+            self.adopt(agent)
         if kind == "finalize":
-            assert disposition.agent is not None
+            assert agent is not None
             return self.opts.finalize(
-                FinalizeRequest(
-                    self.store, self.run_id, self.lease, self.settings, disposition.agent
-                )
+                FinalizeRequest(self.store, self.run_id, self.lease, self.settings, agent)
             )
         if kind == "escalate":
-            agent = disposition.agent
             assert agent is not None and disposition.reason and disposition.exit_code
-            run = self.end(
+            run, moved = self.end(
                 "escalated",
                 disposition.reason,
                 disposition.exit_code,
                 escalated_run=agent.run_number,
+                teardown_on_cancel=True,
             )
-            self.deliver()
-            return run
+            if moved:
+                if run.state == "failed" and agent.agent_id:  # a cancellation was recorded
+                    self.teardown_after(agent.agent_id, agent.csession_id, run)
+                self.deliver()
+            return self.row()
         if kind == "interrupted":
             raise Interrupted(disposition.exit_code or 143)
+        return self.apply_failure(disposition)
+
+    def apply_failure(self, disposition: lc.Disposition) -> Run:
+        """End the run ``failed``. An agent the run knows (the result's, the envelope's or the
+        stored one) is checked for ownership first: a look-alike is never stored, stopped or torn
+        down and the run ends ``agent_gone`` with the warning ``agent_mismatch``."""
         assert disposition.reason is not None and disposition.exit_code is not None
-        agent_id = disposition.teardown_agent or (
-            disposition.agent.agent_id if disposition.agent else None
-        )
+        reason, exit_code, failure = disposition.reason, disposition.exit_code, disposition.failure
+        stored = self.row()
+        agent = disposition.agent
+        agent_id = disposition.teardown_agent or (agent.agent_id if agent else None)
+        csession = agent.csession_id if agent else None
+        if agent_id is None:
+            agent_id, csession = stored.agent_id, stored.csession_id
         fields: dict[str, Any] = {}
-        tear_down = agent_id is not None and disposition.reason in lc.TEARDOWN_REASONS
-        if agent_id is not None:
+        verdict: str | None = None
+        if agent_id is not None and reason in lc.TEARDOWN_REASONS:
+            verdict = lc.check_parked(
+                agent_id, run_id=self.run_id, pr=stored.pr, repo=stored.repo, csession_id=csession
+            )
+            if verdict == "mismatch":
+                reason, exit_code, failure = "agent_gone", 12, None
+            else:
+                fields = {"agent_id": agent_id, "teardown": "pending"}
+                if csession:
+                    fields["csession_id"] = csession
+        elif agent_id is not None and agent_id != stored.agent_id:
             fields["agent_id"] = agent_id
-            if disposition.agent is not None and disposition.agent.csession_id:
-                fields["csession_id"] = disposition.agent.csession_id
-        if tear_down:
-            fields["teardown"] = "pending"
-        run = self.end(
+            if csession:
+                fields["csession_id"] = csession
+        run, moved = self.end(
             "failed",
-            disposition.reason,
-            disposition.exit_code,
-            failure=disposition.failure,
+            reason,
+            exit_code,
+            failure=failure,
             fields=fields,
+            teardown_on_cancel=agent_id is not None and verdict != "mismatch",
         )
-        if tear_down:
-            self.teardown_after(disposition.agent or agent_id, run)
+        if not moved:
+            return run  # another process ended the run: it owns the teardown and the delivery
+        if verdict == "mismatch":
+            self.warn("agent_mismatch")
+        elif verdict is not None and agent_id is not None:
+            self.finish_teardown(verdict, agent_id, run)
+        elif run.reason == "canceled" and run.teardown == "pending" and agent_id is not None:
+            self.teardown_after(agent_id, csession, run)  # a cancellation was recorded meanwhile
         self.deliver()
         return self.row()
 
@@ -706,20 +808,28 @@ def _drive(flow: _Flow) -> Run:
         if flow.opts.no_wait:
             return flow.row()
         run = flow.row()
-        assert run.agent_id is not None
+        if run.agent_id is None:
+            raise ReviewRunError("internal", "the started session has no stored agent")
+        flow.check_lease()
         disposition = lc.wait_session(
             run.agent_id,
             flow.run_dir,
             timeout=lc.wait_timeout_seconds(flow.settings),
             sleep=flow.opts.sleep,
+            csession_id=run.csession_id,
+            awaited_run=run.awaited_run,
         )
         ended = flow.apply(disposition)
         return flow.row() if ended is None else ended
     except Interrupted:
         raise
     except Exception as exc:
-        if flow.launched and isinstance(exc, ReviewRunError):
-            raise  # the session may exist: the run stays ``running`` for ``reconcile``
+        if flow.launched:
+            # The session may exist: whatever failed (a store error included), the run stays
+            # ``running`` for ``reconcile`` and nothing is torn down.
+            if isinstance(exc, ReviewRunError):
+                raise
+            raise ReviewRunError("internal", "unexpected error after the launch") from None
         if isinstance(exc, LeaseLostError):
             raise
         # An unexpected failure before the launcher ran ends the run once, never a crash loop.

@@ -9,6 +9,7 @@ argv and env, and the store, audit and run directory are the real ones.
 from __future__ import annotations
 
 import json
+import sqlite3
 import time
 from pathlib import Path
 from typing import Any
@@ -33,7 +34,11 @@ SESSION_ROWS = [
     ("lost", "lost", 17),
     ("failed", "session_failed", 18),
 ]
-LAUNCH_ROWS = [("not-started", "not_started"), ("vetoed", "vetoed"), ("escalated", "escalated")]
+LAUNCH_ROWS = [
+    ("not-started", "not_started", "claude-session"),
+    ("vetoed", "vetoed", "agent-spawn"),
+    ("escalated", "escalated", "agent-spawn"),
+]
 
 
 def audit_records(root: Path) -> list[dict[str, Any]]:
@@ -97,15 +102,15 @@ def test_session_failures_end_the_run_with_the_same_exit_and_tear_the_agent_down
     no_files_left(world)
 
 
-@pytest.mark.parametrize(("outcome", "lower"), LAUNCH_ROWS)
+@pytest.mark.parametrize(("outcome", "lower", "tool"), LAUNCH_ROWS)
 def test_a_run_that_ends_in_its_launch_phase_is_launch_failed_and_torn_down(
-    world: World, outcome: str, lower: str
+    world: World, outcome: str, lower: str, tool: str
 ) -> None:
     world.fb.use("agent-spawn", "outcome", outcome=outcome)
     run = world.run()
     assert (run.state, run.reason, run.exit_code) == ("failed", "launch_failed", 12)
     assert run.failure is not None
-    assert (run.failure["tool"], run.failure["lower_code"]) == ("claude-session", lower)
+    assert (run.failure["tool"], run.failure["lower_code"]) == (tool, lower)
     assert run.teardown == "done" and len(agent_calls(world, "teardown")) == 1
     assert agent_calls(world, "wait") == []
     run_object(world)
@@ -190,10 +195,13 @@ def test_an_agent_that_is_not_this_runs_is_never_torn_down(
     agent_id = make_agent(world, run_id, run_label="rr-bbbbbbbb")
     launch_envelope_with(world, agent_id)
     run = world.run()
-    assert (run.state, run.reason) == ("failed", "launch_failed")
-    assert run.warnings == ["agent_mismatch"] and run.teardown == "failed"
-    assert agent_calls(world, "teardown") == []
+    # the spec: an agent that fails the ownership check ends the run agent_gone, never stored
+    assert (run.state, run.reason, run.exit_code) == ("failed", "agent_gone", 12)
+    assert run.warnings == ["agent_mismatch"] and run.teardown is None
+    assert run.agent_id is None and run.failure is None
+    assert agent_calls(world, "teardown") == [] and agent_calls(world, "stop") == []
     assert world.fb.state()["agents"][agent_id]["status"] != "torn_down"
+    assert [r["action"] for r in audit_records(world.root)] == ["run", "run"]
 
 
 @pytest.mark.parametrize(
@@ -681,7 +689,11 @@ def test_the_audit_pair_and_the_outbox_event_are_written_once(world: World) -> N
     world.fb.use("agent-spawn", "outcome", outcome="killed")
     run = world.run(flag_hooks=(f"post-run={cmd}",))
     records = audit_records(world.root)
-    assert [r["action"] for r in records] == ["run", "run"]
+    assert [r["action"] for r in records] == ["run", "teardown", "run"]
+    teardown = records.pop(1)
+    assert teardown["inputs"] == {"agent_id": run.agent_id}
+    assert teardown["result"] == {"status": "done"}
+    assert teardown["target"] == {"run_id": run.run_id, "pr": PR}
     assert records[0]["attempt_id"] == records[1]["attempt_id"]
     assert records[0]["result"]["status"] == "attempted" and records[1]["result"] == {
         "status": "failed",
@@ -758,3 +770,228 @@ def test_the_fake_siblings_outputs_all_validate(world: World, fakebin: FakeBin) 
     world.fb.use("agent-spawn", "outcome", outcome="needs-input")
     world.run()
     fakebin.assert_valid()
+
+
+# -- review round 1: lease checks, post-launch failures, cancel mapping, teardown audit ------------
+
+
+def teardown_records(world: World) -> list[dict[str, Any]]:
+    return [r for r in audit_records(world.root) if r["action"] == "teardown"]
+
+
+def test_a_failed_teardown_attempt_is_audited_as_failed_and_no_attempt_writes_nothing(
+    world: World,
+) -> None:
+    world.fb.use("agent-spawn", "outcome", outcome="killed")
+    world.fb.script(
+        "agent-spawn", "teardown", {"error": {"code": "failed", "message": "x"}, "exit": 12}
+    )
+    world.run()
+    (record,) = teardown_records(world)
+    assert record["result"] == {"status": "failed"}
+
+
+def test_a_launch_envelope_naming_a_look_alike_writes_no_teardown_record(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_id = pinned_run_id(monkeypatch)
+    agent_id = make_agent(world, run_id, run_label="rr-bbbbbbbb")
+    launch_envelope_with(world, agent_id)
+    world.run()
+    assert teardown_records(world) == []
+
+
+@pytest.mark.parametrize("error", [sqlite3.OperationalError("database is locked"), OSError("disk")])
+def test_a_store_error_after_the_launch_leaves_the_run_running_and_tears_nothing_down(
+    world: World, monkeypatch: pytest.MonkeyPatch, error: Exception
+) -> None:
+    real = Store.update_fields
+
+    def failing(self: Store, run_id: str, expect: Any, /, **fields: Any) -> bool:
+        if "agent_id" in fields:
+            raise error
+        return real(self, run_id, expect, **fields)
+
+    monkeypatch.setattr(Store, "update_fields", failing)
+    with pytest.raises(ReviewRunError) as info:
+        world.run()
+    assert info.value.code == "internal"
+    run = world.only_run()
+    assert (run.state, run.phase, run.agent_id) == ("running", "session", None)
+    assert agent_calls(world, "teardown") == [] and agent_calls(world, "stop") == []
+
+
+def test_a_lease_taken_during_prefetch_means_the_launcher_never_starts(world: World) -> None:
+    def steal(argv: Any) -> None:
+        if argv[0].endswith("pr-comment") and argv[1:3] == ["draft", "new"]:
+            with world.store() as store:
+                rid = world.only_run().run_id
+                store._conn.execute("DELETE FROM leases WHERE name = ?", (lease_name(rid),))  # pyright: ignore[reportPrivateUsage]
+
+    world.router.on_run = steal
+    with pytest.raises(ReviewRunError):
+        world.run()
+    run = world.only_run()
+    assert run.state == "running" and run.phase == "prefetch" and run.launch_started_at is None
+    assert agent_calls(world, "launch") == []
+
+
+def test_a_wait_result_naming_another_agent_never_overwrites_the_stored_ids(world: World) -> None:
+    def other(argv: Any) -> None:
+        if argv[1:2] == ["wait"]:
+            run = world.only_run()
+            doc = {
+                "agent": {
+                    "agent_id": "ag-bbbbbbbb", "csession_id": run.csession_id, "status": "live",
+                    "run": 1, "kind": "review", "labels": [],
+                },
+                "phase": "session", "outcome": "killed", "end_reason": "stopped", "exit_code": 15,
+                "run": {"run": 1}, "first_working_at": None, "timed_out": False, "warnings": [],
+            }  # fmt: skip
+            world.fb.script("agent-spawn", "wait", {"json": doc, "exit": 15, "schema": None})
+
+    world.router.on_run = other
+    world.fb.use("agent-spawn", "outcome", outcome="needs-input")
+    before: dict[str, Any] = {}
+    with pytest.raises(ReviewRunError) as info:
+        world.run()
+    assert info.value.reason == "lower_failed"
+    run = world.only_run()
+    assert run.state == "running" and run.agent_id != "ag-bbbbbbbb" and run.agent_id is not None
+    assert before == {} and agent_calls(world, "teardown") == []
+
+
+def test_a_row_moved_by_another_process_is_not_torn_down_by_this_one(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    world.fb.use("agent-spawn", "outcome", outcome="killed")
+    monkeypatch.setattr(Store, "end_run", lambda self, *a, **k: False)
+    run = world.run()
+    assert run.state == "running" and run.teardown is None and run.warnings == []
+    assert agent_calls(world, "teardown") == [] and teardown_records(world) == []
+
+
+def cancel_during_wait(world: World) -> None:
+    def probe(argv: Any) -> None:
+        if argv[1:2] == ["wait"]:
+            with world.store() as store:
+                run = world.only_run()
+                assert store.request_cancel(run.run_id, run.key, actor="human:bob", exit_code=143)
+
+    world.router.on_run = probe
+
+
+@pytest.mark.parametrize("outcome", ["needs-input", "killed"])
+def test_a_cancellation_recorded_during_the_wait_ends_the_run_canceled_and_tears_down(
+    world: World, outcome: str
+) -> None:
+    cancel_during_wait(world)
+    world.fb.use("agent-spawn", "outcome", outcome=outcome)
+    run = world.run()
+    assert (run.state, run.reason, run.exit_code, run.failure) == ("failed", "canceled", 143, None)
+    assert run.teardown == "done" and len(agent_calls(world, "teardown")) == 1
+    assert run.escalated_at is None
+
+
+def test_an_unmapped_session_result_ends_internal_and_tears_the_agent_down(world: World) -> None:
+    def odd(argv: Any) -> None:
+        if argv[1:2] == ["wait"]:
+            run = world.only_run()
+            doc = {
+                "agent": {
+                    "agent_id": run.agent_id, "csession_id": run.csession_id, "status": "parked",
+                    "run": 1, "kind": "review",
+                    "labels": ["owner=review-run", f"run={run.run_id}", f"pr={PR}", f"repo={REPO}"],
+                },
+                "phase": "session", "outcome": "failed", "end_reason": "normal", "exit_code": 0,
+                "run": {"run": 1}, "first_working_at": None, "timed_out": False, "warnings": [],
+            }  # fmt: skip
+            world.fb.script("agent-spawn", "wait", {"json": doc, "exit": 0, "schema": None})
+
+    world.router.on_run = odd
+    run = world.run()
+    assert (run.state, run.reason, run.exit_code) == ("failed", "internal", 12)
+    assert run.agent_id is not None and run.teardown is not None
+
+
+def test_a_launcher_ended_by_the_gateway_with_an_envelope_in_launch_json_is_launch_failed(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_id = pinned_run_id(monkeypatch)
+    agent_id = make_agent(world, run_id)
+
+    def write_file(argv: Any) -> None:
+        if argv[1:2] == ["launch"]:
+            path = Path(argv[argv.index("--result-file") + 1])
+            path.write_text(
+                json.dumps(
+                    {"error": {"code": "launch_failed", "message": "x", "agent_id": agent_id}}
+                )
+            )
+
+    world.router.on_run = write_file
+    world.fb.script(
+        "agent-spawn", "launch", {"stdout_raw": "x" * (8 * 1024 * 1024 + 1), "schema": None}
+    )
+    run = world.run()
+    assert (run.state, run.reason, run.exit_code) == ("failed", "launch_failed", 12)
+    assert run.agent_id == agent_id and run.teardown == "done"
+    assert [c.argv[1] for c in agent_calls(world, "teardown")] == [agent_id]
+
+
+def test_a_repo_with_run_pr_code_is_reviewed_without_a_code_run_and_says_so_in_the_log(
+    world: World,
+) -> None:
+    world.config_text = f"repos:\n  {REPO}:\n    run_pr_code:\n      command: [make, test]\n"
+    world.fb.use("agent-spawn", "outcome", outcome="needs-input")
+    run = world.run()
+    assert run.state == "escalated" and run.phase is None
+    lines = [json.loads(x) for x in (world.root / "log.jsonl").read_text().splitlines()]
+    assert any(r["event"] == "warning" and r["code"] == "code_run_pending" for r in lines)
+
+
+# -- the lease keeper -------------------------------------------------------------------------------
+
+
+def test_a_transient_renew_failure_does_not_lose_the_lease(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "state"
+    calls = {"n": 0}
+    real = Store.renew_lease
+
+    def flaky(self: Store, lease: Any, **kw: Any) -> Any:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise sqlite3.OperationalError("database is locked")
+        return real(self, lease, **kw)
+
+    monkeypatch.setattr(Store, "renew_lease", flaky)
+    with Store.open(root) as store:
+        lease = store.acquire_lease("run:rr-aaaaaaaa", ttl_seconds=60)
+        assert lease is not None
+        keeper = runner.LeaseKeeper(root, lease, interval=0.02)
+        keeper.start()
+        deadline = time.monotonic() + 5
+        while calls["n"] < 3 and time.monotonic() < deadline:
+            time.sleep(0.02)
+        keeper.stop()
+        assert calls["n"] >= 3 and not keeper.lost.is_set()
+
+
+def test_consecutive_renew_failures_lose_the_lease(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "state"
+
+    def broken(self: Store, lease: Any, **kw: Any) -> Any:
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(Store, "renew_lease", broken)
+    with Store.open(root) as store:
+        lease = store.acquire_lease("run:rr-aaaaaaaa", ttl_seconds=60)
+        assert lease is not None
+        keeper = runner.LeaseKeeper(root, lease, interval=0.02)
+        keeper.start()
+        assert keeper.lost.wait(5)
+        keeper.stop()

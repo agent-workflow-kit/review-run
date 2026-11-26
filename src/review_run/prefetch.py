@@ -36,7 +36,7 @@ from typing import Any
 from review_run import gateway
 from review_run.errors import ReviewRunError
 from review_run.fsmodes import write_private_file
-from review_run.store import Expect, Store
+from review_run.store import Expect, Lease, Store
 
 #: Seconds allowed to each forgectl and pr-comment read (interface.md, Finalize recovery).
 CALL_TIMEOUT = 60.0
@@ -679,7 +679,13 @@ def prefetch(pr: str, *, hard_ceiling_bytes: int) -> Prefetch:
 
 
 def persist_prefetch(
-    store: Store, run_id: str, expect: Expect, facts: PrFacts, result: Prefetch
+    store: Store,
+    run_id: str,
+    expect: Expect,
+    facts: PrFacts,
+    result: Prefetch,
+    *,
+    lease: Lease | None = None,
 ) -> bool:
     """Persist what finalize needs: ``pr.json`` (the four PR facts) in the run directory, then
     ``draft_id`` and ``anchor`` on the run's row in one compare-and-set on ``expect``.
@@ -693,7 +699,7 @@ def persist_prefetch(
     data = json.dumps(facts.run_facts(), sort_keys=True).encode("ascii") + b"\n"
     write_private_file(run_dir / "pr.json", data)
     return store.update_fields(
-        run_id, expect, draft_id=result.draft_id, anchor=result.anchor.to_dict()
+        run_id, expect, lease=lease, draft_id=result.draft_id, anchor=result.anchor.to_dict()
     )
 
 

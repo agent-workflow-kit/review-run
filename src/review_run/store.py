@@ -630,13 +630,16 @@ class Store:
         ids = [str(r[0]) for r in rows]
         return ids[:limit], len(ids) > limit
 
-    def update_fields(self, run_id: str, expect: Expect, /, **fields: Any) -> bool:
+    def update_fields(
+        self, run_id: str, expect: Expect, /, *, lease: Lease | None = None, **fields: Any
+    ) -> bool:
         """Set ``FREE_COLUMNS`` on a run whose key still equals ``expect`` (one compare-and-set).
 
         Several columns change in one transaction (for example ``agent_id``, ``csession_id`` and
         ``awaited_run`` at launch). ``False`` when the row no longer has that key. Terminal runs
         are immutable: ``expect`` must name a ``running`` or ``escalated`` run, and the update
-        itself refuses other rows.
+        itself refuses other rows. With ``lease`` the run's lease is checked in the same
+        transaction (``LeaseLostError`` when it is no longer held).
         """
         if expect.state not in _LIVE_STATES:
             raise ValueError("a terminal run cannot change")
@@ -644,11 +647,23 @@ class Store:
             raise ValueError("no fields to set")
         _check_columns(fields, FREE_COLUMNS)
         with self.transaction() as conn:
+            if lease is not None:
+                _require_lease(conn, lease, run_id)
             return _cas(conn, run_id, expect, fields) == 1
 
-    def advance_phase(self, run_id: str, expect: Expect, phase: str, /, **fields: Any) -> bool:
+    def advance_phase(
+        self,
+        run_id: str,
+        expect: Expect,
+        phase: str,
+        /,
+        *,
+        lease: Lease | None = None,
+        **fields: Any,
+    ) -> bool:
         """Move a ``running`` run to ``prefetch``, ``code_run`` or ``session`` (never
-        ``finalize``: see ``begin_finalize``). Optional ``FREE_COLUMNS`` change with it."""
+        ``finalize``: see ``begin_finalize``). Optional ``FREE_COLUMNS`` change with it; with
+        ``lease`` the lease is checked in the same transaction."""
         if phase not in _NON_SESSION_PHASES:
             raise ValueError("advance_phase cannot enter this phase")
         if expect.state != "running":
@@ -657,6 +672,8 @@ class Store:
             raise ValueError("a run cannot leave finalize")
         _check_columns(fields, FREE_COLUMNS)
         with self.transaction() as conn:
+            if lease is not None:
+                _require_lease(conn, lease, run_id)
             return _cas(conn, run_id, expect, {**fields, "phase": phase}) == 1
 
     def begin_finalize(self, run_id: str, expect: Expect, *, lease: Lease) -> bool:
@@ -823,9 +840,12 @@ class Store:
                 )
             return True
 
-    def add_warning(self, run_id: str, code: str) -> None:
-        """Append a closed warning code once (idempotent, race-safe)."""
+    def add_warning(self, run_id: str, code: str, *, lease: Lease | None = None) -> None:
+        """Append a closed warning code once (idempotent, race-safe); with ``lease`` the lease is
+        checked in the same transaction."""
         with self.transaction() as conn:
+            if lease is not None:
+                _require_lease(conn, lease, run_id)
             row = conn.execute("SELECT warnings FROM runs WHERE run_id = ?", (run_id,)).fetchone()
             if row is None:
                 return

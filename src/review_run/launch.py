@@ -78,6 +78,7 @@ _SESSION_FAILURES: Final = {
     18: "session_failed",
 }
 INTERRUPT_EXITS: Final = (130, 143)
+ENVELOPE_FILE_EXIT: Final = 12  # the exit assumed for an error envelope read from a result file
 
 
 # -- the argv ------------------------------------------------------------------------------------
@@ -305,7 +306,11 @@ def interpret_file(path: Path | str) -> SpawnResult | None:
     if doc is None:
         return None
     code = doc.get("exit_code")
-    return parse_result(code if type(code) is int else 0, doc)  # noqa: E721
+    if type(code) is int:  # noqa: E721
+        return parse_result(code, doc)
+    # An error envelope carries no exit code of its own: it came from a failed call (12), so the
+    # mapping table treats it as ``launch_failed``; any other result is a started run (0).
+    return parse_result(ENVELOPE_FILE_EXIT if "error" in doc else 0, doc)
 
 
 def interpret(
@@ -320,7 +325,7 @@ def interpret(
 
 # Reasons whose parked agent is torn down after the terminal transaction.
 TEARDOWN_REASONS: Final = frozenset(
-    {"launch_failed", "unreported", "killed", "timeout", "lost", "session_failed"}
+    {"launch_failed", "unreported", "killed", "timeout", "lost", "session_failed", "internal"}
 )
 
 # -- the mapping table ---------------------------------------------------------------------------
@@ -361,8 +366,14 @@ def failure_object(
     }
 
 
-def _internal() -> Disposition:
-    return Disposition("fail", "internal", 12)
+def _internal(result: SpawnResult | None = None) -> Disposition:
+    """``internal`` (exit 12). A result that names an agent carries it, so the agent is stored and
+    torn down (ownership-checked; agent-spawn refuses a live one)."""
+    if result is None:
+        return Disposition("fail", "internal", 12)
+    agent = result if result.envelope is None else None
+    teardown = result.envelope.agent_id if result.envelope is not None else None
+    return Disposition("fail", "internal", 12, agent=agent, teardown_agent=teardown)
 
 
 def _canceled(code: int) -> Disposition:
@@ -382,7 +393,12 @@ def _launch_failed(result: SpawnResult) -> Disposition:
         )
         return Disposition("fail", "launch_failed", 12, failure, None, env.agent_id, env)
     outcome = (result.outcome or "not-started").replace("-", "_")
-    failure = failure_object("claude-session", outcome, result.end_reason)
+    # A hook veto or escalation is agent-spawn's own; a launch never adopted is claude-session's.
+    hook = result.outcome in ("vetoed", "escalated") or (result.end_reason or "").startswith(
+        "hook_"
+    )
+    tool = "agent-spawn" if hook else "claude-session"
+    failure = failure_object(tool, outcome, result.end_reason)
     return Disposition("fail", "launch_failed", 12, failure, result, result.agent_id)
 
 
@@ -396,7 +412,7 @@ def _session_outcome(result: SpawnResult) -> Disposition:
         return Disposition("escalate", reason, 13, agent=result)
     if code in _SESSION_FAILURES:
         return Disposition("fail", _SESSION_FAILURES[code], code, agent=result)
-    return _internal()
+    return _internal(result)
 
 
 def map_launch(result: SpawnResult | None, exit_code: int) -> Disposition:
@@ -413,25 +429,25 @@ def map_launch(result: SpawnResult | None, exit_code: int) -> Disposition:
         if exit_code in INTERRUPT_EXITS:
             return _canceled(exit_code)
         if exit_code in (0, 1, 22):
-            return _internal()
+            return _internal(result)
         return _launch_failed(result)
     if result.phase == "launch" and result.final:
         return _launch_failed(result)
     if not result.final:
         if exit_code == 0 and result.csession_id is not None and result.agent_run is not None:
             return Disposition("started", agent=result)
-        return _internal()
+        return _internal(result)
     if result.phase == "session":
         return _session_outcome(result)
-    return _internal()
+    return _internal(result)
 
 
 def map_wait(result: SpawnResult | None, exit_code: int) -> Disposition:
     """The row of the mapping table for ``agent-spawn wait``'s answer.
 
     Exit 10 or a torn-down agent is ``agent_gone``; 130 and 143 mean the waiter was interrupted;
-    exit 1 and 22 are ``internal``; any other envelope, or an answer that does not parse, is
-    ``retry`` (the run is unchanged).
+    exit 22 is ``internal``; any other envelope (exit 1 included), or an answer that does not
+    parse, is ``retry`` (the run is unchanged).
     """
     if exit_code in INTERRUPT_EXITS:
         return Disposition("interrupted", exit_code=exit_code)
@@ -440,13 +456,13 @@ def map_wait(result: SpawnResult | None, exit_code: int) -> Disposition:
     if result.envelope is not None:
         if exit_code == 10:
             return Disposition("agent_gone", "agent_gone", 12)
-        if exit_code in (0, 1, 22):
-            return _internal()
+        if exit_code in (0, 22):
+            return _internal(result)
         return Disposition("retry", envelope=result.envelope)
     if result.agent_status == "torn_down":
         return Disposition("agent_gone", "agent_gone", 12)
     if not result.final:
-        return _internal()  # a wait that timed out (22) cannot happen: no wait timeout is passed
+        return _internal(result)  # a wait that timed out (22) cannot happen: no timeout is passed
     if result.phase == "launch":
         return _launch_failed(result)
     return _session_outcome(result)
@@ -463,10 +479,14 @@ def wait_session(
     sleep: Callable[[float], None] = time.sleep,
     attempts: int = WAIT_ATTEMPTS,
     retry_seconds: float = WAIT_RETRY_SECONDS,
+    csession_id: str | None = None,
+    awaited_run: int | None = None,
 ) -> Disposition:
     """``agent-spawn wait <agent id> --result-file <run dir>/wait.json --json``, retried (3
-    attempts, 2 s apart) while it gives an envelope or output that does not parse. Raises
-    ``lower_failed`` (exit 12, the run unchanged) when every attempt failed."""
+    attempts, 2 s apart) while it gives an envelope, output that does not parse or a result that is
+    not the stored session's (another agent, ``csession_id`` or run number when given). Raises
+    ``lower_failed`` (exit 12, the run unchanged) when every attempt failed, and at once for a
+    call that timed out or printed too much (a retry could block for hours) or a missing tool."""
     argv = wait_argv(agent_id, run_dir)
     result_file = Path(run_dir) / WAIT_FILE
     last_code = "failed"
@@ -477,12 +497,14 @@ def wait_session(
         result_file.unlink(missing_ok=True)  # a stale file must not stand in for this call
         try:
             done = gateway.run(argv, timeout=timeout)
-        except gateway.ToolMissing as exc:
+        except (gateway.ToolMissing, gateway.CallTimeout, gateway.OutputTooLarge) as exc:
             raise _lower_failed(exc.lower_code, False) from None
         except gateway.GatewayError as exc:
             last_code, last_retryable = exc.lower_code, False
             continue
         found = interpret(done.returncode, done.stdout, result_file)
+        if found is not None and not _is_session(found, agent_id, csession_id, awaited_run):
+            found = None  # another agent's, session's or run's result is unusable
         disposition = map_wait(found, done.returncode)
         if disposition.kind != "retry":
             return disposition
@@ -490,6 +512,19 @@ def wait_session(
         last_code = (env.lower_code or env.code) if env else "invalid_output"
         last_retryable = bool(env and env.retryable)
     raise _lower_failed(last_code, last_retryable)
+
+
+def _is_session(
+    result: SpawnResult, agent_id: str, csession_id: str | None, awaited_run: int | None
+) -> bool:
+    """Whether a result is the stored session's: an envelope names nothing to compare."""
+    if result.envelope is not None:
+        return True
+    if result.agent_id != agent_id:
+        return False
+    if csession_id is not None and result.csession_id != csession_id:
+        return False
+    return not (awaited_run is not None and result.final and result.run_number != awaited_run)
 
 
 def _lower_failed(lower_code: str, retryable: bool) -> ReviewRunError:
@@ -523,19 +558,12 @@ def owns_agent(
 Teardown = Literal["done", "gone", "mismatch", "live", "refused", "failed"]
 
 
-def teardown_parked(
-    agent_id: str,
-    *,
-    run_id: str,
-    pr: str,
-    repo: str,
-    csession_id: str | None,
-    actor: str | None = None,
-) -> Teardown:
-    """Tear down the parked agent a failed launch left. ``agent-spawn show`` first: an unknown or
-    torn-down agent is ``gone``, an agent that is not this run's is ``mismatch`` (never touched),
-    a live one is ``live`` (never torn down: agent-spawn refuses it). ``teardown`` runs without
-    ``--force``; 20 is ``refused``, any other failure ``failed``."""
+def check_parked(
+    agent_id: str, *, run_id: str, pr: str, repo: str, csession_id: str | None
+) -> Literal["owned", "gone", "mismatch", "live", "failed"]:
+    """``agent-spawn show`` and the ownership check (the first half of ``teardown_parked``):
+    ``owned`` (parked, this run's: may be torn down), ``gone`` (unknown or torn down),
+    ``mismatch`` (not this run's: never touched), ``live`` or ``failed`` (``show`` failed)."""
     if not _AGENT_ID.match(agent_id):
         raise ValueError("not an agent id")
     try:
@@ -555,6 +583,14 @@ def teardown_parked(
         return "mismatch"
     if status in ("live", "launching"):
         return "live"
+    return "owned"
+
+
+def teardown_owned(agent_id: str, *, actor: str | None = None) -> Teardown:
+    """``agent-spawn teardown`` of an agent ``check_parked`` found ``owned``, without
+    ``--force``: 20 is ``refused``, 10 ``gone``, any other failure ``failed``."""
+    if not _AGENT_ID.match(agent_id):
+        raise ValueError("not an agent id")
     argv = ["agent-spawn", "teardown", agent_id, "--json"]
     if actor is not None:
         argv += ["--actor", actor]
@@ -567,3 +603,22 @@ def teardown_parked(
     if done.returncode == 10:
         return "gone"
     return "refused" if done.returncode == 20 else "failed"
+
+
+def teardown_parked(
+    agent_id: str,
+    *,
+    run_id: str,
+    pr: str,
+    repo: str,
+    csession_id: str | None,
+    actor: str | None = None,
+) -> Teardown:
+    """Tear down the parked agent a failed launch left. ``agent-spawn show`` first: an unknown or
+    torn-down agent is ``gone``, an agent that is not this run's is ``mismatch`` (never touched),
+    a live one is ``live`` (never torn down: agent-spawn refuses it). ``teardown`` runs without
+    ``--force``; 20 is ``refused``, any other failure ``failed``."""
+    verdict = check_parked(agent_id, run_id=run_id, pr=pr, repo=repo, csession_id=csession_id)
+    if verdict != "owned":
+        return verdict
+    return teardown_owned(agent_id, actor=actor)

@@ -14,7 +14,13 @@ import pytest
 from review_run import launch as lc
 from review_run import settings as rs
 from review_run.errors import ReviewRunError
-from review_run.gateway import CallTimeout, CompletedRun, OutputTooLarge, ToolMissing
+from review_run.gateway import (
+    CallTimeout,
+    CompletedRun,
+    GatewayError,
+    OutputTooLarge,
+    ToolMissing,
+)
 from tests.fake_gateway import Call, FakeGateway
 
 AG = "ag-aaaaaaaa"
@@ -328,15 +334,15 @@ def test_a_session_outcome_off_the_table_is_internal(code: int, outcome: str) ->
 
 
 @pytest.mark.parametrize(
-    ("outcome", "code", "lower", "end_reason"),
+    ("outcome", "code", "lower", "end_reason", "tool"),
     [
-        ("not-started", 12, "not_started", "normal"),
-        ("vetoed", 11, "vetoed", "normal"),
-        ("escalated", 13, "escalated", "normal"),
+        ("not-started", 12, "not_started", "normal", "claude-session"),
+        ("vetoed", 11, "vetoed", "normal", "agent-spawn"),
+        ("escalated", 13, "escalated", "normal", "agent-spawn"),
     ],
 )
 def test_a_run_ended_in_its_launch_phase_is_launch_failed(
-    outcome: str, code: int, lower: str, end_reason: str
+    outcome: str, code: int, lower: str, end_reason: str, tool: str
 ) -> None:
     result = parsed(code, result_doc(outcome, "launch", code))
     for disposition in (lc.map_launch(result, code), lc.map_wait(result, code)):
@@ -346,7 +352,7 @@ def test_a_run_ended_in_its_launch_phase_is_launch_failed(
             12,
         )
         assert disposition.failure == {
-            "tool": "claude-session", "lower_code": lower, "lower_reason": end_reason,
+            "tool": tool, "lower_code": lower, "lower_reason": end_reason,
             "retryable": False, "retry_after_s": None, "errors": [],
         }  # fmt: skip
         assert disposition.teardown_agent == AG
@@ -414,15 +420,14 @@ def test_wait_exit_10_and_a_torn_down_agent_are_agent_gone() -> None:
     assert (torn.kind, torn.reason) == ("agent_gone", "agent_gone")
 
 
-@pytest.mark.parametrize("code", [1, 22])
-def test_wait_exit_one_and_22_are_internal(code: int) -> None:
-    assert lc.map_wait(parsed(code, envelope_doc("internal")), code).reason == "internal"
+def test_wait_exit_22_is_internal() -> None:
+    assert lc.map_wait(parsed(22, envelope_doc("internal")), 22).reason == "internal"
     timed = result_doc()
     timed["timed_out"] = True
     assert lc.map_wait(parsed(22, timed), 22).reason == "internal"
 
 
-@pytest.mark.parametrize("code", [2, 11, 12, 13, 20, 21])
+@pytest.mark.parametrize("code", [1, 2, 11, 12, 13, 20, 21])
 def test_any_other_wait_envelope_or_garbage_is_a_retry(code: int) -> None:
     assert lc.map_wait(parsed(code, envelope_doc("failed")), code).kind == "retry"
     assert lc.map_wait(None, code).kind == "retry"
@@ -507,13 +512,61 @@ def test_wait_recovers_when_a_later_attempt_answers(
     ("failure", "lower"),
     [(CallTimeout("t"), "timeout"), (OutputTooLarge("big"), "output_too_large")],
 )
-def test_wait_gateway_failures_are_attempts_too(
+def test_a_wait_that_timed_out_or_overflowed_fails_at_once(
     tmp_path: Path, fake_gateway: FakeGateway, failure: Exception, lower: str
 ) -> None:
     fake_gateway.script("agent-spawn", failure)  # type: ignore[arg-type]
     with pytest.raises(ReviewRunError) as info:
         lc.wait_session(AG, tmp_path, timeout=5, sleep=lambda _s: None)
-    assert info.value.lower_code == lower and len(fake_gateway.calls) == 3
+    assert info.value.lower_code == lower and len(fake_gateway.calls) == 1
+
+
+def test_a_failed_wait_call_is_an_attempt(tmp_path: Path, fake_gateway: FakeGateway) -> None:
+    fake_gateway.script("agent-spawn", GatewayError("x"))  # type: ignore[arg-type]
+    with pytest.raises(ReviewRunError):
+        lc.wait_session(AG, tmp_path, timeout=5, sleep=lambda _s: None)
+    assert len(fake_gateway.calls) == 3
+
+
+@pytest.mark.parametrize(
+    "kw",
+    [{"agent_id": "ag-bbbbbbbb"}, {"csession_id": "cs-bbbbbbbb"}],
+    ids=["other-agent", "other-session"],
+)
+def test_a_wait_result_that_is_not_the_stored_session_is_unusable(
+    tmp_path: Path, fake_gateway: FakeGateway, kw: dict[str, Any]
+) -> None:
+    fake_gateway.script("agent-spawn", ok(15, result_doc("killed", "session", 15, **kw)))
+    with pytest.raises(ReviewRunError) as info:
+        lc.wait_session(AG, tmp_path, timeout=5, sleep=lambda _s: None, csession_id=CS)
+    assert info.value.lower_code == "invalid_output" and len(fake_gateway.calls) == 3
+
+
+def test_a_wait_result_of_another_run_number_is_unusable(
+    tmp_path: Path, fake_gateway: FakeGateway
+) -> None:
+    doc = result_doc("killed", "session", 15)
+    doc["run"] = {"run": 2}
+    fake_gateway.script("agent-spawn", ok(15, doc))
+    with pytest.raises(ReviewRunError):
+        lc.wait_session(AG, tmp_path, timeout=5, sleep=lambda _s: None, awaited_run=1)
+    assert len(fake_gateway.calls) == 3
+
+
+def test_an_internal_result_carries_its_agent_for_the_teardown() -> None:
+    result = parsed(0, result_doc("failed", "session", 0))
+    d = lc.map_wait(result, 0)
+    assert (d.reason, d.agent) == ("internal", result) and "internal" in lc.TEARDOWN_REASONS
+    started = parsed(0, result_doc(csession_id=None))
+    assert lc.map_launch(started, 0).agent == started
+
+
+def test_an_error_envelope_in_a_result_file_maps_like_a_launch_envelope(tmp_path: Path) -> None:
+    write(tmp_path / "launch.json", json.dumps(envelope_doc("launch_failed", agent_id=AG)))
+    found = lc.interpret_file(tmp_path / "launch.json")
+    assert found is not None
+    d = lc.map_launch(found, found.exit_code)
+    assert (d.kind, d.reason, d.teardown_agent) == ("fail", "launch_failed", AG)
 
 
 def test_wait_with_agent_spawn_missing_fails_at_once(
@@ -550,6 +603,12 @@ def test_wait_falls_back_to_the_result_file(tmp_path: Path, fake_gateway: FakeGa
 
 def show_ok(**kw: Any) -> CompletedRun:
     return CompletedRun(("agent-spawn",), 0, json.dumps({"agent": agent_doc(**kw)}), "")
+
+
+def test_check_parked_verdicts(fake_gateway: FakeGateway) -> None:
+    fake_gateway.script("agent-spawn", show_ok(status="parked"))
+    verdict = lc.check_parked(AG, run_id=RUN, pr=PRX, repo=REPO, csession_id=CS)
+    assert verdict == "owned" and [c.argv[1] for c in fake_gateway.calls] == ["show"]
 
 
 def teardown(fake: FakeGateway, **kw: Any) -> lc.Teardown:
