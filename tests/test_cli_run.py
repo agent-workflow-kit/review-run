@@ -120,11 +120,3 @@ def test_a_bad_hook_is_a_usage_error_before_any_sibling_runs(world: World, cli) 
     assert world.router.calls == [] and not Path(world.tmp / "xdg-state").exists()
     bad = cli("--json", "run", PR_URL, "--hook", "nope=true")
     assert bad.code == 2 and world.router.calls == []
-
-
-def test_dry_run_is_still_a_stub_owned_by_15(world: World, cli) -> None:  # type: ignore[no-untyped-def]
-    res = cli("--json", "run", PR_URL, "--dry-run")
-    assert res.code == 1 and res.envelope()["error"]["code"] == "internal"
-    assert all(
-        "--dry-run" in c.argv for c in world.fb.calls("agent-spawn", "launch")
-    )  # step 2 only

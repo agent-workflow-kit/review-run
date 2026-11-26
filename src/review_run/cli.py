@@ -12,7 +12,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, NoReturn
 
-from . import __version__
+from . import __version__, dryrun
 from . import hooks as hooks_mod
 from . import runs as runs_mod
 from .audit import Caller, export_lines
@@ -307,8 +307,9 @@ def _run_command(args: argparse.Namespace) -> int:
         for code in plan.warnings:
             print(f"{PROG}: warning: {code}", file=sys.stderr)
     if args.dry_run:
-        # TODO(#15): print the dry-run plan (launch_argv, manifest, sizes, would_exit).
-        raise ReviewRunError("internal", "run --dry-run is not implemented yet")
+        document = dryrun.build_plan(plan, root)
+        _write_stdout(runs_mod.dump(document) if args.json else dryrun.human_plan(document))
+        return 0
     caller = Caller.resolve(
         args.actor, stdin_tty=stdin_tty, decision_ids=args.decision_id, labels=args.label
     )
@@ -411,7 +412,7 @@ def _wait(args: argparse.Namespace) -> int:
 
 # Each command is replaced by its owning issue's implementation.
 _HANDLERS: dict[str, Handler] = {
-    "run": _run_command,  # steps 1 to 7 (#16, #17, #18); TODO(#15)
+    "run": _run_command,  # steps 1 to 7 and --dry-run (#15, #16, #17, #18)
     "resume": _stub("resume"),  # TODO(#28): resume
     "wait": _wait,
     "list": _list,
