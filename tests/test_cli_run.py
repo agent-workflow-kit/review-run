@@ -9,7 +9,7 @@ import pytest
 
 from tests.conftest import validate_against
 from tests.helpers import Result, run_cli
-from tests.run_helpers import PR_URL, World, routed, world  # noqa: F401
+from tests.run_helpers import PR_URL, World
 
 
 @pytest.fixture

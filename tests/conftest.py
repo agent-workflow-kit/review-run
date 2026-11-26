@@ -15,6 +15,7 @@ from referencing import Registry, Resource
 from tests.fake_gateway import fake_gateway  # noqa: F401  (fixture)
 from tests.fakes import fakebin, launch_inputs  # noqa: F401  (fixtures)
 from tests.proc_guard import proc_tracker  # noqa: F401  (autouse fixture)
+from tests.run_helpers import routed, world  # noqa: F401  (fixtures)
 
 SCHEMAS = Path(__file__).resolve().parent.parent / "schemas"
 

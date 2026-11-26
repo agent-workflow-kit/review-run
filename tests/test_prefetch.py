@@ -49,6 +49,7 @@ class _Routed:
         env: Mapping[str, str] | None = None,
         cwd: str | None = None,
         term_grace: float = 0.0,
+        on_start: Callable[[int], None] | None = None,
     ) -> CompletedRun:
         assert env is None, "pre-fetch must not build an environment"
         self.calls.append(tuple(argv))

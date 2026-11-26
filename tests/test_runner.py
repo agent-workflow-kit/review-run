@@ -23,7 +23,7 @@ from review_run.errors import ReviewRunError
 from review_run.store import Store, lease_name
 from tests.conftest import validate_against
 from tests.fakes import FakeBin
-from tests.run_helpers import CALLER, PR, PY, REPO, World, routed, world  # noqa: F401
+from tests.run_helpers import PR, REPO, World
 
 MARKER = "UNTRUSTED-MARKER-7f3a"
 SESSION_ROWS = [
@@ -364,6 +364,7 @@ def test_the_launcher_and_its_start_are_stored_around_the_call(world: World) -> 
     (call,) = agent_calls(world, "launch")
     assert run.launch_started_at is not None
     assert run.launcher_pid == call.pid and run.launcher_start is not None
+    assert run.launcher_start and run.runner_start
     assert run.launcher_start.rsplit(":", 1)[0] == run.runner_start.rsplit(":", 1)[0]  # same boot
 
 
@@ -651,8 +652,8 @@ def test_the_hook_payload_has_only_trusted_values_and_hook_decision_ids_reach_th
 ) -> None:
     out = world.tmp / "payload.json"
     cmd = (
-        "import json,sys;d=json.load(sys.stdin);open(%r,'w').write(json.dumps(d));"
-        "print(json.dumps({'decision_id':'d-hook'}))" % str(out)
+        f"import json,sys;d=json.load(sys.stdin);open({str(out)!r},'w').write(json.dumps(d));"
+        "print(json.dumps({'decision_id':'d-hook'}))"
     )
     world.fb.configure("forgectl", pr={"title": MARKER})
     world.fb.use("agent-spawn", "outcome", outcome="needs-input")

@@ -16,7 +16,6 @@ from review_run import settings as rs
 from review_run.errors import ReviewRunError
 from review_run.gateway import CallTimeout, CompletedRun, OutputTooLarge, ToolMissing
 from tests.fake_gateway import Call, FakeGateway
-from tests.run_helpers import World, routed, world  # noqa: F401
 
 AG = "ag-aaaaaaaa"
 CS = "cs-aaaaaaaa"

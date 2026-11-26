@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -51,6 +51,7 @@ class Routed:
         env: Mapping[str, str] | None = None,
         cwd: str | None = None,
         term_grace: float = 0.0,
+        on_start: Callable[[int], None] | None = None,
     ) -> CompletedRun:
         self.calls.append(tuple(argv))
         self.envs.append(None if env is None else dict(env))
@@ -1101,7 +1102,7 @@ def test_cli_run_reports_a_reserved_label_as_a_usage_envelope(
     assert doc["error"]["reason"] == "label_reserved"
 
 
-def test_cli_run_passes_its_checks_then_stops_at_the_seam(
+def test_cli_run_passes_its_checks_then_stops_at_the_finalize_seam(
     capsys: pytest.CaptureFixture[str], fakebin: FakeBin, routed: Routed, plugin: Path
 ) -> None:
     from tests.helpers import run_cli
@@ -1112,7 +1113,7 @@ def test_cli_run_passes_its_checks_then_stops_at_the_seam(
     assert launch[launch.index("--timeout") + 1] == "10m"
     assert "team=x" in launch
     state = Path(os.environ["XDG_STATE_HOME"]) / "review-run"
-    assert not (state / "state.db").exists()
+    assert (state / "state.db").exists()  # the run record exists: the session ran, finalize is #19
 
 
 def test_cli_run_prints_profile_warnings_on_stderr(
