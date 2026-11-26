@@ -645,7 +645,7 @@ class _Flow:
         if (
             (run.agent_id is not None and run.agent_id != agent.agent_id)
             or (run.csession_id is not None and run.csession_id != agent.csession_id)
-            or (run.awaited_run is not None and run.awaited_run != awaited)
+            or (run.awaited_run is not None and (awaited is None or awaited < run.awaited_run))
         ):
             raise ReviewRunError("internal", "the result is not the stored session's")
         if not self.store.update_fields(
@@ -654,7 +654,7 @@ class _Flow:
             lease=self.lease,
             agent_id=agent.agent_id,
             csession_id=agent.csession_id,
-            awaited_run=awaited,
+            awaited_run=run.awaited_run if run.awaited_run is not None else awaited,
         ):
             raise ReviewRunError("internal", "the run changed while its agent was stored")
         return self.row()
@@ -705,7 +705,8 @@ class _Flow:
         agent = disposition.agent
         agent_id = disposition.teardown_agent or (agent.agent_id if agent else None)
         csession = agent.csession_id if agent else None
-        if agent_id is None:
+        if agent_id is None or (stored.agent_id is not None and agent_id != stored.agent_id):
+            # never store or tear down an id other than the stored one
             agent_id, csession = stored.agent_id, stored.csession_id
         fields: dict[str, Any] = {}
         verdict: str | None = None
@@ -736,6 +737,8 @@ class _Flow:
         if verdict == "mismatch":
             self.warn("agent_mismatch")
         elif verdict is not None and agent_id is not None:
+            # intentional order: teardown (step 14) runs after the terminal transaction; the
+            # closing record is delivered from the outbox afterwards
             self.finish_teardown(verdict, agent_id, run)
         elif run.reason == "canceled" and run.teardown == "pending" and agent_id is not None:
             self.teardown_after(agent_id, csession, run)  # a cancellation was recorded meanwhile

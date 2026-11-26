@@ -524,7 +524,13 @@ def _is_session(
         return False
     if csession_id is not None and result.csession_id != csession_id:
         return False
-    return not (awaited_run is not None and result.final and result.run_number != awaited_run)
+    # a later automatic report-resume run has a higher number: only a lower one is unusable
+    run_number = result.run_number
+    return not (
+        awaited_run is not None
+        and result.final
+        and (run_number is None or run_number < awaited_run)
+    )
 
 
 def _lower_failed(lower_code: str, retryable: bool) -> ReviewRunError:

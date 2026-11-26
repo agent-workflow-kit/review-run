@@ -542,14 +542,14 @@ def test_a_wait_result_that_is_not_the_stored_session_is_unusable(
     assert info.value.lower_code == "invalid_output" and len(fake_gateway.calls) == 3
 
 
-def test_a_wait_result_of_another_run_number_is_unusable(
+def test_a_wait_result_of_a_lower_run_number_is_unusable(
     tmp_path: Path, fake_gateway: FakeGateway
 ) -> None:
     doc = result_doc("killed", "session", 15)
-    doc["run"] = {"run": 2}
+    doc["run"] = {"run": 1}
     fake_gateway.script("agent-spawn", ok(15, doc))
     with pytest.raises(ReviewRunError):
-        lc.wait_session(AG, tmp_path, timeout=5, sleep=lambda _s: None, awaited_run=1)
+        lc.wait_session(AG, tmp_path, timeout=5, sleep=lambda _s: None, awaited_run=2)
     assert len(fake_gateway.calls) == 3
 
 
@@ -667,3 +667,24 @@ def test_a_live_agent_is_never_torn_down(fake_gateway: FakeGateway) -> None:
 def test_teardown_results(fake_gateway: FakeGateway, script: list[Any], expected: str) -> None:
     fake_gateway.script("agent-spawn", *script)
     assert teardown(fake_gateway) == expected
+
+
+def test_a_later_report_resume_run_number_is_the_stored_session_s(
+    tmp_path: Path, fake_gateway: FakeGateway
+) -> None:
+    doc = result_doc("done", "session", 0)
+    doc["run"] = {"run": 2}
+    fake_gateway.script("agent-spawn", ok(0, doc))
+    d = lc.wait_session(AG, tmp_path, timeout=5, sleep=lambda _s: None, awaited_run=1)
+    assert d.kind == "finalize" and len(fake_gateway.calls) == 1
+
+
+def test_a_lower_run_number_than_the_awaited_one_is_unusable(
+    tmp_path: Path, fake_gateway: FakeGateway
+) -> None:
+    doc = result_doc("done", "session", 0)
+    doc["run"] = {"run": 1}
+    fake_gateway.script("agent-spawn", ok(0, doc))
+    with pytest.raises(ReviewRunError):
+        lc.wait_session(AG, tmp_path, timeout=5, sleep=lambda _s: None, awaited_run=2)
+    assert len(fake_gateway.calls) == 3

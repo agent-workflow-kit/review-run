@@ -995,3 +995,52 @@ def test_consecutive_renew_failures_lose_the_lease(
         keeper.start()
         assert keeper.lost.wait(5)
         keeper.stop()
+
+
+def test_a_report_resume_run_number_above_the_awaited_one_finalizes_and_keeps_awaited_run(
+    world: World,
+) -> None:
+    def later(argv: Any) -> None:
+        if argv[1:2] == ["wait"]:
+            run = world.only_run()
+            doc = {
+                "agent": {
+                    "agent_id": run.agent_id, "csession_id": run.csession_id, "status": "parked",
+                    "run": 2, "kind": "review",
+                    "labels": ["owner=review-run", f"run={run.run_id}", f"pr={PR}", f"repo={REPO}"],
+                },
+                "phase": "session", "outcome": "done", "end_reason": "normal", "exit_code": 0,
+                "run": {"run": 2}, "first_working_at": None, "timed_out": False, "warnings": [],
+            }  # fmt: skip
+            world.fb.script("agent-spawn", "wait", {"json": doc, "exit": 0, "schema": None})
+
+    seen: list[runner.FinalizeRequest] = []
+
+    def finalize(request: runner.FinalizeRequest) -> Any:
+        seen.append(request)
+        run = request.store.get_run(request.run_id)
+        assert run is not None
+        return run
+
+    world.router.on_run = later
+    run = world.run(finalize=finalize)
+    (request,) = seen
+    assert request.result.run_number == 2
+    assert run.awaited_run == 1 and len(agent_calls(world, "wait")) == 1
+
+
+def test_a_wait_envelope_naming_another_agent_never_overwrites_or_tears_down_a_foreign_id(
+    world: World,
+) -> None:
+    def foreign(argv: Any) -> None:
+        if argv[1:2] == ["wait"]:
+            err = {"code": "failed", "message": "x", "agent_id": "ag-bbbbbbbb"}
+            world.fb.script("agent-spawn", "wait", {"error": err, "exit": 0})
+
+    world.router.on_run = foreign
+    run = world.run()
+    assert run.state == "failed" and run.reason == "internal"
+    stored = run.agent_id
+    assert stored is not None and stored != "ag-bbbbbbbb"
+    assert all("ag-bbbbbbbb" not in c for c in map(str, agent_calls(world, "teardown")))
+    assert all("ag-bbbbbbbb" not in c for c in map(str, agent_calls(world, "show")))
