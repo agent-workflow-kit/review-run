@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": "refused",
+    "message": "closed message",
+    "reason": "unknown_host"
+  }
+}

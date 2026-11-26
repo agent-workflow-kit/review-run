@@ -24,7 +24,6 @@ refuses any program that is not a wrapper under the test's own directory.
 from __future__ import annotations
 
 import json
-import os
 import shlex
 import sys
 from collections.abc import Iterator
@@ -81,10 +80,15 @@ class RecordedCall:
     stderr: str = ""
     schema: str | None = None
     signal: int | None = None
+    parsed_command: tuple[str, ...] | None = None  # the command words the fake parsed
 
     @property
     def command(self) -> str:
-        """The first non-flag word of argv (``draft`` for ``pr-comment draft new``)."""
+        """The first command word (``draft`` for ``pr-comment draft new``), as the fake parsed
+        it (so ``forgectl --timeout 5s show ...`` is ``show``); for a call that did not parse
+        (a usage error), the first non-flag word of argv."""
+        if self.parsed_command:
+            return self.parsed_command[0]
         return next((a for a in self.argv if not a.startswith("-")), "")
 
     @property
@@ -106,6 +110,8 @@ class FakeBin:
         self.dir.mkdir(parents=True, exist_ok=True)
         self.bin = self.dir / "bin"
         self.bin.mkdir(exist_ok=True)
+        self.home = self.dir / "home"  # the fakes' HOME and XDG_CONFIG_HOME: never the real ones
+        self.home.mkdir(exist_ok=True)
         for tool in TOOLS:
             wrapper = self.bin / tool
             script = FAKEBIN_SRC / tool
@@ -125,9 +131,10 @@ class FakeBin:
         return str(self.bin / tool)
 
     def env(self, **extra: str) -> dict[str, str]:
-        """A minimal environment whose ``PATH`` holds only the wrappers (plus ``extra``)."""
-        env = {"PATH": str(self.bin), "LANG": "C.UTF-8"}
-        env.update({k: os.environ[k] for k in ("HOME", "XDG_CONFIG_HOME") if k in os.environ})
+        """A minimal environment whose ``PATH`` holds only the wrappers (plus ``extra``);
+        ``HOME`` and ``XDG_CONFIG_HOME`` are a private directory, never the real ones."""
+        env = {"PATH": str(self.bin), "LANG": "C.UTF-8", "HOME": str(self.home),
+               "XDG_CONFIG_HOME": str(self.home)}  # fmt: skip
         env.update(extra)
         return env
 
@@ -165,6 +172,14 @@ class FakeBin:
         path = self.dir / "state.json"
         return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
 
+    def seed_state(self, data: dict[str, Any]) -> None:
+        """Deep-merge ``data`` into ``state.json`` (e.g. backdate a wtctl record's ``created``)."""
+        from tests.fakebin._common import deep_merge
+
+        (self.dir / "state.json").write_text(
+            json.dumps(deep_merge(self.state(), data)), encoding="utf-8"
+        )
+
     # ---- running -----------------------------------------------------------------------------
 
     def run(
@@ -200,6 +215,8 @@ class FakeBin:
                     cwd=rec["cwd"], pid=rec["pid"], pgid=rec["pgid"],
                 )  # fmt: skip
                 order.append(rec["id"])
+            elif rec["ev"] == "parsed":
+                calls[rec["id"]].parsed_command = tuple(rec["command"])
             else:
                 c = calls[rec["id"]]
                 c.exit, c.stdout, c.stderr = rec["exit"], rec["stdout"], rec["stderr"]

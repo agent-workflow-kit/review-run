@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import stat
+import threading
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -47,6 +48,7 @@ class _Routed:
         stdin: str | None = None,
         env: Mapping[str, str] | None = None,
         cwd: str | None = None,
+        term_grace: float = 0.0,
     ) -> CompletedRun:
         assert env is None, "pre-fetch must not build an environment"
         self.calls.append(tuple(argv))
@@ -56,7 +58,20 @@ class _Routed:
             stdin=stdin,
             env=self.fb.env(),
             cwd=str(self.fb.dir),
+            term_grace=term_grace,
         )
+
+    def spawn_detached(
+        self,
+        argv: Sequence[str],
+        *,
+        timeout: float,
+        stdin: str | None = None,
+        env: Mapping[str, str] | None = None,
+        cwd: str | None = None,
+        term_grace: float = 0.0,
+    ) -> gw.DetachedHandle:
+        raise AssertionError(f"pre-fetch must not spawn a detached process: {argv[0]!r}")
 
 
 @pytest.fixture
@@ -484,7 +499,7 @@ def override(
             if isinstance(answer, GatewayError):
                 raise answer
             return answer
-        assert not isinstance(base, GatewayError)
+        assert not isinstance(base, (GatewayError, OSError, RuntimeError))
         return base(call) if callable(base) else base
 
     fake.scripts[tool] = [run]
@@ -523,8 +538,16 @@ def test_prefetch_mapping_table_covers_every_refusal_reason(
     assert failure.lower_reason == reason
 
 
-@pytest.mark.parametrize(("exc", "lower"), GATEWAY_ERRORS)
-@pytest.mark.parametrize("command", ["draft", "files", "diff", "ci"])
+# the (diff, output_too_large) pair maps to too_large instead (own test below)
+READ_FAILURES = [
+    pytest.param(command, exc, lower, id=f"{command}-{lower}")
+    for command in ("draft", "files", "diff", "ci")
+    for exc, lower in GATEWAY_ERRORS
+    if not (command == "diff" and lower == "output_too_large")
+]
+
+
+@pytest.mark.parametrize(("command", "exc", "lower"), READ_FAILURES)
 def test_prefetch_maps_every_gateway_failure_on_every_read(
     fake_gateway: FakeGateway, command: str, exc: gw.GatewayError, lower: str
 ) -> None:
@@ -639,7 +662,7 @@ DRAFT_MUTATIONS = [
     ("schema_version", 2), ("schema_version", True), ("schema_version", None), ("draft_id", "short"),
     ("draft_id", "i" * 26), ("draft_id", 5), ("pr", "github.com/o/r#2"), ("pr", None), ("anchor", None),
     ("anchor.head_sha", None), ("anchor.head_sha", "ABC"), ("anchor.base_ref", ""), ("anchor.base_ref", "a b"),
-    ("anchor.base_ref", "x" * 1025), ("anchor.base_sha", "zz"), ("anchor.merge_base_sha", 7),
+    ("anchor.base_ref", "x" * 1025), ("anchor.base_ref", "x" * 256), ("anchor.base_sha", "zz"), ("anchor.merge_base_sha", 7),
     ("anchor.base_sha", KeyError),
 ]  # fmt: skip
 
@@ -719,6 +742,30 @@ def test_a_diff_that_is_not_text_is_invalid_output(fake_gateway: FakeGateway) ->
     assert failure_of().lower_code == "invalid_output"
 
 
+def test_a_lone_surrogate_in_the_diff_never_escapes_as_an_encoding_error(
+    fake_gateway: FakeGateway,
+) -> None:
+    script_all_ok(fake_gateway, diff="a\ud800b")
+    assert fetch().diff == "a\ud800b"  # surrogatepass accepts it
+
+
+def test_a_diff_over_the_gateway_output_cap_is_too_large(fake_gateway: FakeGateway) -> None:
+    script_all_ok(fake_gateway)
+    override(fake_gateway, "diff", lambda: gw.OutputTooLarge("t"))
+    failure = failure_of()
+    assert (failure.reason, failure.tool, failure.lower_code) == (
+        "too_large", "forgectl", "hard_ceiling",
+    )  # fmt: skip
+
+
+def test_anchor_base_ref_of_255_chars_passes(fake_gateway: FakeGateway) -> None:
+    script_all_ok(fake_gateway)
+    good = json.loads(fake_gateway.scripts["pr-comment"][0].stdout)  # type: ignore[union-attr]
+    bad = mutate(good, "anchor.base_ref", "x" * 255)
+    fake_gateway.scripts["pr-comment"] = [CompletedRun(("x",), 0, json.dumps(bad), "")]
+    assert fetch().anchor.base_ref == "x" * 255
+
+
 def test_extra_fields_in_every_read_are_tolerated(fake_gateway: FakeGateway) -> None:
     script_all_ok(fake_gateway)
     result = fetch()
@@ -732,6 +779,16 @@ def test_a_bad_retry_after_is_dropped(fake_gateway: FakeGateway, bad: Any) -> No
     with pytest.raises(ReviewRunError) as info:
         pf.resolve_pr(PR)
     assert info.value.envelope()["error"].get("details") is None
+
+
+@pytest.mark.parametrize("bad", [10**400, -(10**400)])
+def test_an_int_beyond_float_range_never_escapes(fake_gateway: FakeGateway, bad: int) -> None:
+    body = '{"error": {"code": "rate_limited", "message": "m", "retry_after": ' + str(bad) + "}}"
+    fake_gateway.script("forgectl", CompletedRun(("x",), 12, body, ""))
+    with pytest.raises(ReviewRunError) as info:
+        pf.resolve_pr(PR)
+    details = info.value.envelope()["error"].get("details")
+    assert details == ({"retry_after": 2**31 - 1} if bad > 0 else None)
 
 
 def test_a_huge_retry_after_is_clamped(fake_gateway: FakeGateway) -> None:
@@ -871,6 +928,32 @@ def test_previous_symlink_is_never_followed(store: Store, tmp_path: Path) -> Non
     path.unlink()
     os.symlink(target, path)
     assert previous_failure(store, run_id).lower_code == "previous_modified"
+
+
+def test_previous_fifo_is_rejected_without_blocking(store: Store, tmp_path: Path) -> None:
+    run_id = done_run(store)
+    path = store.run_dir(run_id) / "review.json"
+    path.unlink()
+    os.mkfifo(path)
+    out: list[BaseException | None] = []
+
+    def attempt() -> None:
+        try:
+            with Store.open(tmp_path / "state") as own:  # sqlite handles are per thread
+                pf.load_previous(own, run_id, max_bytes=1 << 20)
+            out.append(None)
+        except BaseException as exc:  # noqa: BLE001
+            out.append(exc)
+
+    thread = threading.Thread(target=attempt, daemon=True)
+    thread.start()
+    thread.join(5)
+    if thread.is_alive():  # unblock the stuck open so the daemon thread can end
+        fd = os.open(path, os.O_WRONLY | os.O_NONBLOCK)
+        os.close(fd)
+        thread.join(5)
+        pytest.fail("load_previous blocked on a FIFO")
+    assert isinstance(out[0], pf.PrefetchFailure) and out[0].lower_code == "previous_modified"
 
 
 def test_previous_size_mismatch_and_over_cap(store: Store) -> None:

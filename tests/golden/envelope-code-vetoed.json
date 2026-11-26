@@ -1,0 +1,10 @@
+{
+  "error": {
+    "code": "vetoed",
+    "message": "closed message",
+    "hook": "pre-run",
+    "decision_ids": [
+      "d1"
+    ]
+  }
+}

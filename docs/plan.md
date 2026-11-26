@@ -5,7 +5,7 @@ Implements [interface.md](interface.md) and [design.md](design.md). Issues are e
 ## Conventions for every stage
 
 - **Gateway boundary.** Every subprocess (forgectl, pr-comment, agent-spawn, claude-session, wtctl, `bwrap`, `socat`, the `/proc` scan) goes through `src/review_run/gateway.py`; tests substitute fakes. No other module spawns a process.
-- **Fakes and pinned schemas.** Fake binaries for forgectl, pr-comment, agent-spawn, claude-session and wtctl live in `tests/fakebin/` (copied per repo, never shared). Sibling schemas the tool reads (forgectl `show`, `files`, `diff`, `ci`; pr-comment's review-draft schema and `draft new`/`draft check` output; agent-spawn's launch result and error envelope; claude-session's `status` outcome object) are copied into `tests/` pinned to a version and every fake's output is validated against them.
+- **Fakes and pinned schemas.** Fake binaries for forgectl, pr-comment, agent-spawn, claude-session and wtctl live in `tests/fakebin/` (copied per repo, never shared). Sibling schemas the tool reads or the fakes emit (the set is listed in `docs/pinned-schemas.md`) are copied into `tests/` pinned to a version and every fake's output is validated against them.
 - **Process and live split.** Unit and process tests run in `make verify` (process tests that need real bubblewrap skip when it is unusable). Tests that need a real model or real host carry the pytest marker `live`, are deselected by default and never run in CI.
 - **Golden files** for every `--json` output, validated against `schemas/`.
 - **Spike regressions.** Every behavior relied on from the live verification is a test. Spike A's findings: missing-skill detection, `--no-implicit-done`, large-input behavior, and the normalization fixture (a finding property the model invented, such as an extra free-text field, and `"suggestion": null`). Spike C's deny profile: the `Agent` and `Task` tools and every other unused tool are absent from the init tool list, and the list equals the pinned allowed set. Spike B's attack set, each a process test under real bubblewrap with the expected result in the table:
@@ -43,7 +43,7 @@ Implements [interface.md](interface.md) and [design.md](design.md). Issues are e
 | `hooks` | 2 | hook execution and payloads |
 | `plugin/` | 2 | bundled `review-pr` skill and permission profile |
 | `runs` | 3 | `resume`, `wait`, the refresh of `show`, `cancel`, `reconcile` (finalization by another process, expiry, the label recovery, outbox redelivery), `prune`, `cron` |
-| `coderun` | 4 | throwaway, sandboxed runner, output descriptor, removal (output through `sanitize`) |
+| `coderun` | 4 | throwaway, sandboxed runner, output descriptor, removal (output through `sanitizer`) |
 
 ## Stage 0: Scaffold, config, store, gateway, sanitizer
 
