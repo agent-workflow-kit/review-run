@@ -26,6 +26,7 @@ class Call:
     timeout: float
     term_grace: float = 0.0
     detached: bool = False
+    signal_stop: gw.SignalStop | None = None
 
     @property
     def env_names(self) -> list[str]:
@@ -68,10 +69,17 @@ class FakeGateway:
         cwd: str | None = None,
         term_grace: float = 0.0,
         on_start: Callable[[int], None] | None = None,
+        signal_stop: gw.SignalStop | None = None,
     ) -> CompletedRun:
         gw.check_call(argv, timeout, stdin=stdin, env=env, cwd=cwd, term_grace=term_grace)
         call = Call(
-            tuple(argv), stdin, None if env is None else dict(env), cwd, timeout, term_grace
+            tuple(argv),
+            stdin,
+            None if env is None else dict(env),
+            cwd,
+            timeout,
+            term_grace,
+            signal_stop=signal_stop,
         )
         self.calls.append(call)
         queue = self.scripts.get(argv[0])

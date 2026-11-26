@@ -18,7 +18,10 @@ A step of the scenario, ``scenario[tool][command]`` (a list; the last step repea
 * ``{"error": {...}, "exit": N}``: print ``{"error": ...}`` and exit ``N``;
 * ``{"exit": N}``: change the exit code of the default output;
 * ``{"stdout_raw": text}``: print ``text`` as is (garbage, truncated JSON, ...), schema ``null``;
-* ``{"stderr": text}``, ``{"delay": seconds}``, ``{"hang": true}`` (sleep until signaled),
+* ``{"stderr": text}``, ``{"delay": seconds}``, ``{"hang": true}`` (sleep until signaled; with
+  ``"ready_file": path`` the PID is written there once the signal handlers are armed, with
+  ``"signal_file": path`` each signal received is appended there, one number per line, and with
+  ``"ignore_term": true`` SIGTERM is received and recorded but does not end the call),
   ``{"schema": name | null}`` (override the schema the harness validates against).
 """
 
@@ -382,6 +385,8 @@ class Call:
         self.before_finish: Callable[[Out], None] = lambda out: None
         #: exit code by signal number, where the real tool differs from 128+N
         self.signal_exit: dict[int, int] = {}
+        #: signals that are recorded (``on_signal``) but do not end the call
+        self.ignored: set[int] = set()
         signal.pthread_sigmask(signal.SIG_BLOCK, self.SIGNALS)
         for signum in self.SIGNALS:
             signal.signal(signum, self._signal)
@@ -426,6 +431,8 @@ class Call:
     def _signal(self, signum: int, _frame: object) -> None:
         """A signal ends the call by that signal's exit code (128+N) unless the tool says more."""
         out = self.on_signal(signum)
+        if signum in self.ignored:
+            return
         if out is None:
             out = Out(exit=self.signal_exit.get(signum, 128 + signum), schema=None)
         self.finish(out, signaled=signum)
@@ -507,6 +514,21 @@ def hang(call: Call) -> None:
             return
 
 
+def _hang_signals(call: Call, step: dict[str, Any]) -> None:
+    """The signal behavior of a hanging step (``signal_file``, ``ignore_term``)."""
+    if "signal_file" in step:
+        previous = call.on_signal
+
+        def record(signum: int, path: str = str(step["signal_file"])) -> Out | None:
+            with open(path, "a", encoding="utf-8") as handle:
+                handle.write(f"{signum}\n")
+            return previous(signum)
+
+        call.on_signal = record
+    if step.get("ignore_term"):
+        call.ignored.add(signal.SIGTERM)
+
+
 def apply_step(
     tool: str,
     step: dict[str, Any] | None,
@@ -516,12 +538,16 @@ def apply_step(
     schema: str | None,
 ) -> Out:
     """Turn a scenario step (or nothing) into the call's output."""
+    if step is not None and step.get("hang"):
+        _hang_signals(call, step)  # before the held signals are delivered
     call.arm()
     if step is None:
         out = default()
         out.schema = out.schema if out.schema is not None or out.text is not None else schema
         return out
     if step.get("hang"):
+        if "ready_file" in step:  # the handlers are armed: a test may signal now
+            Path(str(step["ready_file"])).write_text(str(os.getpid()), encoding="utf-8")
         hang(call)
     if "delay" in step:
         time.sleep(float(step["delay"]))

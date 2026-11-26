@@ -41,6 +41,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final, Literal
 
+from . import signals
 from .errors import ReviewRunError
 from .fsmodes import FILE_MODE
 from .store import Store, ensure_state_root, format_time
@@ -732,7 +733,8 @@ class _Appender:
         try:
             _lock(fd)
             self._verify_same_file(fd)
-            yield fd
+            with signals.deferred():  # an append is finished before a signal is raised
+                yield fd
         finally:
             os.close(fd)
 

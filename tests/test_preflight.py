@@ -52,6 +52,7 @@ class Routed:
         cwd: str | None = None,
         term_grace: float = 0.0,
         on_start: Callable[[int], None] | None = None,
+        signal_stop: gw.SignalStop | None = None,
     ) -> CompletedRun:
         self.calls.append(tuple(argv))
         self.envs.append(None if env is None else dict(env))
@@ -74,6 +75,7 @@ class Routed:
             env=child,
             cwd=str(self.fb.dir),
             term_grace=term_grace,
+            signal_stop=signal_stop,
         )
 
     def spawn_detached(

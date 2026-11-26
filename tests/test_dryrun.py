@@ -334,10 +334,40 @@ def test_a_sigterm_during_the_dry_run_unwinds_and_removes_the_scratch_directory(
 
     monkeypatch.setattr(dryrun, "write_prompt_files", term)
     before = signal.getsignal(signal.SIGTERM)
-    with pytest.raises(SystemExit) as stop:
-        cli("--json", "run", PR_URL, "--dry-run")
-    assert stop.value.code == 143
+    res = cli("--json", "run", PR_URL, "--dry-run")  # under the command's signal guard
+    assert res.code == 143 and res.out == ""
     assert signal.getsignal(signal.SIGTERM) == before
+    assert os.listdir(state_root(world) / "tmp") == []
+
+
+def test_a_second_sigterm_during_the_scratch_removal_does_not_interrupt_it(
+    world: World, cli, monkeypatch: pytest.MonkeyPatch
+) -> None:  # type: ignore[no-untyped-def]
+    import shutil
+    import signal
+
+    from review_run import dryrun
+
+    real = shutil.rmtree
+    removed: list[bool] = []
+
+    first: list[bool] = []
+
+    def term(*args: Any) -> None:
+        first.append(True)
+        signal.raise_signal(signal.SIGTERM)  # the first signal: unwinds into the removal
+
+    def rmtree(path: Any, *args: Any, **kw: Any) -> None:
+        if first:
+            signal.raise_signal(signal.SIGTERM)  # a second one, during the cleanup: ignored
+        real(path, *args, **kw)
+        if first:
+            removed.append(True)
+
+    monkeypatch.setattr(dryrun, "write_prompt_files", term)
+    monkeypatch.setattr(shutil, "rmtree", rmtree)
+    res = cli("--json", "run", PR_URL, "--dry-run")
+    assert res.code == 143 and removed == [True]
     assert os.listdir(state_root(world) / "tmp") == []
 
 

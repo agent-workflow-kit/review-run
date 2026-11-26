@@ -94,7 +94,8 @@ Minimum sibling versions: review-run needs claude-session and agent-spawn releas
 | `sanitizer` | the sanitizer (used by `prompt`, `coderun` and human output) |
 | `prompt` | fenced prompt and input files, nonce |
 | `coderun` | throwaway, sandboxed runner, output descriptor, removal (output goes through the sanitizer) |
-| `launch` | builds agent-spawn arguments, the per-phase signal handling ([Signals](interface.md#signals)), result handling |
+| `launch` | builds agent-spawn arguments, result handling, the mapping table |
+| `signals` | the guard of `run`, `resume` and `wait` ([Signals](interface.md#signals)): handlers that set a flag and raise `SignalExit` at a safe point, deferred sections, the first signal wins and every further one is ignored; `runner._interrupted` applies the per-phase table (cancellation recorded first, launcher SIGTERM at its exact PID with the 60 s grace and never SIGKILL, waiter SIGKILL, agent stop and teardown) |
 | `finalize` | the finalize steps, session-claim validation, normalization, meta derivation, teardown |
 | `store` | SQLite (WAL, additive migrations), run directory, leases |
 | `procid` | process identity (PID plus boot id and start time from `/proc`) for leases and runner checks |

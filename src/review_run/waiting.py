@@ -16,8 +16,11 @@ Seams, each with its owner:
   ``agent-spawn show`` cannot run (``finalize_agent`` treats a gateway failure as "row
   unchanged"); the diagnosis of repeated refresh failures (``tool_missing``) belongs to the runner
   check and recovery work.
-* TODO(#27): signals; an interrupted waiter prints nothing (``KeyboardInterrupt``) and changes
-  nothing: no lease or process is held while sleeping.
+* Signals (#27): ``cli`` runs ``wait`` under ``signals.guarded``; a signal while sleeping or polling
+  raises ``SignalExit`` (nothing printed, exit 130 or 143, nothing changed: no lease or process is
+  held while sleeping), also while a read-only poll (``agent-spawn show``) runs (its child is
+  ended); once a finalization begins (``finalize_agent``) a signal waits for it and is dropped:
+  the ``wait`` that finalized the run prints its outcome and exits with its own exit code.
 """
 
 from __future__ import annotations
@@ -148,6 +151,7 @@ def refresh_run(
         return run
     run_object(run)  # CorruptRunError for a row that cannot be shown: no sibling call
     try:
+        # ``finalize_agent`` defers a finalization once it begins; its reads stay interruptible.
         finalize_agent(
             root,
             run_id,

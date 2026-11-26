@@ -38,7 +38,8 @@ Implements [interface.md](interface.md) and [design.md](design.md). Issues are e
 | `prefetch` | 1 | forgectl and `pr-comment draft new` reads, head comparison |
 | `manifest` | 1 | manifest entries, per-file patches, hunk splitting, size caps, the prompt table |
 | `prompt` | 1 | fenced prompt and input files, nonce |
-| `launch` | 2 | agent-spawn arguments, result handling, and the per-phase signal handling (`signals`) |
+| `launch` | 2 | agent-spawn arguments, result handling |
+| `signals` | 2 | the signal guard and the per-phase signal handling (`runner._interrupted`) |
 | `finalize` | 2 | artifact checks, normalization, meta derivation, teardown |
 | `hooks` | 2 | hook execution and payloads |
 | `plugin/` | 2 | bundled `review-pr` skill and permission profile |
