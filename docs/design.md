@@ -80,7 +80,7 @@ Every relied-on behavior becomes a `live` or process regression test in the plan
 
 Sandbox on WSL2: the `/usr/lib` bind exposes WSL's driver store and `--tmpfs /usr/lib/wsl` after it hides it (bubblewrap 0.9.0, WSL2); bubblewrap cannot create that mount point where the directory does not exist, so it is added only when present.
 
-Minimum sibling versions: review-run needs claude-session and agent-spawn releases that support `--no-implicit-done` and a wtctl release that accepts `create --throwaway --source auto --label`; the exact versions are filled when those releases ship, and until then review-run compares `agent-spawn --version` and `claude-session --version` with these minimums at run order step 1 and exits 12 `tool_too_old` before anything is allocated ([Run order](interface.md#run-order), [Upgrades](interface.md#upgrades)).
+Minimum sibling versions: review-run needs claude-session and agent-spawn releases that support `--no-implicit-done` and a wtctl release that accepts `create --throwaway --source auto --label`; the exact versions are filled when those releases ship, and until then review-run compares `agent-spawn --version` and `claude-session --version` with these minimums at run order step 1 and exits 12 `tool_too_old` before anything is allocated ([Run order](interface.md#run-order), [Upgrades](interface.md#upgrades)). Until then the minimums are the releases the pinned schemas were copied from (agent-spawn 0.38.1, claude-session 0.45.2, `MIN_VERSIONS` in `preflight.py`); an unparsable `--version` of either fails closed (`lower_failed`, `invalid_output`).
 
 ## Modules
 
@@ -101,7 +101,7 @@ Minimum sibling versions: review-run needs claude-session and agent-spawn releas
 | `hooks` | hook execution, payload building and outbox delivery (at least once: every pass re-runs all synchronous entries of an undelivered event, so one that succeeded may run again up to 5 times in all, and `async` entries start only on the pass that ends the event; hooks deduplicate on `event_id`); an `async` entry's timeout is enforced by a small supervisor process the gateway starts (`sys.executable -I`, no dependency) that outlives review-run |
 | `audit` | `audit.jsonl`, `log.jsonl`, `export` |
 | `runs` | `resume`, `wait`, the refresh of `show`, `cancel`, `reconcile` (finalization by another process, expiry, the label recovery, outbox redelivery), `prune`, `cron` |
-| `plugin/` | the bundled skill and permission profile, located with `importlib.resources.files('review_run') / 'plugin'` |
+| `plugin/` | the bundled skill and permission profile, located with `importlib.resources.files('review_run') / 'plugin'`; it is walked like any plugin directory (user-owned, not group- or world-writable), so an install or checkout made at umask 002 needs `chmod -R g-w`; the refusal has its own message and no copy is made (D-27) |
 
 ## Data model
 

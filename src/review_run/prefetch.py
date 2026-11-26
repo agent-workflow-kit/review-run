@@ -650,9 +650,8 @@ def prefetch(pr: str, *, hard_ceiling_bytes: int) -> Prefetch:
     a ``too_large`` refusal of ``diff`` and a diff above ``hard_ceiling_bytes`` raise
     ``too_large`` at once; every other failure is ``prefetch_failed``.
 
-    The manifest step (``manifest.build_manifest``, #13) also fails ``too_large`` for more than
-    9999 files and ``prefetch_failed`` (``diff_files_mismatch``) when the diff and the file list
-    disagree; the run orchestration calls it with the result of this function.
+    TODO(#13): the manifest also fails ``too_large`` for more than 9999 files and
+    ``prefetch_failed`` (``diff_files_mismatch``) when the diff and the file list disagree.
     """
     if not isinstance(pr, str) or not _PR.fullmatch(pr):
         raise ValueError("pr must be a canonical host/path#N")

@@ -1,0 +1,38 @@
+{
+  "permissions": {
+    "allow": ["Skill"],
+    "deny": [
+      "Agent",
+      "Task",
+      "WebFetch",
+      "WebSearch",
+      "mcp__*",
+      "SendMessage",
+      "ListAgents",
+      "TaskStop",
+      "Workflow",
+      "ReportFindings",
+      "CronCreate",
+      "CronDelete",
+      "CronList",
+      "ScheduleWakeup",
+      "EnterWorktree",
+      "ExitWorktree",
+      "RemoteTrigger",
+      "PushNotification",
+      "PublishPlugin",
+      "ShareOnboardingGuide",
+      "DesignSync",
+      "Monitor",
+      "Bash(gh:*)",
+      "Bash(glab:*)",
+      "Bash(agent-spawn:*)",
+      "Bash(memoctl add:*)"
+    ]
+  },
+  "sandbox": {
+    "network": {
+      "allowedDomains": []
+    }
+  }
+}

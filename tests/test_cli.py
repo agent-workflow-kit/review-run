@@ -10,7 +10,6 @@ from tests.golden_harness import check_golden
 from tests.helpers import run_cli
 
 COMMANDS: list[list[str]] = [
-    ["run", "https://example.test/o/r/pull/1"],
     ["resume", "rr-aaaa", "--prompt-file", "-"],
     ["wait", "rr-aaaa"],
     ["reconcile"],
@@ -19,8 +18,9 @@ COMMANDS: list[list[str]] = [
     ["cron", "install"],
     ["cron", "uninstall"],
 ]
-# `export` (tests/test_audit.py), `list` and `show` (tests/test_runs.py) are implemented; the
-# others are stubs of later issues.
+# `export` (tests/test_audit.py), `list` and `show` (tests/test_runs.py) are implemented and
+# `run` has its own tests (tests/test_preflight.py: its checks reach sibling tools); the others
+# are stubs of later issues.
 
 
 def test_version_prints_version_and_exits_zero(capsys: pytest.CaptureFixture[str]) -> None:
@@ -122,7 +122,7 @@ def test_verbose_with_quiet_is_accepted(capsys: pytest.CaptureFixture[str]) -> N
 
 def test_decision_id_limit(capsys: pytest.CaptureFixture[str]) -> None:
     def argv(n: int) -> list[str]:
-        return ["run", "p", *[a for i in range(n) for a in ("--decision-id", f"d{i}")]]
+        return ["cancel", "rr-aaaa", *[a for i in range(n) for a in ("--decision-id", f"d{i}")]]
 
     assert run_cli(capsys, "--json", *argv(32)).code == 1
     assert run_cli(capsys, "--json", *argv(33)).code == 2
@@ -241,7 +241,7 @@ def test_main_sets_umask_077(capsys: pytest.CaptureFixture[str]) -> None:
 @pytest.mark.parametrize(
     "argv",
     [
-        ["run", "p", "--timeout", "30s"],
+        ["wait", "rr-aaaa", "--timeout", "30s"],
         ["wait", "rr-aaaa", "--timeout", "5m"],
         ["prune", "--older-than", "0"],
         ["prune", "--older-than", "30d"],
@@ -296,29 +296,14 @@ def test_bad_values_exit_2(capsys: pytest.CaptureFixture[str], argv: list[str]) 
     assert run_cli(capsys, "--json", *argv).code == 2
 
 
-def test_repeatable_flags_parse(capsys: pytest.CaptureFixture[str]) -> None:
-    res = run_cli(
-        capsys,
-        "--json",
-        "run",
-        "p",
-        "--label",
-        "a=b",
-        "--label",
-        "c=d",
-        "--hook",
-        "pre-run=true",
-        "--decision-id",
-        "d1",
-        "--decision-id",
-        "d2",
-        "--actor",
-        "human:me",
-        "--override-escalation",
-        "--no-wait",
-        "--dry-run",
-    )
-    assert res.code == 1
+def test_repeatable_flags_parse() -> None:
+    ns = build_parser().parse_args(
+        ["run", "p", "--label", "a=b", "--label", "c=d", "--hook", "pre-run=true",
+         "--decision-id", "d1", "--decision-id", "d2", "--actor", "human:me",
+         "--override-escalation", "--no-wait", "--dry-run"]
+    )  # fmt: skip
+    assert ns.label == ["a=b", "c=d"] and ns.hook == ["pre-run=true"]
+    assert ns.decision_id == ["d1", "d2"] and ns.override_escalation and ns.dry_run
 
 
 # -- goldens ---------------------------------------------------------------------------------
