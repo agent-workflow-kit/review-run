@@ -4,6 +4,8 @@
   test interpreter, a script under the test's ``tmp_path`` or under ``tests/fakebin``. Bare names
   (``git``, ``gh``, ``claude``, ...) and absolute paths of real binaries (``/usr/bin/git``) are
   both refused, so a test can never reach the user's real tools or config.
+* On 3.13 ``subprocess._USE_POSIX_SPAWN`` is turned off so ``Popen`` does not need the refused
+  ``os.posix_spawn``.
 * ``executable=`` is refused, symlinks are resolved before the allow check, and ``os.system``,
   ``os.posix_spawn*``, ``os.fork*``, ``os.exec*`` and ``pty.fork`` raise for the test's duration.
 * Each child's PID is recorded at launch (with a pidfd where the kernel has one, which pins the
@@ -61,6 +63,12 @@ def group_members(pgid: int, *, live_only: bool = False) -> list[int]:
 
     A member keeps the id reserved, so while any exists it cannot have been reused by a stranger.
     """
+    try:
+        os.kill(-pgid, 0)  # killpg(pgid, 0); tests that record killpg calls must not see this
+    except ProcessLookupError:
+        return []  # no process in the group (not even a zombie): nothing to scan for
+    except PermissionError:
+        pass  # a member we may not signal: fall through to the scan
     found: list[int] = []
     for entry in os.listdir("/proc"):
         if not entry.isdigit():
@@ -178,6 +186,9 @@ def proc_tracker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Pr
     for name in _OS_ESCAPES:
         monkeypatch.setattr(os, name, _refuser(f"os.{name}"), raising=False)
     monkeypatch.setattr(pty, "fork", _refuser("pty.fork"))
+    # CPython 3.13 starts children through os.posix_spawn when it can; the refusal above would stop
+    # every Popen. Use the fork_exec path (argv is still checked by GuardedPopen).
+    monkeypatch.setattr(subprocess, "_USE_POSIX_SPAWN", False, raising=False)
     try:
         yield tracker
     finally:

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import re
+import signal
 import time
 from typing import Any
 
@@ -64,6 +65,11 @@ def _hook_check(allowed: tuple[str, ...]):  # type: ignore[no-untyped-def]
     return check
 
 
+def _timeout_check(value: str) -> str | None:
+    """claude-session's ``--timeout <duration>|none`` (passed through; ``0`` is refused)."""
+    return None if value == "none" else duration_check(value)
+
+
 _GLOBAL = {
     "--json": flag(),
     "--config": flag(takes=True),
@@ -86,7 +92,7 @@ _LAUNCH_FLAGS = {
     "--skill": flag(takes=True),
     "--plugin-dir": flag(takes=True, repeat=True),
     "--model": flag(takes=True),
-    "--timeout": flag(takes=True, check=duration_check),
+    "--timeout": flag(takes=True, check=_timeout_check),
     "--max-turns": flag(takes=True, check=positive_int_check),
     "--permission-profile": flag(takes=True),
     "--sandbox": flag(takes=True, choices=("required", "preferred", "off")),
@@ -200,6 +206,7 @@ GRAMMAR = Grammar(
             }
         ),
     },
+    duplicates="last_wins",  # plain argparse: a repeated scalar flag keeps the last value
     unimplemented=frozenset(
         [
             ("attach",),
@@ -248,27 +255,68 @@ def _seconds(value: str) -> float:
     return float(m.group(1)) * scale
 
 
-def _check_launch_flags(parsed: Parsed, *, resume: bool) -> None:
+_REFUSED_RESULT_FILE: list[str] = []
+_INPUT_NAME = re.compile(r"[A-Za-z0-9._-]{1,128}")
+MAX_LABELS = 64  # agent-spawn's labels.MAX_LABELS: distinct user pairs, ``job=`` not counted
+MAX_DECISION_IDS = 32
+
+
+def _third_party_reading(parsed: Parsed) -> bool:
+    return parsed.get("--kind") == "review" or parsed.has("--reads-third-party")
+
+
+def _inside(path: str, directory: str) -> bool:
+    path, directory = os.path.realpath(path), os.path.realpath(directory)
+    return path == directory or path.startswith(directory.rstrip("/") + "/")
+
+
+def _check_result_file(parsed: Parsed, session_dir: str | None) -> None:
+    """The third-party path rule: a third-party-reading run's result file may not be written
+    into the run's cwd or its session directory (exit 2). Only the cwds the fake can know are
+    checked: an absolute ``--cwd`` or ``--worktree <path>``, and the session directory."""
+    result = parsed.get("--result-file")
+    if result is None or not _third_party_reading(parsed):
+        return
+    parent = os.path.dirname(os.path.abspath(result))
+    cwd = parsed.get("--cwd")
+    worktree = parsed.get("--worktree", "none")
+    bases = [session_dir] if session_dir else []
+    if worktree not in ("new", "none", None):
+        bases.append(worktree)
+    elif cwd is not None and cwd != "session-dir" and os.path.isabs(cwd):
+        bases.append(cwd)
+    if any(_inside(parent, base) for base in bases if base):
+        _REFUSED_RESULT_FILE.append(result)  # such a path is never written, not even the error
+        raise Usage("--result-file may not lie inside a third-party-reading run's cwd or session")
+
+
+def _check_launch_flags(parsed: Parsed, *, resume: bool, session_dir: str | None = None) -> None:
     for name in ("--override-escalation", "--allow-tainted"):
         if parsed.has(name) and not _human(parsed):
             raise Usage(f"{name} is human-only: pass --actor human:<user>")
-    for lab in parsed.all("--label"):
+    labels = list(dict.fromkeys(parsed.all("--label")))
+    for lab in labels:
         if lab.split("=", 1)[0] in _RESERVED_LABELS:
             raise Usage("the label keys 'agent' and 'kind' are reserved")
+    if len([lab for lab in labels if not lab.startswith("job=")]) > MAX_LABELS:
+        raise Usage(f"at most {MAX_LABELS} labels per agent")
     for name in ("--prompt-file", "--input-file", "--permission-profile"):
         for path in parsed.all(name):
+            if name == "--prompt-file" and path == "-":
+                continue  # the prompt is read from stdin
             if not os.path.isfile(path):
                 raise Usage(f"{name}: no such file")
+    names = [os.path.basename(p) for p in parsed.all("--input-file")]
+    if any(not _INPUT_NAME.fullmatch(n) for n in names) or len(set(names)) != len(names):
+        raise Usage("--input-file names are 1 to 128 of [A-Za-z0-9._-] and must be distinct")
     for path in parsed.all("--plugin-dir"):
         if not os.path.isdir(path):
             raise Usage("--plugin-dir: no such directory")
-    result = parsed.get("--result-file")
-    if result is not None and not os.path.isabs(result):
-        raise Usage("--result-file must be an absolute path")
     if parsed.has("--wait-timeout") and not (
         parsed.has("--wait") or parsed.get("--placement") == "here"
     ):
         raise Usage("--wait-timeout needs --wait")
+    _check_result_file(parsed, session_dir)
     if resume:
         if parsed.has("--select"):
             raise Unimplemented("resume --select")
@@ -284,6 +332,12 @@ def _check_launch_flags(parsed: Parsed, *, resume: bool) -> None:
                      "--no-bootstrap", "--copy-env"):  # fmt: skip
             if parsed.has(name):
                 raise Usage(f"{name} needs --worktree new")
+    if (
+        parsed.get("--mode", "interactive") == "headless"
+        and not parsed.has("--skill")
+        and not (parsed.has("--prompt") or parsed.has("--prompt-file"))
+    ):
+        raise Usage("a headless launch needs --skill or a prompt")
     cwd = parsed.get("--cwd")
     if cwd == "session-dir" and worktree != "none":
         raise Usage("--cwd session-dir cannot be used with a worktree")
@@ -298,7 +352,7 @@ def _settings(parsed: Parsed) -> dict[str, Any]:
         "skill": parsed.get("--skill"),
         "repo": parsed.get("--repo"),
         "cwd": parsed.get("--cwd"),
-        "labels": parsed.all("--label"),
+        "labels": list(dict.fromkeys(parsed.all("--label"))),  # first-seen order, once each
         "name": parsed.get("--name"),
         "promote": True
         if parsed.has("--promote")
@@ -370,10 +424,10 @@ def _write_result_file(argv: list[str]):  # type: ignore[no-untyped-def]
                 path = tok.partition("=")[2]
 
     def hook(out: Out) -> None:
-        if path and os.path.isabs(path) and out.doc is not None:
+        if path and path not in _REFUSED_RESULT_FILE and out.doc is not None:
             import json
 
-            result_file_write(path, json.dumps(out.doc) + "\n")
+            result_file_write(os.path.abspath(path), json.dumps(out.doc) + "\n")
 
     return hook
 
@@ -384,8 +438,9 @@ def _write_result_file(argv: list[str]):  # type: ignore[no-untyped-def]
 
 
 def _interrupted(signum: int) -> Out:
-    """A launcher interrupted before any supervisor existed: envelope, exit 128+N."""
-    return _as_error(128 + signum, "launch_failed", "interrupted",
+    """A launcher interrupted before any supervisor existed: the envelope, exit 143 for SIGTERM
+    and 130 for SIGHUP and SIGINT (interface.md, Signals)."""
+    return _as_error(143 if signum == signal.SIGTERM else 130, "launch_failed", "interrupted",
                      details={"cause": "interrupted"})  # fmt: skip
 
 
@@ -423,7 +478,10 @@ def _dry_run_doc(parsed: Parsed, resume: bool) -> dict[str, Any]:
 
 def _launch(call: Call, parsed: Parsed, *, resume: bool) -> Out:
     call.on_signal = _interrupted
-    _check_launch_flags(parsed, resume=resume)
+    _check_launch_flags(
+        parsed, resume=resume,
+        session_dir=sess.peek_session_dir(parsed.args[0] if resume and parsed.args else None),
+    )  # fmt: skip
     command = "resume" if resume else "launch"
     if parsed.has("--dry-run"):
         step = next_step(TOOL, f"{command} --dry-run")
@@ -450,11 +508,14 @@ def _launch(call: Call, parsed: Parsed, *, resume: bool) -> Out:
                 run = sess.new_run(n, plan, rec["settings"]["mode"], iso())
                 rec["runs"].append(run)
                 rec["run"] = n
-                rec["status"], rec["park_reason"], rec["needs_attention"] = "live", None, None
+                rec["status"] = "launching" if sess.is_pending(run) else "live"
+                rec["park_reason"], rec["needs_attention"] = None, None
             else:
                 rec = sess.new_agent(state, _settings(parsed), plan)
                 run = sess.last_run(rec)
-            if run["plan"]["outcome"] in ("not-started", "vetoed", "escalated") or wait:
+            if not sess.is_pending(run) and (
+                run["plan"]["outcome"] in ("not-started", "vetoed", "escalated") or wait
+            ):
                 sess.finalize(rec, run)
                 run = sess.last_run(rec)
             out = _result_out(rec, run if run["final"] else None)
@@ -474,7 +535,7 @@ def _wait(call: Call, parsed: Parsed) -> Out:
             if rec is None:
                 return _not_found(agent_id)
             run = sess.last_run(rec)
-            if not run["final"] and run["plan"].get("never_ends"):
+            if not run["final"] and (run["plan"].get("never_ends") or sess.is_pending(run)):
                 live = True
             else:
                 live = False
@@ -655,7 +716,11 @@ def _list(call: Call, parsed: Parsed) -> Out:
 def handler(call: Call, parsed: Parsed) -> Out:
     if parsed.has("--verbose") and parsed.has("--quiet"):
         raise Usage("--verbose and --quiet are mutually exclusive")
+    if len(parsed.all("--decision-id")) > MAX_DECISION_IDS:
+        raise Usage(f"at most {MAX_DECISION_IDS} --decision-id values")
     command = parsed.command[0]
+    if command == "wait":  # a waiter interrupted by SIGHUP exits 130 like SIGINT (Signals)
+        call.signal_exit[signal.SIGHUP] = 130
     if command == "launch":
         return _launch(call, parsed, resume=False)
     if command == "resume":

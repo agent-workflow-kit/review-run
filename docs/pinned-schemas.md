@@ -50,7 +50,12 @@ tree or trust local tags without fetching.
    `source`) and keep the rest of the document unchanged. Remove files the
    sibling deleted.
 4. Update the table above.
-5. Run `make verify`. A schema change that breaks a fake sibling output fails
+5. Bump `VERSIONS[<sibling>]` in `tests/fakebin/_common.py` to the new version
+   (`tests/test_fakes_harness.py` fails while it differs from the pinned one),
+   and re-check the fake against the sibling's `docs/interface.md` at the new
+   tag (grammar, exit codes, signals, error envelope), updating the fake where
+   the interface changed.
+6. Run `make verify`. A schema change that breaks a fake sibling output fails
    the fake-validation test (issue #10); fix the fake or the code that reads
    the output in the same change.
 
@@ -74,5 +79,8 @@ the pinned version (argv grammar, exit codes, stdout and stderr split, error
 envelope, signals). The harness validates every recorded stdout that names a
 pinned schema when the test ends, so a fake that emits an invalid document fails
 the test. Named scenarios live in `tests/fake_scenarios.py`; the format of a
-scenario step is in `tests/fakebin/_common.py`. When a sibling release changes a
+scenario step is in `tests/fakebin/_common.py`. The fakes are stricter than the
+real tools in one place on purpose: `--` is refused everywhere (review-run never
+emits it and no real command needs it), so a caller that starts passing it fails
+its tests. When a sibling release changes a
 pinned schema, update the fake in the same change.

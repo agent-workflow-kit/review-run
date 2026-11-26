@@ -10,18 +10,17 @@ from tests.golden_harness import check_golden
 from tests.helpers import run_cli
 
 COMMANDS: list[list[str]] = [
-    ["run", "https://example.test/o/r/pull/1"],
     ["resume", "rr-aaaa", "--prompt-file", "-"],
     ["wait", "rr-aaaa"],
-    ["list"],
-    ["show", "rr-aaaa"],
     ["reconcile"],
     ["prune"],
     ["cancel", "rr-aaaa"],
     ["cron", "install"],
     ["cron", "uninstall"],
 ]
-# `export` is implemented (tests/test_audit.py); the others are stubs of later issues.
+# `export` (tests/test_audit.py), `list` and `show` (tests/test_runs.py) are implemented and
+# `run` has its own tests (tests/test_preflight.py: its checks reach sibling tools); the others
+# are stubs of later issues.
 
 
 def test_version_prints_version_and_exits_zero(capsys: pytest.CaptureFixture[str]) -> None:
@@ -98,7 +97,7 @@ def test_every_command_is_a_stub_exiting_1_with_internal_envelope(
 
 
 def test_stub_human_mode_prints_one_line_to_stderr(capsys: pytest.CaptureFixture[str]) -> None:
-    res = run_cli(capsys, "list")
+    res = run_cli(capsys, "wait", "rr-aaaa")
     assert res.code == 1
     assert res.out == ""
     assert res.err.startswith("review-run: internal: ")
@@ -118,12 +117,12 @@ def test_global_flag_after_the_subcommand_wins_over_before() -> None:
 
 
 def test_verbose_with_quiet_is_accepted(capsys: pytest.CaptureFixture[str]) -> None:
-    assert run_cli(capsys, "--verbose", "--quiet", "list").code == 1
+    assert run_cli(capsys, "--verbose", "--quiet", "list").code == 0
 
 
 def test_decision_id_limit(capsys: pytest.CaptureFixture[str]) -> None:
     def argv(n: int) -> list[str]:
-        return ["run", "p", *[a for i in range(n) for a in ("--decision-id", f"d{i}")]]
+        return ["cancel", "rr-aaaa", *[a for i in range(n) for a in ("--decision-id", f"d{i}")]]
 
     assert run_cli(capsys, "--json", *argv(32)).code == 1
     assert run_cli(capsys, "--json", *argv(33)).code == 2
@@ -242,12 +241,10 @@ def test_main_sets_umask_077(capsys: pytest.CaptureFixture[str]) -> None:
 @pytest.mark.parametrize(
     "argv",
     [
-        ["run", "p", "--timeout", "30s"],
+        ["wait", "rr-aaaa", "--timeout", "30s"],
         ["wait", "rr-aaaa", "--timeout", "5m"],
         ["prune", "--older-than", "0"],
         ["prune", "--older-than", "30d"],
-        ["list", "--since", "2h"],
-        ["list", "--since", "2026-03-10T10:00:00Z"],
     ],
 )
 def test_valid_durations_reach_the_stub(
@@ -299,29 +296,14 @@ def test_bad_values_exit_2(capsys: pytest.CaptureFixture[str], argv: list[str]) 
     assert run_cli(capsys, "--json", *argv).code == 2
 
 
-def test_repeatable_flags_parse(capsys: pytest.CaptureFixture[str]) -> None:
-    res = run_cli(
-        capsys,
-        "--json",
-        "run",
-        "p",
-        "--label",
-        "a=b",
-        "--label",
-        "c=d",
-        "--hook",
-        "pre-run=true",
-        "--decision-id",
-        "d1",
-        "--decision-id",
-        "d2",
-        "--actor",
-        "human:me",
-        "--override-escalation",
-        "--no-wait",
-        "--dry-run",
-    )
-    assert res.code == 1
+def test_repeatable_flags_parse() -> None:
+    ns = build_parser().parse_args(
+        ["run", "p", "--label", "a=b", "--label", "c=d", "--hook", "pre-run=true",
+         "--decision-id", "d1", "--decision-id", "d2", "--actor", "human:me",
+         "--override-escalation", "--no-wait", "--dry-run"]
+    )  # fmt: skip
+    assert ns.label == ["a=b", "c=d"] and ns.hook == ["pre-run=true"]
+    assert ns.decision_id == ["d1", "d2"] and ns.override_escalation and ns.dry_run
 
 
 # -- goldens ---------------------------------------------------------------------------------
@@ -333,8 +315,13 @@ def test_usage_envelope_golden(capsys: pytest.CaptureFixture[str]) -> None:
     check_golden("usage.json", "cli/error.json", res.envelope())
 
 
+@pytest.mark.parametrize("since", ["2h", "2026-03-10T10:00:00Z"])
+def test_valid_since_values_reach_list(capsys: pytest.CaptureFixture[str], since: str) -> None:
+    assert run_cli(capsys, "--json", "list", "--since", since).code == 0
+
+
 def test_internal_envelope_golden(capsys: pytest.CaptureFixture[str]) -> None:
-    res = run_cli(capsys, "--json", "list")
+    res = run_cli(capsys, "--json", "wait", "rr-aaaa")
     assert res.code == 1
     check_golden("internal.json", "cli/error.json", res.envelope())
 

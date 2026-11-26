@@ -63,23 +63,25 @@ def draft() -> Scenario:
     return {"pr": {"draft": True}}
 
 
+def _moved(on: str) -> dict[str, Any]:
+    """What a read reports when the head has moved: ``show`` nests it (``head.sha``)."""
+    if on == "show":
+        return {"head": {"sha": fg.NEW_HEAD}}
+    moved: dict[str, Any] = {"head_sha": fg.NEW_HEAD}
+    if on == "ci":
+        moved["ci"] = {"head_sha": fg.NEW_HEAD}
+    return moved
+
+
 @scenario("forgectl")
 def head_flip(on: str = "ci") -> Scenario:
     """The head moves under the reader: ``on`` reports a new head once, then it holds still."""
-    moved: dict[str, Any] = {
-        "head_sha": fg.NEW_HEAD,
-    }
-    if on == "ci":
-        moved["ci"] = {"head_sha": fg.NEW_HEAD}
-    return {on: [{"merge": moved}, {}]}
+    return {on: [{"merge": _moved(on)}, {}]}
 
 
 @scenario("forgectl")
 def head_flip_always(on: str = "ci") -> Scenario:
-    moved: dict[str, Any] = {"head_sha": fg.NEW_HEAD}
-    if on == "ci":
-        moved["ci"] = {"head_sha": fg.NEW_HEAD}
-    return {on: [{"merge": moved}]}
+    return {on: [{"merge": _moved(on)}]}
 
 
 @scenario("forgectl")
@@ -344,6 +346,13 @@ def no_artifact() -> Scenario:
 def artifact_mismatch(size_off: int = 1) -> Scenario:
     """The reported artifact's size and hash do not match the frozen file."""
     return _plan(outcome="done", artifact_text='{"x": 1}\n', mismatch=size_off)
+
+
+@scenario("agent-spawn")
+def pending() -> Scenario:
+    """A parked launch: the agent is ``launching`` and its run pending (never adopted), so the
+    agent and its session are live to teardown and forget until the run is stopped."""
+    return _plan(outcome="done", pending=True)
 
 
 @scenario("agent-spawn")

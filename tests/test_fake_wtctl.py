@@ -127,7 +127,7 @@ def test_remove_in_use_always_stays_refused(fakebin: FakeBin) -> None:
         ["create", "--throwaway", "--ref", SHA, "--json"],  # no --repo
         ["create", "--throwaway", "--repo", REPO, "--ref", "abc123", "--json"],  # short sha
         ["create", "--throwaway", "--repo", REPO, "--ref", SHA, "--source", "cloud", "--json"],
-        ["create", "--throwaway", "--repo", REPO, "--ref", SHA, "--depth", "0", "--json"],
+        ["create", "--throwaway", "--repo", REPO, "--ref", SHA, "--depth", "-1", "--json"],
         ["create", "--throwaway", "--repo", REPO, "--ref", SHA, "--branch", "b", "--json"],
         ["create", "--throwaway", "--repo", REPO, "--ref", SHA, "--sparse", "d", "--json"],
         ["create", "--throwaway", "--repo", REPO, "--ref", SHA, "--label", "Bad=1", "--json"],
@@ -135,7 +135,6 @@ def test_remove_in_use_always_stays_refused(fakebin: FakeBin) -> None:
         ["create", "--throwaway", "--repo", REPO, "--ref", SHA, "--override-escalation", "--json"],
         ["create", "--throwaway", "--repo", REPO, "--ref", SHA, "--actor", "me", "--json"],
         ["create", "--throwaway", "--repo", REPO, "--ref", SHA, "--thrwaway", "--json"],
-        ["create", "--throwaway", "--repo", REPO, "--ref", SHA, "--repo", REPO, "--json"],
         ["remove", "--json"],
         ["remove", "a", "b", "--json"],
         ["remove", "wt-aaaaaaaa", "--force", "--json"],  # human-only
@@ -143,6 +142,9 @@ def test_remove_in_use_always_stays_refused(fakebin: FakeBin) -> None:
         ["remove", "wt-aaaaaaaa", "--merged-head", "abc", "--json"],
         ["list", "--throwaways", "--worktrees", "--json"],
         ["list", "--older-than", "0", "--json"],
+        ["list", "--older-than", "1.5d", "--json"],  # DURATION is ^[1-9][0-9]*[smhdw]$
+        ["list", "--older-than", "10ms", "--json"],
+        ["list", "--older-than", "10", "--json"],
         ["list", "--state", "bogus", "--json"],
         ["list", "extra", "--json"],
         ["frob", "--json"],
@@ -155,9 +157,66 @@ def test_the_grammar_rejects_what_the_real_tool_rejects(fakebin: FakeBin, argv: 
     assert doc["error"]["code"] == "usage" and err.startswith("wtctl: error:")
 
 
-def test_human_actor_allows_force(fakebin: FakeBin) -> None:
+def test_the_removal_of_a_tombstone_carries_its_state_and_time(fakebin: FakeBin) -> None:
     rec = create(fakebin)
-    assert run(fakebin, "remove", rec["id"], "--force", "--actor", "human:me", "--json")[0] == 0
+    run(fakebin, "remove", rec["id"], "--json")
+    code, doc, _ = run(fakebin, "remove", rec["id"], "--json")
+    assert code == 10 and doc["error"]["details"]["state"] == "removed"
+    assert doc["error"]["details"]["removed_at"] is not None
+    # only a full id finds a tombstone, never its path
+    code, doc, _ = run(fakebin, "remove", rec["path"], "--json")
+    assert code == 10 and "details" not in doc["error"]
+
+
+@pytest.mark.parametrize(
+    "flag",
+    [["--force", "--actor", "human:me"], ["--merged-head", "a" * 40], ["--keep-branch"],
+     ["--holder", "me"]],
+)  # fmt: skip
+def test_remove_of_a_throwaway_refuses_the_worktree_flags(
+    fakebin: FakeBin, flag: list[str]
+) -> None:
+    rec = create(fakebin)
+    code, doc, _ = run(fakebin, "remove", rec["id"], *flag, "--json")
+    assert code == 2 and doc["error"]["code"] == "usage"
+    assert os.path.isdir(rec["path"])  # nothing was removed
+
+
+def test_depth_zero_is_the_full_history(fakebin: FakeBin) -> None:
+    code, doc, _ = run(fakebin, *CREATE, "--depth", "0")
+    assert code == 0 and doc["record"]["depth"] == 0
+
+
+def test_a_repeated_scalar_flag_keeps_the_last_value(fakebin: FakeBin) -> None:
+    code, doc, _ = run(fakebin, *CREATE, "--repo", "github.com/acme/other", "--depth", "3",
+                       "--depth", "5")  # fmt: skip
+    assert code == 0 and doc["record"]["repo"] == "github.com/acme/other"
+    assert doc["record"]["depth"] == 5
+
+
+def test_list_older_than_filters_on_the_created_time(fakebin: FakeBin) -> None:
+    old, new = create(fakebin), create(fakebin)
+    fakebin.seed_state({"wtctl": {"records": {old["id"]: {"created": "2020-01-01T00:00:00Z"}}}})
+    _, doc, _ = run(fakebin, "list", "--throwaways", "--older-than", "7d", "--json")
+    assert [r["id"] for r in doc["records"]] == [old["id"]]  # validated against the pinned schema
+    assert new["id"] not in {r["id"] for r in doc["records"]}
+
+
+def test_remove_by_path_prefers_the_live_record_over_a_tombstone(fakebin: FakeBin) -> None:
+    gone, live = create(fakebin), create(fakebin)
+    run(fakebin, "remove", gone["id"], "--json")
+    fakebin.seed_state({"wtctl": {"records": {gone["id"]: {"path": live["path"]}}}})
+    code, doc, _ = run(fakebin, "remove", live["path"], "--json")
+    assert code == 0 and doc["record"]["id"] == live["id"]
+
+
+def test_a_human_actor_allows_override_escalation_but_a_throwaway_takes_no_force(
+    fakebin: FakeBin,
+) -> None:
+    rec = create(fakebin)
+    assert run(fakebin, "remove", rec["id"], "--force", "--actor", "human:me", "--json")[0] == 2
+    human = ("--override-escalation", "--actor", "human:me", "--json")
+    assert run(fakebin, "remove", rec["id"], *human)[0] == 0
 
 
 def test_the_worktree_form_is_not_emulated(fakebin: FakeBin) -> None:

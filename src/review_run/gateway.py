@@ -13,6 +13,16 @@ Rules:
   ``MAX_OUTPUT`` bytes on one stream, exactly that process group (created here, its id captured
   at launch while the leader is still unreaped) gets SIGKILL and the call raises. Nothing is ever
   killed by name or pattern.
+* ``term_grace`` (default 0: none) adds a SIGTERM to the group first; the group gets SIGKILL when
+  the leader has exited or the grace has passed, whichever comes first.
+* ``spawn_detached`` starts a child that is not waited for: no output pipes, its stdin an unlinked
+  private file, its own session and group. A small supervisor process (``sys.executable -I``, no
+  dependency) leads that group and runs the program in it, so the timeout is enforced after this
+  process has exited: SIGTERM to the group, ``term_grace``, SIGKILL. A program that exits leaving
+  background descendants gives those no timeout once the supervisor has seen it exit.
+* While ``run`` waits in the main thread, SIGTERM and SIGHUP (when still at their default action)
+  end the child's group and then exit this process (143, 130), so a signalled review-run does not
+  orphan a running hook; the previous handlers are restored afterwards.
 * Output is decoded explicitly as UTF-8 with ``surrogateescape``, never through the locale;
   ``stdin`` is encoded the same way (unencodable or over ``MAX_OUTPUT`` bytes: ``GatewayError``).
 * A normal exit kills nothing: group members that outlive the leader keep running, and their later
@@ -31,10 +41,15 @@ from __future__ import annotations
 import math
 import os
 import selectors
+import shutil
 import signal
 import subprocess
+import sys
+import tempfile
+import threading
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -98,6 +113,7 @@ def check_call(
     stdin: str | None = None,
     env: Mapping[str, str] | None = None,
     cwd: str | None = None,
+    term_grace: float = 0.0,
 ) -> bytes | None:
     """Validate one call's arguments (shared by every gateway implementation, run first).
 
@@ -116,6 +132,13 @@ def check_call(
         or timeout <= 0
     ):
         raise ValueError("timeout must be a finite number of seconds above zero")
+    if (
+        isinstance(term_grace, bool)
+        or not isinstance(term_grace, (int, float))
+        or not math.isfinite(term_grace)
+        or term_grace < 0
+    ):
+        raise ValueError("term_grace must be a finite number of seconds, zero or more")
     if cwd is not None:
         _check_text(cwd, "cwd")
     if env is not None:
@@ -150,6 +173,7 @@ class Gateway(Protocol):
         stdin: str | None = None,
         env: Mapping[str, str] | None = None,
         cwd: str | None = None,
+        term_grace: float = 0.0,
     ) -> CompletedRun:
         """Run ``argv`` without a shell and capture its output.
 
@@ -159,12 +183,144 @@ class Gateway(Protocol):
         """
         ...
 
+    def spawn_detached(
+        self,
+        argv: Sequence[str],
+        *,
+        timeout: float,
+        stdin: str | None = None,
+        env: Mapping[str, str] | None = None,
+        cwd: str | None = None,
+        term_grace: float = 0.0,
+    ) -> DetachedHandle:
+        """Start ``argv`` without waiting; a supervisor process ends its group at ``timeout``."""
+        ...
+
+
+class DetachedHandle(Protocol):
+    """A detached child: the PID (group id) of its supervisor and a way to wait for it."""
+
+    pid: int
+
+    def join(self, timeout: float | None = None) -> bool:
+        """Wait until the supervisor has exited (the child exited or was ended); ``False`` when
+        still running."""
+        ...
+
 
 def _kill_group(pgid: int) -> None:
     try:
         os.killpg(pgid, signal.SIGKILL)
     except ProcessLookupError:
         pass
+
+
+def _end_group(proc: subprocess.Popen[bytes], pgid: int, grace: float) -> None:
+    """End the group this module created (leader unreaped, so ``pgid`` cannot be reused): SIGTERM
+    and a wait of at most ``grace`` for the leader when ``grace`` is set, then SIGKILL for every
+    member, then reap the leader."""
+    if proc.returncode is None:
+        if grace > 0:
+            try:
+                os.killpg(pgid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            end = time.monotonic() + grace
+            while time.monotonic() < end and not _leader_exited(proc):
+                time.sleep(0.02)
+        _kill_group(pgid)
+        proc.kill()
+    proc.wait()
+
+
+class _Detached:
+    def __init__(self, proc: subprocess.Popen[bytes]) -> None:
+        self.pid = proc.pid
+        self._proc = proc
+
+    def join(self, timeout: float | None = None) -> bool:
+        try:
+            self._proc.wait(timeout)
+        except subprocess.TimeoutExpired:
+            return False
+        return True
+
+
+# The supervisor of a detached child. It leads the group (the caller starts it with a new
+# session), runs the program in that group and, at the timeout, ends the whole group: SIGTERM, a
+# grace, SIGKILL. Its own SIGTERM handler does nothing, so the group-wide SIGTERM does not stop
+# it (a handler, unlike SIG_IGN, is reset by exec in the program). Arguments: timeout, grace, argv.
+_SUPERVISOR = """
+import os, signal, subprocess, sys
+timeout, grace = float(sys.argv[1]), float(sys.argv[2])
+signal.signal(signal.SIGTERM, lambda *_: None)
+try:
+    child = subprocess.Popen(sys.argv[3:])
+except OSError:
+    os._exit(127)
+try:
+    code = child.wait(timeout=timeout)
+except subprocess.TimeoutExpired:
+    group = os.getpgrp()
+    if grace > 0:
+        os.killpg(group, signal.SIGTERM)
+        try:
+            child.wait(timeout=grace)
+        except subprocess.TimeoutExpired:
+            pass
+    os.killpg(group, signal.SIGKILL)
+    os._exit(1)
+os._exit(code if 0 <= code < 256 else 1)
+"""
+
+
+def _find_program(argv0: str, env: Mapping[str, str] | None, cwd: str | None = None) -> bool:
+    if "/" in argv0:
+        # A relative path is resolved by the child against its working directory.
+        path = os.path.join(cwd, argv0) if cwd is not None else argv0
+        return os.path.isfile(path) and os.access(path, os.X_OK)
+    path = (os.environ if env is None else env).get("PATH")
+    return shutil.which(argv0, path=path if path is not None else os.defpath) is not None
+
+
+@contextmanager
+def _ending_signals() -> Iterator[Callable[[], None]]:
+    """While a child is awaited in the main thread, SIGTERM and SIGHUP (still at their default
+    action) raise ``SystemExit`` (143, 130), so the ``BaseException`` path of ``run`` ends the
+    child's group. The yielded callable turns the handlers into no-ops, so a further signal cannot
+    interrupt the cleanup that ends the group. Previous handlers come back afterwards; off the
+    main thread this does nothing."""
+    installed: dict[int, object] = {}
+    if threading.current_thread() is threading.main_thread():
+
+        def make(code: int) -> object:
+            def handler(_signum: int, _frame: object) -> None:
+                raise SystemExit(code)
+
+            return handler
+
+        for sig, code in ((signal.SIGTERM, 143), (signal.SIGHUP, 130)):
+            try:
+                if signal.getsignal(sig) == signal.SIG_DFL:
+                    installed[sig] = signal.signal(sig, make(code))  # type: ignore[arg-type]
+            except (ValueError, OSError):
+                pass
+
+    def quiesce() -> None:
+        for sig in installed:
+            try:
+                signal.signal(sig, lambda _signum, _frame: None)
+            except (ValueError, OSError):
+                pass
+
+    try:
+        yield quiesce
+    finally:
+        for sig, previous in installed.items():
+            try:
+                signal.signal(sig, previous)  # type: ignore[arg-type]
+            except (ValueError, OSError):
+                pass
 
 
 def _leader_exited(proc: subprocess.Popen[bytes]) -> bool:
@@ -189,51 +345,105 @@ class SystemGateway:
         stdin: str | None = None,
         env: Mapping[str, str] | None = None,
         cwd: str | None = None,
+        term_grace: float = 0.0,
     ) -> CompletedRun:
-        data = check_call(argv, timeout, stdin=stdin, env=env, cwd=cwd)
+        data = check_call(argv, timeout, stdin=stdin, env=env, cwd=cwd, term_grace=term_grace)
         args = list(argv)
         if cwd is not None and not os.path.isdir(cwd):
             raise GatewayError("working directory missing")
+        proc: subprocess.Popen[bytes] | None = None
+        # The handlers stay installed from before the start until the group has been ended.
+        with _ending_signals() as quiesce:
+            try:
+                try:
+                    proc = subprocess.Popen(
+                        args,
+                        # Without input the child gets /dev/null, never this process's own stdin.
+                        stdin=subprocess.DEVNULL if data is None else subprocess.PIPE,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        env=None if env is None else dict(env),
+                        cwd=cwd,
+                        start_new_session=True,
+                    )
+                except OSError as exc:
+                    if cwd is not None and exc.filename == cwd:  # the directory, not the program
+                        raise GatewayError("working directory unusable") from exc
+                    if isinstance(exc, (FileNotFoundError, PermissionError, NotADirectoryError)):
+                        raise ToolMissing(f"cannot execute {os.path.basename(args[0])!r}") from exc
+                    raise GatewayError(
+                        f"cannot start {os.path.basename(args[0])!r}: errno {exc.errno}"
+                    ) from exc
+                out, err = _communicate(proc, data, timeout)
+                result = proc
+            except BaseException:
+                # Timeout, overflow, interrupt or any failure: end exactly the group we created,
+                # first, and reap after, so a member alive when the leader exits is still killed.
+                # The leader is unreaped here (the success path never raises after reaping), so
+                # its PID, our group id, cannot have been reused. Further signals are ignored
+                # until the group is gone.
+                quiesce()
+                if proc is not None:
+                    _end_group(proc, proc.pid, term_grace)
+                raise
+            finally:
+                if proc is not None:
+                    for stream in (proc.stdin, proc.stdout, proc.stderr):
+                        if stream is not None:
+                            try:
+                                stream.close()
+                            except OSError:
+                                pass
+        return CompletedRun(tuple(args), result.returncode, decode(out), decode(err))
+
+    def spawn_detached(
+        self,
+        argv: Sequence[str],
+        *,
+        timeout: float,
+        stdin: str | None = None,
+        env: Mapping[str, str] | None = None,
+        cwd: str | None = None,
+        term_grace: float = 0.0,
+    ) -> DetachedHandle:
+        data = check_call(argv, timeout, stdin=stdin, env=env, cwd=cwd, term_grace=term_grace)
+        args = list(argv)
+        if cwd is not None and not os.path.isdir(cwd):
+            raise GatewayError("working directory missing")
+        if not _find_program(args[0], env, cwd):
+            raise ToolMissing(f"cannot execute {os.path.basename(args[0])!r}")
+        supervisor = [sys.executable, "-I", "-c", _SUPERVISOR, repr(float(timeout)),
+                      repr(float(term_grace)), *args]  # fmt: skip
+        # The child's stdin: an unlinked private file (no pipe to feed, nothing to clean up).
         try:
-            proc = subprocess.Popen(
-                args,
-                # Without input the child gets /dev/null, never this process's own stdin.
-                stdin=subprocess.DEVNULL if data is None else subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                env=None if env is None else dict(env),
-                cwd=cwd,
-                start_new_session=True,
-            )
+            feed = tempfile.TemporaryFile()
         except OSError as exc:
-            if cwd is not None and exc.filename == cwd:  # the directory, not the program
-                raise GatewayError("working directory unusable") from exc
-            if isinstance(exc, (FileNotFoundError, PermissionError, NotADirectoryError)):
-                raise ToolMissing(f"cannot execute {os.path.basename(args[0])!r}") from exc
-            raise GatewayError(
-                f"cannot start {os.path.basename(args[0])!r}: errno {exc.errno}"
-            ) from exc
-        pgid = proc.pid  # the group this call created; valid while the leader is unreaped
-        try:
-            out, err = _communicate(proc, data, timeout)
-        except BaseException:
-            # Timeout, overflow, interrupt or any failure: end exactly the group we created, first,
-            # and reap after, so a member alive when the leader exits is still killed. The leader
-            # is unreaped here (the success path never raises after reaping), so its PID, our
-            # group id, cannot have been reused.
-            if proc.returncode is None:
-                _kill_group(pgid)
-                proc.kill()
-            proc.wait()
-            raise
-        finally:
-            for stream in (proc.stdin, proc.stdout, proc.stderr):
-                if stream is not None:
-                    try:
-                        stream.close()
-                    except OSError:
-                        pass
-        return CompletedRun(tuple(args), proc.returncode, decode(out), decode(err))
+            raise GatewayError(f"cannot create the stdin file: errno {exc.errno}") from exc
+        with feed:
+            try:
+                if data:
+                    feed.write(data)
+                    feed.flush()
+                feed.seek(0)
+            except OSError as exc:
+                raise GatewayError(f"cannot write the stdin file: errno {exc.errno}") from exc
+            try:
+                proc = subprocess.Popen(
+                    supervisor,
+                    stdin=feed,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    env=None if env is None else dict(env),
+                    cwd=cwd,
+                    start_new_session=True,
+                )
+            except OSError as exc:
+                if cwd is not None and exc.filename == cwd:
+                    raise GatewayError("working directory unusable") from exc
+                raise GatewayError(
+                    f"cannot start {os.path.basename(args[0])!r}: errno {exc.errno}"
+                ) from exc
+        return _Detached(proc)
 
 
 def _communicate(
@@ -347,6 +557,24 @@ def run(
     stdin: str | None = None,
     env: Mapping[str, str] | None = None,
     cwd: str | None = None,
+    term_grace: float = 0.0,
 ) -> CompletedRun:
     """``get_gateway().run(...)``: the entry point other modules call."""
-    return get_gateway().run(argv, timeout=timeout, stdin=stdin, env=env, cwd=cwd)
+    return get_gateway().run(
+        argv, timeout=timeout, stdin=stdin, env=env, cwd=cwd, term_grace=term_grace
+    )
+
+
+def spawn_detached(
+    argv: Sequence[str],
+    *,
+    timeout: float,
+    stdin: str | None = None,
+    env: Mapping[str, str] | None = None,
+    cwd: str | None = None,
+    term_grace: float = 0.0,
+) -> DetachedHandle:
+    """``get_gateway().spawn_detached(...)``."""
+    return get_gateway().spawn_detached(
+        argv, timeout=timeout, stdin=stdin, env=env, cwd=cwd, term_grace=term_grace
+    )

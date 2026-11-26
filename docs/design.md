@@ -41,7 +41,7 @@ No tool is aware of review-run. review-watch (its caller) is not a dependency.
 | D-13 | Retention 30 days by `prune`; non-terminal runs are never pruned, and an `escalated` run ends by `resume`, `cancel` or `escalation_ttl` expiry | matches other tools' retention; review-watch copies the artifact into its own draft; the expiry bounds what an attacker-driven escalation can accumulate | [prune](interface.md#prune), [cancel](interface.md#cancel) |
 | D-14 | `--mode interactive` is a pass-through to agent-spawn's window placement; always `--no-promote` | the design guide requires both modes; predictable escalation | [run](interface.md#run) |
 | D-15 | The default skill is a single-agent, high-precision reviewer (nits off), with `guidelines_file`; no confidence number; another review skill from a custom plugin loads through `plugin_dirs` as `<plugin>:<skill>` and must satisfy the slot contract | spike A: confidence was 0.90 to 0.97 on every run; a reviewer that cries wolf gets ignored; the header's output rules come from a versioned template, so any skill gets the same rules | [Slot contract](interface.md#slot-contract), [Config](interface.md#config) |
-| D-16 | Three hooks: `pre-run`, `post-run`, `post-escalate`; payloads hold trusted or derived values only; a `pre-run` escalation is overridden only by a human with `run --override-escalation` (a veto still vetoes) | nothing from the PR or the model reaches a hook command; the override follows design guide 4.4 and the siblings' human-only flags, and the gate sees what it needs (PR facts, whether code will run) | [Hooks](interface.md#hooks), [Global flags](interface.md#global-flags) |
+| D-16 | Three hooks: `pre-run`, `post-run`, `post-escalate`; payloads hold trusted or derived values only; a `pre-run` escalation is overridden only by a human (the resulting actor is `human:*`) with `run --override-escalation` (a veto still vetoes) | nothing from the PR or the model reaches a hook command; the override follows design guide 4.4 and the siblings' human-only flags, and the gate sees what it needs (PR facts, whether code will run) | [Hooks](interface.md#hooks), [Global flags](interface.md#global-flags) |
 | D-17 | `run_pr_code` is defined only in the user's own config as an argv list; a failing command is not a failing run; a step that cannot run is recorded as skipped (including a fork PR whose head is not fetchable from the base repository) | the output is a bonus input; the skip is never silent | [Code run](interface.md#code-run) |
 | D-18 | No TUI, no existing PR comments fed to the reviewer, no label editing commands in v1 | smaller untrusted surface and surface area | [TUI](interface.md#tui), [Labels](interface.md#labels) |
 | D-19 | Everything review-run adds to the draft sits under `meta.review_run`; the model's `meta` is replaced by it and review-run sets the identity fields (`schema_version`, `draft_id`, `pr`, `anchor`) itself | no collision with other writers of `meta`; derivable values are recomputed, never trusted; the trusted header carries no forge text and no copy mistake can fail a review | [Meta](interface.md#meta), [Finalize](interface.md#finalize) |
@@ -80,7 +80,7 @@ Every relied-on behavior becomes a `live` or process regression test in the plan
 
 Sandbox on WSL2: the `/usr/lib` bind exposes WSL's driver store and `--tmpfs /usr/lib/wsl` after it hides it (bubblewrap 0.9.0, WSL2); bubblewrap cannot create that mount point where the directory does not exist, so it is added only when present.
 
-Minimum sibling versions: review-run needs claude-session and agent-spawn releases that support `--no-implicit-done` and a wtctl release that accepts `create --throwaway --source auto --label`; the exact versions are filled when those releases ship, and until then review-run compares `agent-spawn --version` and `claude-session --version` with these minimums at run order step 1 and exits 12 `tool_too_old` before anything is allocated ([Run order](interface.md#run-order), [Upgrades](interface.md#upgrades)).
+Minimum sibling versions: review-run needs claude-session and agent-spawn releases that support `--no-implicit-done` and a wtctl release that accepts `create --throwaway --source auto --label`; the exact versions are filled when those releases ship, and until then review-run compares `agent-spawn --version` and `claude-session --version` with these minimums at run order step 1 and exits 12 `tool_too_old` before anything is allocated ([Run order](interface.md#run-order), [Upgrades](interface.md#upgrades)). Until then the minimums are the releases the pinned schemas were copied from (agent-spawn 0.38.1, claude-session 0.45.2, `MIN_VERSIONS` in `preflight.py`); an unparsable `--version` of either fails closed (`lower_failed`, `invalid_output`).
 
 ## Modules
 
@@ -89,7 +89,8 @@ Minimum sibling versions: review-run needs claude-session and agent-spawn releas
 | `cli` | argparse subcommands, global flags, exit-code mapping |
 | `config` | YAML, drop-ins, env, per-repo overrides, validation (PyYAML, jsonschema against `schemas/config.json`) |
 | `gateway` | every subprocess: forgectl, pr-comment, agent-spawn, claude-session, wtctl, bwrap, the `/proc` scan, each with a per-call timeout; the single seam for fakes |
-| `prefetch` | the reads, head comparison, manifest and per-file patch building, size caps |
+| `prefetch` | the reads and the head comparison, then the call to `manifest` |
+| `manifest` | the diff to manifest entries and per-file inputs: section parsing, hunk splitting, size caps, the prompt table (a pure function) |
 | `sanitizer` | the sanitizer (used by `prompt`, `coderun` and human output) |
 | `prompt` | fenced prompt and input files, nonce |
 | `coderun` | throwaway, sandboxed runner, output descriptor, removal (output goes through the sanitizer) |
@@ -97,10 +98,10 @@ Minimum sibling versions: review-run needs claude-session and agent-spawn releas
 | `finalize` | the finalize steps, session-claim validation, normalization, meta derivation, teardown |
 | `store` | SQLite (WAL, additive migrations), run directory, leases |
 | `procid` | process identity (PID plus boot id and start time from `/proc`) for leases and runner checks |
-| `hooks` | hook execution and payload building |
+| `hooks` | hook execution, payload building and outbox delivery (at least once: every pass re-runs all synchronous entries of an undelivered event, so one that succeeded may run again up to 5 times in all, and `async` entries start only on the pass that ends the event; hooks deduplicate on `event_id`); an `async` entry's timeout is enforced by a small supervisor process the gateway starts (`sys.executable -I`, no dependency) that outlives review-run |
 | `audit` | `audit.jsonl`, `log.jsonl`, `export` |
 | `runs` | `resume`, `wait`, the refresh of `show`, `cancel`, `reconcile` (finalization by another process, expiry, the label recovery, outbox redelivery), `prune`, `cron` |
-| `plugin/` | the bundled skill and permission profile, located with `importlib.resources.files('review_run') / 'plugin'` |
+| `plugin/` | the bundled skill and permission profile, located with `importlib.resources.files('review_run') / 'plugin'`; it is walked like any plugin directory (user-owned, not group- or world-writable), so an install or checkout made at umask 002 needs `chmod -R g-w`; the refusal has its own message and no copy is made (D-27) |
 
 ## Data model
 
