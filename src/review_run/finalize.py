@@ -565,6 +565,7 @@ class AgentFinalize:
     hooks_config: Mapping[str, Any] | None = None  # the acting process's config ``hooks``
     shell: Sequence[str] = hooks.SHELL
     lease_interval: float | None = None
+    escalated: bool = False  # also finalize an ``escalated`` run whose agent finished a newer run
 
 
 def _show(agent_id: str) -> tuple[int, dict[str, Any]] | None:
@@ -629,7 +630,7 @@ def finalize_agent(root: Path, run_id: str, opts: AgentFinalize) -> Run | None:
         raise ValueError("finalized_by is show, wait or reconcile")
     with Store.open(root) as store:
         run = store.get_run(run_id)
-        if run is None or not _finalizable(run):
+        if run is None or not _finalizable(run, opts.escalated):
             return run
         lease = store.acquire_lease(lease_name(run_id))
         if lease is None:
@@ -643,10 +644,10 @@ def finalize_agent(root: Path, run_id: str, opts: AgentFinalize) -> Run | None:
             store.release_lease(lease)
 
 
-def _finalizable(run: Run) -> bool:
+def _finalizable(run: Run, escalated: bool = False) -> bool:
+    live = run.state == "running" and run.phase in ("session", "finalize")
     return (
-        run.state == "running"
-        and run.phase in ("session", "finalize")
+        (live or (escalated and run.state == "escalated"))
         and run.agent_id is not None
         and run.csession_id is not None
         and run.awaited_run is not None
@@ -662,7 +663,7 @@ def _finalize_held(
     opts: AgentFinalize,
 ) -> Run | None:
     run = store.get_run(run_id)  # re-read under the lease: another finalizer may have finished
-    if run is None or not _finalizable(run):
+    if run is None or not _finalizable(run, opts.escalated):
         return run
     assert run.agent_id is not None
     settings = load_run_settings(store.run_dir(run_id))
@@ -680,7 +681,7 @@ def _finalize_held(
         teardown_actor=run.actor,
         payload_actor=run.actor or FINALIZER_ACTOR,
         finalized_by=opts.finalized_by,
-        cause=opts.cause,
+        cause="external_resume" if run.state == "escalated" else opts.cause,
     )
     shown = _show(run.agent_id)
     if shown is None:
@@ -691,17 +692,28 @@ def _finalize_held(
         isinstance(shown_agent, dict) and shown_agent.get("status") == "torn_down"
     )
     if gone:
+        if run.state == "escalated":
+            return run  # the escalated refresh of ``reconcile`` (TODO(#29)) decides; not here
         return ender.apply_failure(lc.Disposition("fail", "agent_gone", 12))
     if code != 0:
         return run
     verdict = lc.parked_verdict(
         doc, run_id=run_id, pr=run.pr, repo=run.repo, csession_id=run.csession_id
     )
+    if run.state == "escalated" and verdict != "owned":
+        return run  # live (a human answers it) or not ours: nothing to finalize
     if verdict == "mismatch":
         return ender.apply_failure(lc.Disposition("fail", "agent_gone", 12), verdict=verdict)
     result = outcome_from_show(run, doc)
     if result is None:
         return run
+    if run.state == "escalated":
+        # The agent finished a newer run outside review-run (a human answered it): the run
+        # moves back to ``running`` (phase ``session``) for that run, then finalizes as usual.
+        assert result.run_number is not None
+        if not store.begin_resume(run_id, run.key, lease=lease, awaited_run=result.run_number):
+            return store.get_run(run_id)
+        ender.note("state_change", "run resumed outside review-run", state="running")
     return finalize_session(ender, result, opts.seams, verdict=verdict)
 
 

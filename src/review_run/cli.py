@@ -16,11 +16,12 @@ from . import __version__, dryrun
 from . import hooks as hooks_mod
 from . import runs as runs_mod
 from .audit import Caller, export_lines
+from .cancel import CancelOptions, cancel_run
 from .config import load_config
 from .durations import DurationError, parse_duration, parse_since
 from .errors import DECISION_ID_RE, MAX_DECISION_IDS, PROG, ExitCode, ReviewRunError, printable
 from .fsmodes import apply_umask
-from .outcome import render_run
+from .outcome import render_cancel, render_run
 from .preflight import RunRequest, plan_run
 from .runner import Interrupted, Options, run_review
 from .store import Store, default_state_root
@@ -410,6 +411,31 @@ def _wait(args: argparse.Namespace) -> int:
     return _print_run(obj, "wait", args)
 
 
+def _cancel(args: argparse.Namespace) -> int:
+    """``cancel``: record the cancellation and end the run (``cancel.cancel_run``); prints
+    ``{run, changed, action, dry_run, warnings}`` and exits 0 whenever it printed."""
+    caller = Caller.resolve(args.actor, stdin_tty=sys.stdin.isatty(), decision_ids=args.decision_id)
+    result = cancel_run(
+        default_state_root(),
+        args.run,
+        CancelOptions(
+            caller=caller,
+            dry_run=args.dry_run,
+            config_path=None if args.config is None else Path(args.config),
+            clock=_CLOCK,
+        ),
+    )
+    shown = render_cancel(
+        runs_mod.run_object(result.run),
+        changed=result.changed,
+        action=result.action,
+        dry_run=result.dry_run,
+        as_json=args.json,
+    )
+    _write_stdout(shown.text)
+    return shown.code
+
+
 # Each command is replaced by its owning issue's implementation.
 _HANDLERS: dict[str, Handler] = {
     "run": _run_command,  # steps 1 to 7 and --dry-run (#15, #16, #17, #18)
@@ -419,7 +445,7 @@ _HANDLERS: dict[str, Handler] = {
     "show": _show,
     "reconcile": _stub("reconcile"),  # TODO(#29): reconcile
     "prune": _stub("prune"),  # TODO(#37): prune
-    "cancel": _stub("cancel"),  # TODO(#26): cancel
+    "cancel": _cancel,
     "cron": _stub("cron"),  # TODO(#38): cron install and uninstall
     "export": _export,
 }

@@ -714,16 +714,21 @@ def persist_prefetch(
     """Persist what finalize needs: ``pr.json`` (the four PR facts) in the run directory, then
     ``draft_id`` and ``anchor`` on the run's row in one compare-and-set on ``expect``.
 
-    ``False`` when the compare-and-set on ``expect`` (state, phase and awaited run) did not match;
-    nothing but the harmless ``pr.json`` is left then. A cancellation request is not part of that
-    key; it is the orchestrator's concern. The row is the commit point.
+    ``False`` when the compare-and-set on ``expect`` (state, phase and awaited run) did not match
+    or a cancellation is recorded (the run's caller tells the two apart by reading the row and
+    ends a canceled run ``canceled``); nothing but the harmless ``pr.json`` is left then. The row
+    is the commit point.
     """
-    # TODO(#16): check cancel_requested_at around persist_prefetch
     run_dir = store.run_dir(run_id)
     data = json.dumps(facts.run_facts(), sort_keys=True).encode("ascii") + b"\n"
     write_private_file(run_dir / "pr.json", data)
     return store.update_fields(
-        run_id, expect, lease=lease, draft_id=result.draft_id, anchor=result.anchor.to_dict()
+        run_id,
+        expect,
+        lease=lease,
+        no_cancel=True,
+        draft_id=result.draft_id,
+        anchor=result.anchor.to_dict(),
     )
 
 

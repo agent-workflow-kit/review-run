@@ -8,22 +8,23 @@ cancellation turns any ending into ``failed`` ``canceled``. Teardown (ownership-
 ``--force``) and delivery follow the commit and are the duty of the process whose ``end`` moved the
 row: ``end`` returns whether it did.
 
-The closing audit record is a ``run`` record that closes the invocation's pair when the process
-that opened the pair ends the run (``attempt_id``), else a ``finalize`` record by
-``auto:review-run`` naming the cause and the command (``finalized_by``).
+The closing audit record is a ``run`` (or, for ``cancel``, a ``cancel``) record that closes the
+invocation's pair when the process that opened the pair ends the run (``attempt_id``), else a
+``finalize`` record by ``auto:review-run`` naming the cause and the command (``finalized_by``).
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from . import hooks
 from . import launch as lc
 from .audit import FINALIZER_ACTOR, AuditWriter, Caller, LogWriter, make_audit_record
 from .errors import ReviewRunError
 from .prompt import remove_prompt_files
+from .runs import SCHEMA_PATTERNS
 from .settings import RunSettings
 from .store import Expect, Lease, NewEvent, Run, Store
 
@@ -43,6 +44,13 @@ def run_inputs(run: Run, settings: RunSettings, *, override: bool) -> dict[str, 
         else None,
         "override_escalation": override,
     }
+
+
+def valid_agent_id(value: object) -> str | None:
+    """``value`` when it is an agent id, else ``None`` (a corrupt stored value counts as absent)."""
+    if isinstance(value, str) and SCHEMA_PATTERNS["agent_id"].fullmatch(value) is not None:
+        return value
+    return None
 
 
 class Ender:
@@ -67,6 +75,8 @@ class Ender:
         payload_actor: str | None = None,
         finalized_by: str = "show",
         cause: str = "finalized",
+        pair_action: Literal["run", "cancel"] = "run",
+        pair_inputs: Mapping[str, Any] | None = None,
     ) -> None:
         self.store, self.run_id, self.lease = store, run_id, lease
         self.audit, self.log, self.caller, self.settings = audit, log, caller, settings
@@ -75,6 +85,9 @@ class Ender:
         self.teardown_actor = teardown_actor
         self.payload_actor = payload_actor or caller.actor
         self.finalized_by, self.cause = finalized_by, cause
+        self.pair_action: Literal["run", "cancel"] = pair_action  # ``cancel`` closes its pair
+        self.pair_inputs = pair_inputs
+        self.moved = False  # whether an ``end`` of this Ender moved the row
         self.run_dir: Path = store.run_dir(run_id)
 
     # -- reading and logging
@@ -113,12 +126,17 @@ class Ender:
     ) -> dict[str, Any]:
         result = {"status": state, "reason": reason, "exit_code": exit_code}
         if self.attempt_id is not None:
+            inputs = (
+                dict(self.pair_inputs or {})
+                if self.pair_action == "cancel"
+                else run_inputs(run, self.settings, override=self.override)
+            )
             return make_audit_record(
-                "run",
+                self.pair_action,
                 caller=self.caller,
                 run_id=self.run_id,
                 pr=run.pr,
-                inputs=run_inputs(run, self.settings, override=self.override),
+                inputs=inputs,
                 result=result,
                 attempt_id=self.attempt_id,
                 event_id=event_id,
@@ -176,7 +194,7 @@ class Ender:
         number = escalated_run if state == "escalated" and escalated_run else 1
         event_id = hooks.event_id_for(self.run_id, hook, number)
         record = self._record(run, state, reason, exit_code, event_id)
-        agent_id = extra.get("agent_id", run.agent_id)
+        agent_id = valid_agent_id(extra.get("agent_id", run.agent_id))  # hook payloads only
         warnings = list(run.warnings)
         if state == "escalated":
             payload = hooks.post_escalate_payload(
@@ -231,6 +249,7 @@ class Ender:
         except OSError:  # the commit stands: teardown and delivery still follow
             self.note("warning", "prompt files could not be removed", level="warn")
         if moved:
+            self.moved = True
             self.note("state_change", f"run ended {state} ({reason})", state=state)
         return self.row(), moved
 
@@ -336,12 +355,14 @@ class Ender:
         assert disposition.reason is not None and disposition.exit_code is not None
         reason, exit_code, failure = disposition.reason, disposition.exit_code, disposition.failure
         stored = self.row()
+        # a stored value that is not an agent id never reaches argv: it counts as absent
+        stored_agent = valid_agent_id(stored.agent_id)
         agent = disposition.agent
         agent_id = disposition.teardown_agent or (agent.agent_id if agent else None)
         csession = agent.csession_id if agent else None
-        if agent_id is None or (stored.agent_id is not None and agent_id != stored.agent_id):
+        if agent_id is None or (stored_agent is not None and agent_id != stored_agent):
             # never store or tear down an id other than the stored one
-            agent_id, csession = stored.agent_id, stored.csession_id
+            agent_id, csession = stored_agent, (stored.csession_id if stored_agent else None)
         out: dict[str, Any] = dict(fields or {})
         if agent_id is not None and (reason in lc.TEARDOWN_REASONS or verdict == "mismatch"):
             if verdict is None:
@@ -361,7 +382,7 @@ class Ender:
                     out["csession_id"] = csession
         else:
             verdict = None
-            if agent_id is not None and agent_id != stored.agent_id:
+            if agent_id is not None and agent_id != stored_agent:
                 out["agent_id"] = agent_id
                 if csession:
                     out["csession_id"] = csession

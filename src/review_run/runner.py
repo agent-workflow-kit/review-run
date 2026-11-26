@@ -282,8 +282,8 @@ class _Flow:
     # -- the steps
 
     def canceled_row(self) -> Run | None:
-        """When a cancellation is recorded, end the run ``canceled`` (TODO(#26) and TODO(#27)
-        own recording one; this process only honors it)."""
+        """When a cancellation is recorded, end the run ``canceled`` (``cancel`` and the signals
+        of TODO(#27) record one; this process only honors it)."""
         run = self.row()
         if run.cancel_requested_at is None:
             return None
@@ -300,6 +300,8 @@ class _Flow:
             return self.end_failed(exc.reason, exc.exit_code, exc.failure())
         run = self.row()
         if not persist_prefetch(self.store, self.run_id, run.key, facts, fetched, lease=self.lease):
+            if (ended := self.canceled_row()) is not None:  # refused: a cancellation is recorded
+                return ended
             return self.row()  # another process moved the row: its state stands
         if (ended := self.canceled_row()) is not None:
             return ended
@@ -355,8 +357,10 @@ class _Flow:
         self.check_lease()
         key = self.row().key
         if not self.store.update_fields(
-            self.run_id, key, lease=self.lease, launch_started_at=_now()
+            self.run_id, key, lease=self.lease, no_cancel=True, launch_started_at=_now()
         ):
+            if (ended := self.canceled_row()) is not None:  # recorded since the check above
+                return ended
             return self.row()  # another process moved the row: its state stands
         self.launched = True
 

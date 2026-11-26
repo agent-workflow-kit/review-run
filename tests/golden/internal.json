@@ -1,6 +1,6 @@
 {
   "error": {
     "code": "internal",
-    "message": "cancel is not implemented yet"
+    "message": "prune is not implemented yet"
   }
 }

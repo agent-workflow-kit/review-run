@@ -631,7 +631,14 @@ class Store:
         return ids[:limit], len(ids) > limit
 
     def update_fields(
-        self, run_id: str, expect: Expect, /, *, lease: Lease | None = None, **fields: Any
+        self,
+        run_id: str,
+        expect: Expect,
+        /,
+        *,
+        lease: Lease | None = None,
+        no_cancel: bool = False,
+        **fields: Any,
     ) -> bool:
         """Set ``FREE_COLUMNS`` on a run whose key still equals ``expect`` (one compare-and-set).
 
@@ -639,7 +646,9 @@ class Store:
         ``awaited_run`` at launch). ``False`` when the row no longer has that key. Terminal runs
         are immutable: ``expect`` must name a ``running`` or ``escalated`` run, and the update
         itself refuses other rows. With ``lease`` the run's lease is checked in the same
-        transaction (``LeaseLostError`` when it is no longer held).
+        transaction (``LeaseLostError`` when it is no longer held). With ``no_cancel`` the update
+        also needs ``cancel_requested_at`` to be null, so a recorded cancellation makes it
+        return ``False`` and the caller ends the run ``canceled`` instead.
         """
         if expect.state not in _LIVE_STATES:
             raise ValueError("a terminal run cannot change")
@@ -649,7 +658,7 @@ class Store:
         with self.transaction() as conn:
             if lease is not None:
                 _require_lease(conn, lease, run_id)
-            return _cas(conn, run_id, expect, fields) == 1
+            return _cas(conn, run_id, expect, fields, no_cancel=no_cancel) == 1
 
     def advance_phase(
         self,
