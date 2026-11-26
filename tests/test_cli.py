@@ -13,13 +13,13 @@ COMMANDS: list[list[str]] = [
     ["resume", "rr-aaaa", "--prompt-file", "-"],
     ["reconcile"],
     ["prune"],
-    ["cancel", "rr-aaaa"],
     ["cron", "install"],
     ["cron", "uninstall"],
 ]
 # `export` (tests/test_audit.py), `list` and `show` (tests/test_runs.py) are implemented and
 # `run` has its own tests (tests/test_preflight.py: its checks reach sibling tools); the others
-# are stubs of later issues (`wait` and the refresh of `show`: tests/test_outcome.py).
+# are stubs of later issues (`cancel`: tests/test_cancel.py; `wait` and the refresh of `show`:
+# tests/test_outcome.py).
 
 
 def test_version_prints_version_and_exits_zero(capsys: pytest.CaptureFixture[str]) -> None:
@@ -96,7 +96,7 @@ def test_every_command_is_a_stub_exiting_1_with_internal_envelope(
 
 
 def test_stub_human_mode_prints_one_line_to_stderr(capsys: pytest.CaptureFixture[str]) -> None:
-    res = run_cli(capsys, "cancel", "rr-aaaa")
+    res = run_cli(capsys, "prune")
     assert res.code == 1
     assert res.out == ""
     assert res.err.startswith("review-run: internal: ")
@@ -121,7 +121,13 @@ def test_verbose_with_quiet_is_accepted(capsys: pytest.CaptureFixture[str]) -> N
 
 def test_decision_id_limit(capsys: pytest.CaptureFixture[str]) -> None:
     def argv(n: int) -> list[str]:
-        return ["cancel", "rr-aaaa", *[a for i in range(n) for a in ("--decision-id", f"d{i}")]]
+        return [
+            "resume",
+            "rr-aaaa",
+            "--prompt-file",
+            "-",
+            *[a for i in range(n) for a in ("--decision-id", f"d{i}")],
+        ]
 
     assert run_cli(capsys, "--json", *argv(32)).code == 1
     assert run_cli(capsys, "--json", *argv(33)).code == 2
@@ -318,7 +324,7 @@ def test_valid_since_values_reach_list(capsys: pytest.CaptureFixture[str], since
 
 
 def test_internal_envelope_golden(capsys: pytest.CaptureFixture[str]) -> None:
-    res = run_cli(capsys, "--json", "cancel", "rr-aaaa")
+    res = run_cli(capsys, "--json", "prune")
     assert res.code == 1
     check_golden("internal.json", "cli/error.json", res.envelope())
 

@@ -50,4 +50,25 @@ def render_run(
     return Rendered(text or runs.human_run(obj), code)
 
 
-__all__ = ["RUN_COMMANDS", "Rendered", "render_run"]
+def render_cancel(
+    obj: dict[str, Any], *, changed: bool, action: str, dry_run: bool, as_json: bool
+) -> Rendered:
+    """What ``cancel`` prints: ``{run, changed, action, dry_run, warnings}`` (``--json``) or the
+    run's summary with those facts. Whatever it printed is exit 0 (the run's own outcome is in
+    the object)."""
+    if as_json:
+        document = {
+            "schema_version": runs.SCHEMA_VERSION,
+            "run": obj,
+            "changed": changed,
+            "action": action,
+            "dry_run": dry_run,
+            "warnings": list(obj["warnings"]),
+        }
+        return Rendered(runs.dump(document), 0)
+    head = "dry run: would " if dry_run else ""
+    facts = f"{head}action: {action}\nchanged: {'yes' if changed else 'no'}\n"
+    return Rendered(runs.human_run(obj) + facts, 0)
+
+
+__all__ = ["RUN_COMMANDS", "Rendered", "render_cancel", "render_run"]

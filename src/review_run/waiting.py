@@ -59,11 +59,12 @@ def resolve(root: Path, ref: str) -> str:
         return store.resolve_run_id(ref)
 
 
-def needs_refresh(run: Run) -> bool:
-    """Whether a refresh can do anything: a ``running`` run whose stored agent id is an agent id
-    (the same pattern ``run_object`` applies; any other value never reaches a sibling's argv)."""
+def needs_refresh(run: Run, escalated: bool = False) -> bool:
+    """Whether a refresh can do anything: a ``running`` run (an ``escalated`` one too with
+    ``escalated``) whose stored agent id is an agent id (the same pattern ``run_object``
+    applies; any other value never reaches a sibling's argv)."""
     return (
-        run.state == "running"
+        (run.state == "running" or (escalated and run.state == "escalated"))
         and isinstance(run.agent_id, str)
         and SCHEMA_PATTERNS["agent_id"].fullmatch(run.agent_id) is not None
     )
@@ -125,7 +126,14 @@ class _LazyHooks(Mapping[str, Any]):
         return True
 
 
-def refresh_run(root: Path, run_id: str, *, by: str, config_path: Path | None = None) -> Run | None:
+def refresh_run(
+    root: Path,
+    run_id: str,
+    *,
+    by: str,
+    config_path: Path | None = None,
+    escalated: bool = False,
+) -> Run | None:
     """The run as stored after finalizing it when its agent has ended; ``None`` when it is gone.
 
     ``by`` is ``show`` or ``wait`` (the audit ``finalized_by``). A row that cannot be shown as a
@@ -136,7 +144,7 @@ def refresh_run(root: Path, run_id: str, *, by: str, config_path: Path | None = 
     message) and leave the run unchanged; it recurs on every call, nothing loops inside.
     """
     run = _read(root, run_id)
-    if run is None or not needs_refresh(run):
+    if run is None or not needs_refresh(run, escalated):
         return run
     run_object(run)  # CorruptRunError for a row that cannot be shown: no sibling call
     try:
@@ -146,6 +154,7 @@ def refresh_run(root: Path, run_id: str, *, by: str, config_path: Path | None = 
             AgentFinalize(
                 finalized_by=by,
                 hooks_config=_LazyHooks(config_path, run.repo, LogWriter(root), run_id),
+                escalated=escalated,
             ),
         )
     except ReviewRunError:

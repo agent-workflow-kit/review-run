@@ -8,16 +8,16 @@ cancellation turns any ending into ``failed`` ``canceled``. Teardown (ownership-
 ``--force``) and delivery follow the commit and are the duty of the process whose ``end`` moved the
 row: ``end`` returns whether it did.
 
-The closing audit record is a ``run`` record that closes the invocation's pair when the process
-that opened the pair ends the run (``attempt_id``), else a ``finalize`` record by
-``auto:review-run`` naming the cause and the command (``finalized_by``).
+The closing audit record is a ``run`` (or, for ``cancel``, a ``cancel``) record that closes the
+invocation's pair when the process that opened the pair ends the run (``attempt_id``), else a
+``finalize`` record by ``auto:review-run`` naming the cause and the command (``finalized_by``).
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from . import hooks
 from . import launch as lc
@@ -67,6 +67,8 @@ class Ender:
         payload_actor: str | None = None,
         finalized_by: str = "show",
         cause: str = "finalized",
+        pair_action: Literal["run", "cancel"] = "run",
+        pair_inputs: Mapping[str, Any] | None = None,
     ) -> None:
         self.store, self.run_id, self.lease = store, run_id, lease
         self.audit, self.log, self.caller, self.settings = audit, log, caller, settings
@@ -75,6 +77,9 @@ class Ender:
         self.teardown_actor = teardown_actor
         self.payload_actor = payload_actor or caller.actor
         self.finalized_by, self.cause = finalized_by, cause
+        self.pair_action: Literal["run", "cancel"] = pair_action  # ``cancel`` closes its pair
+        self.pair_inputs = pair_inputs
+        self.moved = False  # whether an ``end`` of this Ender moved the row
         self.run_dir: Path = store.run_dir(run_id)
 
     # -- reading and logging
@@ -113,12 +118,17 @@ class Ender:
     ) -> dict[str, Any]:
         result = {"status": state, "reason": reason, "exit_code": exit_code}
         if self.attempt_id is not None:
+            inputs = (
+                dict(self.pair_inputs or {})
+                if self.pair_action == "cancel"
+                else run_inputs(run, self.settings, override=self.override)
+            )
             return make_audit_record(
-                "run",
+                self.pair_action,
                 caller=self.caller,
                 run_id=self.run_id,
                 pr=run.pr,
-                inputs=run_inputs(run, self.settings, override=self.override),
+                inputs=inputs,
                 result=result,
                 attempt_id=self.attempt_id,
                 event_id=event_id,
@@ -231,6 +241,7 @@ class Ender:
         except OSError:  # the commit stands: teardown and delivery still follow
             self.note("warning", "prompt files could not be removed", level="warn")
         if moved:
+            self.moved = True
             self.note("state_change", f"run ended {state} ({reason})", state=state)
         return self.row(), moved
 
