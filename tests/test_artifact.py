@@ -359,9 +359,7 @@ def test_the_character_rule_over_every_code_point() -> None:
             assert art.forbidden_in_claim(char, allow_lf=allow_lf) == _expected_bad(
                 char, allow_lf=allow_lf
             ), hex(cp)
-    # the claim rule is the sanitizer's marked set minus Co and Cn, plus TAB
-    for cp in range(0x110000):
-        char = chr(cp)
+        # the claim rule is the sanitizer's marked set minus Co and Cn, plus TAB
         if unicodedata.category(char) not in ("Co", "Cn") and char not in "\t\n":
             assert art.forbidden_in_claim(char, allow_lf=False) == (sanitize(char) != char), hex(cp)
 
@@ -865,23 +863,11 @@ def failed_object(run: Any) -> dict[str, Any]:
     ("text", "errors"),
     [
         ("﻿" + good_artifact(), [{"pointer": "", "kind": "encoding"}]),
-        ('{"a": 1, "a": 2}', [{"pointer": "", "kind": "duplicate_key"}]),
-        ('{"a": 1e999}', [{"pointer": "", "kind": "non_finite"}]),
-        ('{"a": ' + "9" * 5000 + "}", [{"pointer": "", "kind": "number"}]),
         ('{"a":' * 40 + "1" + "}" * 40, [{"pointer": "", "kind": "depth"}]),
-        ("not json", [{"pointer": "", "kind": "syntax"}]),
         (json.dumps({"event": "comment"}), [{"pointer": "/meta", "kind": "meta_missing"}]),
         (
             good_artifact().replace('"low"', '"extreme"'),
             [{"pointer": "/meta/risk", "kind": "enum"}],
-        ),
-        (
-            json.dumps(draft(meta={**META, "risk_reasons": ["x"] * 11})),
-            [{"pointer": "/meta/risk_reasons", "kind": "count"}],
-        ),
-        (
-            json.dumps(draft(meta={**META, "risk_reasons": ["a\nb"]})),
-            [{"pointer": "/meta/risk_reasons/0", "kind": "pattern"}],
         ),
         (
             json.dumps(draft(meta={**META, "summary": "x" * (8 << 10) * 250})),
@@ -889,6 +875,7 @@ def failed_object(run: Any) -> dict[str, Any]:
         ),
     ],
 )
+# one case per mapping; every parse and claim kind is covered by the unit tests above
 def test_each_invalid_artifact_ends_artifact_invalid_with_closed_errors(
     world: World, text: str, errors: list[dict[str, str]]
 ) -> None:
@@ -931,3 +918,172 @@ def test_a_run_without_a_stored_draft_identity_is_internal() -> None:
 
     with pytest.raises(ReviewRunError):
         fin.validate_step(ctx)
+
+
+# -- review round 1 -------------------------------------------------------------------------------------
+
+
+def scripted_check_errors(fb: FakeBin, errors: list[Any]) -> None:
+    fb.script(
+        "pr-comment",
+        "draft check",
+        {
+            "json": {
+                "valid": False,
+                "schema_version": 1,
+                "draft_id": None,
+                "findings": 1,
+                "errors": errors,
+            },
+            "exit": 2,
+            "schema": None,  # these outputs are deliberately outside pr-comment's schema
+        },
+    )
+
+
+def test_unhashable_or_non_dict_check_errors_are_schema_not_a_crash(pc: FakeBin) -> None:
+    scripted_check_errors(
+        pc,
+        [
+            {"pointer": "/a", "kind": ["suggestion_fence"]},
+            {"pointer": "/b", "kind": {"x": 1}},
+            [],
+            "text",
+            {"pointer": "/c", "kind": "control_character"},
+        ],
+    )
+    with pytest.raises(art.Invalid) as exc:
+        check(pc, valid_draft())
+    assert kinds(exc) == [
+        ("/a", "schema"),
+        ("/b", "schema"),
+        ("", "schema"),
+        ("", "schema"),
+        ("/c", "control_character"),
+    ]
+
+
+def test_check_error_pointers_are_printable_ascii_and_fit_the_failure_schema(pc: FakeBin) -> None:
+    scripted_check_errors(
+        pc,
+        [
+            {"pointer": "/é中\x01\x7f\n/x", "kind": None},
+            {"pointer": "/" + "é" * 500, "kind": None},
+        ],
+    )
+    with pytest.raises(art.Invalid) as exc:
+        check(pc, valid_draft())
+    first, second = exc.value.errors
+    assert first["pointer"] == "/?????/x" and second["pointer"] == "/" + "?" * 199
+    defs = json.loads((Path(__file__).parent.parent / "schemas" / "defs.json").read_text())
+    item = defs["$defs"]["failure"]["properties"]["errors"]["items"]
+    from jsonschema import Draft202012Validator
+
+    for err in exc.value.errors:
+        assert err["pointer"].isascii() and err["pointer"].isprintable()
+        Draft202012Validator({**item, "$defs": defs["$defs"]}).validate(err)
+
+
+def test_claim_errors_follow_the_tables_order_for_mixed_missing_and_invalid_fields() -> None:
+    meta = with_meta(verdict="merge", risk=..., risk_reasons="x", summary=..., coverage=[])
+    assert claim_errors(meta) == [
+        ("/meta/verdict", "enum"),
+        ("/meta/risk", "meta_missing"),
+        ("/meta/risk_reasons", "type"),
+        ("/meta/summary", "meta_missing"),
+        ("/meta/coverage", "type"),
+    ]
+
+
+def test_the_20_cut_is_in_table_order() -> None:
+    meta = with_meta(
+        risk=..., summary=..., coverage={"reviewed": [MARKER] * 30}, risk_reasons=["\n"] * 10
+    )
+    got = claim_errors(meta)
+    assert len(got) == 20
+    assert got[0] == ("/meta/risk", "meta_missing")
+    assert got[1] == ("/meta/risk_reasons/0", "pattern")
+    assert got[11] == ("/meta/summary", "meta_missing")
+    assert got[12] == ("/meta/coverage/reviewed/0", "pattern")
+
+
+def script_valid_check(fb: FakeBin) -> None:
+    """A passing check whatever the (huge) stdin is: the fake would apply pr-comment's text caps."""
+    out = {"valid": True, "schema_version": 1, "draft_id": None, "findings": 0, "errors": []}
+    fb.script("pr-comment", "draft check", {"json": out, "exit": 0, "schema": None})
+
+
+def test_a_non_ascii_draft_is_sent_as_utf8_and_measured_in_bytes(pc: FakeBin) -> None:
+    script_valid_check(pc)
+    doc = valid_draft()
+    doc["body"] = "中" * 2_400_000  # 7.2 MB as UTF-8, 14.4 MB with \u escapes
+    text = art.canonical_json(doc, ensure_ascii=False)
+    assert art.canonical_json({"b": "é"}) == '{"b":"\\u00e9"}'
+    assert art.canonical_json({"b": "é"}, ensure_ascii=False) == '{"b":"é"}'
+    art.run_check(text)
+    (call,) = check_calls(pc)
+    assert json.loads(call.stdin or "")["body"] == doc["body"]
+
+
+def test_validate_sends_the_utf8_form_so_a_valid_non_ascii_artifact_reaches_the_check(
+    pc: FakeBin,
+) -> None:
+    script_valid_check(pc)
+    data = json.dumps(draft(body="中" * 2_400_000), ensure_ascii=False).encode()
+    assert len(data) < 8 << 20
+    got = art.validate(data, max_bytes=8 << 20, max_files=10, identity=IDENTITY)
+    assert len(got.draft["body"]) == 2_400_000 and len(check_calls(pc)) == 1
+
+
+def test_a_draft_over_the_stdin_cap_in_utf8_bytes_is_length(pc: FakeBin) -> None:
+    with pytest.raises(art.Invalid) as exc:
+        art.run_check("é" * ((4 << 20) + 1))  # half as many characters as bytes
+    assert kinds(exc) == [("", "length")] and check_calls(pc) == []
+
+
+def test_more_than_500_findings_is_schema_at_findings_before_normalization(pc: FakeBin) -> None:
+    data = json.dumps(draft(findings=[{}] * 501)).encode()
+    with pytest.raises(art.Invalid) as exc:
+        art.validate(data, max_bytes=8 << 20, max_files=10, identity=IDENTITY)
+    assert kinds(exc) == [("/findings", "schema")] and check_calls(pc) == []
+
+
+def test_exactly_500_findings_still_reach_the_check(pc: FakeBin) -> None:
+    script_valid_check(pc)
+    findings = [{**FINDING, "id": f"F{i}", "line": i + 1} for i in range(500)]
+    data = json.dumps(draft(findings=findings)).encode()
+    art.validate(data, max_bytes=8 << 20, max_files=10, identity=IDENTITY)
+    assert len(check_calls(pc)) == 1
+
+
+def test_claim_errors_come_before_the_findings_count() -> None:
+    data = json.dumps(draft(findings=[{}] * 501, meta={**META, "risk": "x"})).encode()
+    with pytest.raises(art.Invalid) as exc:
+        art.validate(data, max_bytes=8 << 20, max_files=10, identity=IDENTITY)
+    assert kinds(exc) == [("/meta/risk", "enum")]
+
+
+def test_childless_containers_are_not_walked_twice() -> None:
+    started = time.monotonic()
+    art.parse_artifact(b'{"a":' + b"[" + b"{}," * 500_000 + b"{}]}", max_bytes=8 << 20)
+    assert time.monotonic() - started < 3
+
+
+def test_the_session_meta_schema_refuses_every_bmp_character_the_code_refuses() -> None:
+    import re
+
+    schema = json.loads(
+        (Path(__file__).parent.parent / "schemas" / "session-meta.json").read_text()
+    )
+    summary = re.compile(schema["properties"]["summary"]["pattern"])
+    reason = re.compile(schema["properties"]["risk_reasons"]["items"]["pattern"])
+    for cp in range(0x10000):
+        if 0xD800 <= cp <= 0xDFFF:
+            continue
+        char = chr(cp)
+        if art.forbidden_in_claim(char, allow_lf=True):
+            assert summary.search(char) is None, hex(cp)
+        if (
+            art.forbidden_in_claim(char, allow_lf=False) and char != "\n"
+        ):  # `$` accepts a trailing LF
+            assert reason.search(char) is None, hex(cp)

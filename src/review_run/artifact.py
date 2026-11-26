@@ -26,7 +26,10 @@ Steps:
 8. ``apply_identity``: ``schema_version``, ``draft_id``, ``pr`` and ``anchor`` from ``draft new``.
 9. ``normalize``: the closed list of lossless fixes, in order, with the ``normalized`` entries.
 10. ``run_check``: ``pr-comment draft check - --json`` on the canonical form of the normalized
-    draft without ``meta`` (stdin only; the draft never reaches argv).
+    draft without ``meta`` (stdin only; the draft never reaches argv). The form sent is compact,
+    sorted-keys UTF-8 (not the ASCII-escaped form of ``review.json``, which would inflate
+    non-ASCII text up to six times against the 8 MiB stdin cap); the ``length`` check measures
+    its UTF-8 bytes. More than 500 findings is ``schema`` at ``/findings`` before normalization.
 
 ``validate`` runs all of them. It does not derive ``meta`` or write ``review.json`` (steps 11 to
 13, issue #21), which take its ``Validated`` result.
@@ -58,6 +61,7 @@ MAX_POINTER: Final = 200
 MAX_NORMALIZED: Final = 200
 MAX_INT_CHARS: Final = 20
 MAX_FLOAT_CHARS: Final = 64
+MAX_FINDINGS: Final = 500
 CHECK_TIMEOUT: Final = 300.0
 CHECK_ARGV: Final = ("pr-comment", "draft", "check", "-", "--json")
 
@@ -124,10 +128,11 @@ def pointer_of(*tokens: str | int) -> str:
 
 def _clean_pointer(value: object) -> str:
     """A pointer from a sibling's output: a string of pointer shape, cut to ``MAX_POINTER`` and
-    never holding a lone surrogate; anything else is the root pointer."""
+    printable ASCII only (every other character becomes ``?``); anything else is the root
+    pointer."""
     if not isinstance(value, str) or not _POINTER.fullmatch(value):
         return ""
-    return value[:MAX_POINTER].encode("utf-8", "replace").decode("utf-8")
+    return "".join(c if " " <= c <= "~" else "?" for c in value[:MAX_POINTER])
 
 
 # -- step 6: strict parse --------------------------------------------------------------------------
@@ -182,7 +187,10 @@ def _check_tree(root: Any) -> None:
             if isinstance(child, str):
                 _check_text(child)
             elif isinstance(child, (dict, list)):
-                stack.append((child, depth + 1))
+                if depth >= MAX_DEPTH:
+                    raise _invalid("depth")
+                if child:  # a childless container has no text and no children to walk
+                    stack.append((child, depth + 1))
 
 
 def _check_text(text: str) -> None:
@@ -291,15 +299,14 @@ def extract_claims(doc: Mapping[str, Any], *, max_files: int) -> Claims:
     if not isinstance(meta, dict):
         raise _invalid("type", "/meta")
     verdict = _field(meta, "verdict", errors)
-    risk = _field(meta, "risk", errors)
-    reasons = _field(meta, "risk_reasons", errors)
-    summary = _field(meta, "summary", errors)
-    coverage = _field(meta, "coverage", errors)
     out_verdict = (
         _enum(verdict, VERDICTS, "/meta/verdict", errors) if verdict is not _MISSING else ""
     )
+    risk = _field(meta, "risk", errors)
     out_risk = _enum(risk, RISKS, "/meta/risk", errors) if risk is not _MISSING else ""
+    reasons = _field(meta, "risk_reasons", errors)
     out_reasons = _reasons(reasons, errors) if reasons is not _MISSING else ()
+    summary = _field(meta, "summary", errors)
     out_summary = ""
     if summary is not _MISSING:
         kind = _text_error(summary, minimum=1, maximum=SUMMARY_MAX, allow_lf=True)
@@ -307,6 +314,7 @@ def extract_claims(doc: Mapping[str, Any], *, max_files: int) -> Claims:
             out_summary = summary
         else:
             errors.add("/meta/summary", kind)
+    coverage = _field(meta, "coverage", errors)
     out_reviewed = _coverage(coverage, errors, max_files) if coverage is not _MISSING else ()
     if errors.items:
         raise Invalid(errors.items)
@@ -454,11 +462,12 @@ def normalize(doc: dict[str, Any]) -> list[dict[str, Any]]:
     return entries
 
 
-def canonical_json(value: object) -> str:
-    """The deterministic ASCII form of a JSON value: sorted keys, no whitespace, ``\\u``
-    escapes."""
+def canonical_json(value: object, *, ensure_ascii: bool = True) -> str:
+    """The deterministic form of a JSON value: sorted keys, no whitespace; ASCII with ``\\u``
+    escapes by default (``review.json``), UTF-8 text with ``ensure_ascii=False`` (what the draft
+    check receives, so the stdin cap is not inflated by escapes)."""
     return json.dumps(
-        value, ensure_ascii=True, sort_keys=True, separators=(",", ":"), allow_nan=False
+        value, ensure_ascii=ensure_ascii, sort_keys=True, separators=(",", ":"), allow_nan=False
     )
 
 
@@ -476,7 +485,7 @@ def _check_errors(doc: Mapping[str, Any]) -> list[dict[str, str]]:
         out.append(
             {
                 "pointer": _clean_pointer(pointer),
-                "kind": kind if kind in CHECK_KINDS else "schema",
+                "kind": kind if isinstance(kind, str) and kind in CHECK_KINDS else "schema",
             }
         )
     return out
@@ -487,7 +496,9 @@ def run_check(draft_json: str) -> None:
     draft is valid (exit 0); raises ``Invalid`` for exit 2 with ``valid: false`` (the first 20
     errors as ``{pointer, kind}``, ``kind`` ``schema`` unless pr-comment names one of its two text
     kinds, never the message) and ``CheckFailed`` for anything else."""
-    if len(draft_json) > gateway.MAX_OUTPUT:  # ASCII: characters are bytes; stdin is capped
+    if len(draft_json) > gateway.MAX_OUTPUT or (
+        len(draft_json.encode("utf-8")) > gateway.MAX_OUTPUT  # stdin is capped in bytes
+    ):
         raise _invalid("length")
     try:
         done = gateway.run(list(CHECK_ARGV), timeout=CHECK_TIMEOUT, stdin=draft_json)
@@ -531,8 +542,13 @@ def validate(original: bytes, *, max_bytes: int, max_files: int, identity: Ident
     claims = extract_claims(doc, max_files=max_files)
     doc.pop("meta", None)
     apply_identity(doc, identity)
+    findings = doc.get("findings")
+    if isinstance(findings, list) and len(findings) > MAX_FINDINGS:
+        # pr-comment's schema error (pointer /findings), reported before normalization costs
+        # anything on a flood of findings; ``unanchored`` is dropped whole, so only these count
+        raise _invalid("schema", "/findings")
     entries = normalize(doc)
-    run_check(canonical_json(doc))
+    run_check(canonical_json(doc, ensure_ascii=False))
     return Validated(doc, claims, tuple(entries))
 
 
