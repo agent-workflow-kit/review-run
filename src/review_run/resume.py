@@ -535,7 +535,9 @@ def _steps(flow: ResumeFlow, row: Run, files: PromptFiles, entries: Sequence[str
         return _gone(flow, verdict)  # step 2: the run ends, exit 12 with the run object
     if verdict == "live":
         raise ReviewRunError("refused", "the agent is live", reason="live")  # step 3
-    if row.awaited_run is not None and last > row.awaited_run:
+    # a run that ended in its launch phase consumed its number too (escalated_run)
+    consumed = max(row.awaited_run or 0, row.escalated_run or 0)
+    if row.awaited_run is not None and last > consumed:
         raise _Stale()  # a late external resume: the refresh finalizes it, the retry reports it
     try:
         verify_plugin_dirs(flow.settings)  # step 4

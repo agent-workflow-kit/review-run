@@ -334,6 +334,16 @@ def test_a_run_ended_in_its_launch_phase_is_recorded_and_reverted(world: World) 
     assert run.state == "escalated" and run.escalated_run == 2 and run.awaited_run == 1
 
 
+def test_a_resume_after_a_launch_phase_ending_starts_a_session(world: World) -> None:
+    escalate(world)
+    world.fb.use("agent-spawn", "resume_outcome", outcome="not-started")
+    with pytest.raises(ReviewRunError):
+        do_resume(world)
+    world.fb.use("agent-spawn", "resume_outcome", outcome="done")
+    run = do_resume(world, no_wait=True)
+    assert (run.state, run.phase, run.awaited_run) == ("running", "session", 3)
+
+
 def test_a_missing_agent_spawn_reverts(world: World) -> None:
     from review_run import gateway
 
