@@ -257,11 +257,12 @@ class _Errors:
 
 def forbidden_in_claim(char: str, *, allow_lf: bool) -> bool:
     """Whether ``char`` may not appear in a claim text: categories Cc (LF allowed in the summary
-    only), Cf, Cs, Zl and Zp and the extra characters the sanitizer marks; ``Co`` and ``Cn`` are
-    allowed (they are marked when printed)."""
+    only), Cf, Cs, Zl and Zp and the extra characters the sanitizer marks, and U+2060 to U+206F
+    whatever their category (``schemas/meta.json`` excludes the block); other ``Co`` and ``Cn``
+    characters are allowed (they are marked when printed)."""
     if char == "\n":
         return not allow_lf
-    if char == "\t":
+    if char == "\t" or "\u2060" <= char <= "\u206f":  # the schema patterns exclude the whole block
         return True
     return is_marked(char) and unicodedata.category(char) not in ("Co", "Cn")
 

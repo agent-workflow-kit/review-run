@@ -33,9 +33,8 @@ Seams, each with its owner (a ``Seams`` left incomplete makes ``finalize_session
 
 * ``Seams.check_session``: the skill and tool checks (step 5), TODO(#22).
 * ``Seams.derive``: end head and meta derivation (steps 11 and 12), ``meta.derive`` (#21);
-  steps 6 to 10
-  (``validate_step``, the ``artifact`` module) run before it. ``Seams.process`` overrides all of
-  steps 6 to 12 (tests). It returns the bytes of
+  steps 6 to 10 (``validate_step``, the ``artifact`` module) run before it. ``Seams.process``
+  overrides all of steps 6 to 12 (tests). It returns the bytes of
   ``review.json`` and the run's ``summary``; this module writes ``review.json`` (step 13) and
   runs the terminal transaction (step 14).
 """

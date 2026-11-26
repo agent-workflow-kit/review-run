@@ -36,6 +36,7 @@ from .finalize import ArtifactContext, FinalizeFailure, Processed, Seams
 from .manifest import (
     BINARY,
     EMPTY,
+    MAX_FILES_IN_PR,
     PROVIDED,
     SKIPPED_FILE_CAP,
     SKIPPED_SIZE_CAP,
@@ -51,7 +52,13 @@ PR_NAME: Final = "pr.json"
 CODE_RUN_NAME: Final = "code-run.json"
 MAX_FILE_BYTES: Final = 64 << 20
 MAX_PLUGIN_JSON: Final = 64 << 10
+# manifest.json worst case: a path appears at least twice in its diff header, so a path's
+# JSON-escaped bytes (6 per BMP control or non-ASCII character, 12 per astral one) cost at most 3
+# per byte of the diff, which ``limits.hard_ceiling_bytes`` bounds; every entry adds its keys,
+# indentation and numbers (the input names of all entries total at most 2000 short names).
+MANIFEST_ENTRY_OVERHEAD: Final = 1024
 BUNDLED_PLUGIN: Final = "review-run"
+DEFAULT_SKILL: Final = "review-run:review-pr"  # schemas/config.json skill default
 SKILL_VERSION_MAX: Final = 64
 SEVERITIES: Final = ("blocker", "major", "minor", "nit", "info")
 SANDBOXES: Final = ("required", "preferred", "off")
@@ -125,6 +132,13 @@ def read_run_file(run_dir: Path, name: str, limit: int) -> bytes | None:
     if len(data) > limit:
         raise _internal(f"{name} of the run is too large")
     return data
+
+
+def manifest_limit(hard_ceiling_bytes: int) -> int:
+    """The most bytes ``manifest.json`` can hold for a run whose diff was capped at
+    ``hard_ceiling_bytes``, never below ``MAX_FILE_BYTES``."""
+    worst = 3 * hard_ceiling_bytes + MAX_FILES_IN_PR * MANIFEST_ENTRY_OVERHEAD
+    return max(MAX_FILE_BYTES, worst)
 
 
 def _json_file(run_dir: Path, name: str, limit: int) -> Any:
@@ -254,9 +268,10 @@ def _normalized(entries: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
 # -- the files of the run ------------------------------------------------------------------------
 
 
-def load_manifest(run_dir: Path) -> Manifest:
+def load_manifest(run_dir: Path, hard_ceiling_bytes: int = 0) -> Manifest:
+    limit = manifest_limit(hard_ceiling_bytes)
     try:
-        return Manifest.from_json(_json_file(run_dir, MANIFEST_NAME, MAX_FILE_BYTES))
+        return Manifest.from_json(_json_file(run_dir, MANIFEST_NAME, limit))
     except ValueError:
         raise _internal("manifest.json of the run is malformed") from None
 
@@ -288,9 +303,10 @@ def _not_configured() -> dict[str, Any]:
     }
 
 
-def _count(value: object, *, null: bool) -> bool:
-    if value is None:
-        return null
+def _count(value: object, *, ran: bool) -> bool:
+    """A count of a run that ran is a non-negative int; of one that did not, null."""
+    if not ran:
+        return value is None
     return type(value) is int and value >= 0  # noqa: E721
 
 
@@ -311,8 +327,8 @@ def code_run_of(doc: object) -> dict[str, Any]:
         and (signal is None or (isinstance(signal, str) and _SIGNAL.fullmatch(signal) is not None))
         and type(c["timed_out"]) is bool  # noqa: E721
         and type(c["truncated"]) is bool  # noqa: E721
-        and _count(c["bytes"], null=not ran)
-        and _count(c["duration_ms"], null=not ran)
+        and _count(c["bytes"], ran=ran)
+        and _count(c["duration_ms"], ran=ran)
         and (sandbox in SANDBOXES if ran else sandbox is None)
         and ((isinstance(sha, str) and _SHA256.fullmatch(sha) is not None) if ran else sha is None)
         and (ran or (exit_code is None and signal is None))
@@ -331,12 +347,15 @@ def code_run_of(doc: object) -> dict[str, Any]:
     return c
 
 
-def load_code_run(run_dir: Path) -> dict[str, Any]:
-    """``code-run.json``; absent: no code run was made (the prompt said so), which is
-    ``not_configured``. TODO(#35): the code run writes the file in every case; then a missing file
-    is ``internal``."""
+def load_code_run(run_dir: Path, *, configured: bool = False) -> dict[str, Any]:
+    """``code-run.json``, which the code run writes in every case (interface.md). Absent: a run
+    whose settings configure ``run_pr_code`` is ``internal``; one that does not made no code run
+    (the prompt said so), which is ``not_configured``. TODO(#35): until the code run writes the
+    file, a run with ``run_pr_code`` configured ends ``internal`` here."""
     data = read_run_file(run_dir, CODE_RUN_NAME, MAX_FILE_BYTES)
     if data is None:
+        if configured:
+            raise _internal("code-run.json of the run is missing")
         return _not_configured()
     try:
         return code_run_of(strict_json(data.decode("utf-8")))
@@ -344,10 +363,18 @@ def load_code_run(run_dir: Path) -> dict[str, Any]:
         raise _internal("code-run.json of the run is not strict JSON") from None
 
 
+def run_pr_code_configured(settings: RunSettings) -> bool:
+    """Whether the run's settings configure ``run_pr_code`` (a repo's key, null when unset)."""
+    entry = settings.entries.get("run_pr_code")
+    return entry is not None and entry[0] is not None
+
+
 def skill_version(skill: str) -> str | None:
-    """The bundled plugin's ``plugin.json`` version for a skill of the bundled plugin, else null.
-    TODO(#77): the file says ``0.0.0`` until the release keeps it in step."""
-    if skill.split(":", 1)[0] != BUNDLED_PLUGIN or ":" not in skill:
+    """The bundled plugin's ``plugin.json`` version for the default skill, else null.
+    TODO(#77): the file says ``0.0.0`` until the release keeps it in step; it is also read at
+    finalize time, not at launch time, so a plugin updated during the run is reported as it is
+    then."""
+    if skill != DEFAULT_SKILL:
         return None
     data = read_plugin_json()
     version = data.get("version") if isinstance(data, dict) else None
@@ -375,13 +402,15 @@ def session_of(settings: RunSettings, ctx: ArtifactContext) -> dict[str, Any]:
     if sandbox not in SANDBOXES or profile not in PROFILES:
         raise _internal("the run's settings are out of their bounds")
     checked = ctx.session.tools_checked is True
-    unexpected = ctx.session.tools_unexpected
+    unexpected = ctx.session.tools_unexpected if checked else 0
+    if type(unexpected) is not int or unexpected < 0:  # noqa: E721 (a bool is not a count)
+        raise _internal("the session's unexpected tool count is out of its bounds")
     return {
         "sandbox": sandbox,
         "profile": profile,
         "profile_sha256": settings.profile_sha256,
         "tools_checked": checked,
-        "tools_unexpected": unexpected if checked and type(unexpected) is int else 0,  # noqa: E721
+        "tools_unexpected": unexpected,
     }
 
 
@@ -452,9 +481,9 @@ def derive(ctx: ArtifactContext, validated: artifact.Validated) -> Processed:
     assert_claims(validated.claims, max_files)
     if run.anchor is None or not isinstance(run.anchor.get("head_sha"), str):
         raise _internal("the run has no stored anchor")
-    manifest = load_manifest(ctx.run_dir)
+    manifest = load_manifest(ctx.run_dir, int(ctx.settings.value("limits.hard_ceiling_bytes")))
     pr_facts = load_pr_facts(ctx.run_dir)
-    code_run = load_code_run(ctx.run_dir)
+    code_run = load_code_run(ctx.run_dir, configured=run_pr_code_configured(ctx.settings))
     head_at_end, head_moved = end_head(run.pr, run.anchor["head_sha"])
     meta = build_meta(
         ctx,
