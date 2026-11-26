@@ -263,6 +263,26 @@ def test_the_scratch_directory_is_removed_when_the_plan_fails_midway(
     assert os.listdir(state_root(world) / "tmp") == []
 
 
+def test_a_state_error_while_planning_is_the_error_envelope_not_would_fail(
+    world: World, cli, monkeypatch: pytest.MonkeyPatch
+) -> None:  # type: ignore[no-untyped-def]
+    from review_run import preflight
+    from review_run.errors import ReviewRunError
+
+    rid = make_previous(world)
+
+    def unsafe(*args: Any, **kwargs: Any) -> None:
+        raise ReviewRunError("failed", "state path is unsafe", reason="state_unsafe")
+
+    monkeypatch.setattr(preflight, "ensure_private_dir", unsafe)
+    res = cli("--json", "run", PR_URL, "--dry-run", "--previous", rid)
+    assert res.code == 12, res.err
+    assert res.envelope()["error"]["reason"] == "state_unsafe"
+    assert "would_fail" not in res.envelope()
+    tmp = state_root(world) / "tmp"
+    assert not tmp.exists() or os.listdir(tmp) == []
+
+
 def test_a_guidelines_file_that_goes_bad_after_validation_is_would_fail_internal(
     world: World, cli, monkeypatch: pytest.MonkeyPatch
 ) -> None:  # type: ignore[no-untyped-def]

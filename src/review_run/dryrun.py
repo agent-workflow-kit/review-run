@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Any
 
 from . import launch as lc
-from .errors import ExitCode
+from .errors import ExitCode, ReviewRunError
 from .inputs import compose_prompt, fetch_and_manifest
 from .prefetch import PrefetchFailure
 from .preflight import PLACEHOLDER_RUN_ID, RunPlan, scratch_dir
@@ -127,11 +127,13 @@ def build_plan(plan: RunPlan, root: Path) -> dict[str, Any]:
             if plan.previous is None:
                 built = _build(plan, root, run_dir, None)
             else:
-                with Store.open(Path(root)) as store:  # a store error is step 1's, not the plan's
+                with Store.open(Path(root)) as store:  # a store error is the command's (below)
                     built = _build(plan, root, run_dir, store)
         manifest_json, coverage, sizes, argv = built
     except PrefetchFailure as exc:
         would_fail = [exc.reason]
+    except ReviewRunError:
+        raise  # state_unsafe, schema_newer, ...: the command's error envelope, not a plan outcome
     except Exception:  # a real run ends ``internal`` (the runner's catch-all) wherever this fails
         would_fail = ["internal"]
     would_exit = ExitCode.FAILED if would_fail else ExitCode.OK
