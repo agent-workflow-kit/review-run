@@ -45,8 +45,7 @@ import hashlib
 import os
 import secrets
 import stat
-from collections.abc import Callable, Iterator, Mapping, Sequence
-from contextlib import contextmanager
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final
@@ -645,16 +644,24 @@ def finalize_agent(root: Path, run_id: str, opts: AgentFinalize) -> Run | None:
             store.release_lease(lease)
 
 
-@contextmanager
-def _finalizing() -> Iterator[None]:
+def _finalizing(finalize: Callable[[], Run | None]) -> Run | None:
     """From the point a finalization begins (the transaction that moves the run) a signal does
-    not interrupt it and is dropped afterwards (interface.md, Signals: the finalize row): the
-    reads before it (``agent-spawn show``) stay interruptible."""
+    not interrupt it (interface.md, Signals: the finalize row): the reads before it
+    (``agent-spawn show``) stay interruptible. When the finalization ended the run, the signals
+    that arrived are dropped and so are the later ones (the outcome is kept and printed). When the
+    run is still ``running`` (a live parked verdict, a failed resume) nothing ended: a pending
+    signal is raised now and later ones stay accepted, so ``wait`` can still be interrupted."""
     try:
         with signals.deferred(raise_on_exit=False):
-            yield
-    finally:
+            run = finalize()
+    except BaseException:
         signals.ignore_rest()
+        raise
+    if run is not None and run.state == "running":
+        signals.checkpoint()
+    else:
+        signals.ignore_rest()
+    return run
 
 
 def _finalizable(run: Run, escalated: bool = False) -> bool:
@@ -707,8 +714,7 @@ def _finalize_held(
     if gone:
         if run.state == "escalated":
             return run  # the escalated refresh of ``reconcile`` (TODO(#29)) decides; not here
-        with _finalizing():
-            return ender.apply_failure(lc.Disposition("fail", "agent_gone", 12))
+        return _finalizing(lambda: ender.apply_failure(lc.Disposition("fail", "agent_gone", 12)))
     if code != 0:
         return run
     verdict = lc.parked_verdict(
@@ -717,20 +723,35 @@ def _finalize_held(
     if run.state == "escalated" and verdict != "owned":
         return run  # live (a human answers it) or not ours: nothing to finalize
     if verdict == "mismatch":
-        with _finalizing():
-            return ender.apply_failure(lc.Disposition("fail", "agent_gone", 12), verdict=verdict)
+        return _finalizing(
+            lambda: ender.apply_failure(lc.Disposition("fail", "agent_gone", 12), verdict=verdict)
+        )
     result = outcome_from_show(run, doc)
     if result is None:
         return run
-    with _finalizing():
-        if run.state == "escalated":
-            # The agent finished a newer run outside review-run (a human answered it): the run
-            # moves back to ``running`` (phase ``session``) for that run, then finalizes as usual.
-            assert result.run_number is not None
-            if not store.begin_resume(run_id, run.key, lease=lease, awaited_run=result.run_number):
-                return store.get_run(run_id)
-            ender.note("state_change", "run resumed outside review-run", state="running")
-        return finalize_session(ender, result, opts.seams, verdict=verdict)
+    return _finalizing(
+        lambda: _resume_and_finalize(store, run, lease, ender, result, verdict, opts)
+    )
+
+
+def _resume_and_finalize(
+    store: Store,
+    run: Run,
+    lease: Lease,
+    ender: Ender,
+    result: lc.SpawnResult,
+    verdict: str,
+    opts: AgentFinalize,
+) -> Run | None:
+    run_id = run.run_id
+    if run.state == "escalated":
+        # The agent finished a newer run outside review-run (a human answered it): the run
+        # moves back to ``running`` (phase ``session``) for that run, then finalizes as usual.
+        assert result.run_number is not None
+        if not store.begin_resume(run_id, run.key, lease=lease, awaited_run=result.run_number):
+            return store.get_run(run_id)
+        ender.note("state_change", "run resumed outside review-run", state="running")
+    return finalize_session(ender, result, opts.seams, verdict=verdict)
 
 
 __all__ = [

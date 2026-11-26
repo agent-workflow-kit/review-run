@@ -910,3 +910,60 @@ def test_wait_run_drops_a_signal_of_its_own_finalization(
     with signals.install() as guard:
         obj = waiting.wait_run(world.root, run_id, timeout=None)
     assert obj["state"] == "done" and guard.ignoring
+
+
+def _unfinished_finalization(
+    world: World, monkeypatch: pytest.MonkeyPatch, during: int | None
+) -> list[int]:
+    """Make every finalization return the still-``running`` row (a live parked verdict); it fires
+    ``during`` (when given) inside the deferred finalization. Returns the call counter."""
+    calls: list[int] = []
+
+    def finalize(*args: Any, **kw: Any) -> Run:
+        calls.append(1)
+        if during is not None:
+            fire(during)
+        return world.only_run()
+
+    monkeypatch.setattr(fin_mod, "finalize_session", finalize)
+    return calls
+
+
+@pytest.mark.parametrize(("signum", "code"), SIGNALS)
+def test_a_finalization_that_does_not_end_the_run_leaves_wait_interruptible(
+    world: World,
+    cli,
+    monkeypatch: pytest.MonkeyPatch,
+    signum: int,
+    code: int,
+) -> None:  # type: ignore[no-untyped-def]
+    run_id = parked_running(world)
+    _unfinished_finalization(world, monkeypatch, during=None)
+    slept: list[float] = []
+
+    def sleep(_pause: float) -> None:
+        slept.append(_pause)
+        fire(signum)  # the signal of the next poll
+
+    clock = waiting.Clock(sleep=sleep)
+    with signals.install() as guard:
+        with pytest.raises(signals.SignalExit) as stop:
+            waiting.wait_run(world.root, run_id, timeout=None, clock=clock)
+        assert not guard.ignoring
+    assert stop.value.code == code and slept
+    assert world.only_run().state == "running"
+
+
+@pytest.mark.parametrize(("signum", "code"), SIGNALS)
+def test_a_signal_during_a_finalization_that_does_not_end_the_run_ends_wait(
+    world: World,
+    cli,
+    monkeypatch: pytest.MonkeyPatch,
+    signum: int,
+    code: int,
+) -> None:  # type: ignore[no-untyped-def]
+    run_id = parked_running(world)
+    _unfinished_finalization(world, monkeypatch, during=signum)
+    res = cli("--json", "wait", run_id)
+    assert (res.code, res.out) == (code, "")
+    assert world.only_run().state == "running"
