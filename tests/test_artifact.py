@@ -283,7 +283,7 @@ def test_every_violation_is_listed_up_to_20_and_no_value_is_echoed() -> None:
         ("\U000f0000", True, True),  # plane 15 private use (Co): allowed, marked when printed
         ("", True, True),  # private use
         ("͸", True, True),  # unassigned (Cn)
-        ("⁥", True, True),  # unassigned (Cn) inside the old schema's range
+        ("⁥", False, False),  # unassigned (Cn), but inside the schema's U+2060 to U+206F block
         ("\U0010ffff", True, True),  # noncharacter (Cn)
         ("\U0001f600", True, True),
         ("é", True, True),
@@ -334,7 +334,7 @@ def _expected_bad(char: str, *, allow_lf: bool) -> bool:
         return True
     if category == "Zs":
         return char != " "
-    if 0xFE00 <= cp <= 0xFE0F or 0xE0100 <= cp <= 0xE01EF:
+    if 0xFE00 <= cp <= 0xFE0F or 0xE0100 <= cp <= 0xE01EF or 0x2060 <= cp <= 0x206F:
         return True
     return cp in {
         0x34F,

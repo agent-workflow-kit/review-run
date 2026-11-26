@@ -939,7 +939,7 @@ def test_a_launcher_ended_by_the_gateway_with_an_envelope_in_launch_json_is_laun
     assert [c.argv[1] for c in agent_calls(world, "teardown")] == [agent_id]
 
 
-def test_a_repo_with_run_pr_code_is_reviewed_without_a_code_run_and_says_so_in_the_log(
+def test_a_repo_with_run_pr_code_logs_that_the_code_run_is_pending(
     world: World,
 ) -> None:
     world.config_text = f"repos:\n  {REPO}:\n    run_pr_code:\n      command: [make, test]\n"

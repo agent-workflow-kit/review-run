@@ -32,9 +32,9 @@ Seams, each with its owner (a ``Seams`` left incomplete makes ``finalize_session
 ``session`` for a later finalizer):
 
 * ``Seams.check_session``: the skill and tool checks (step 5), TODO(#22).
-* ``Seams.derive``: end head and meta derivation (steps 11 and 12), TODO(#21); steps 6 to 10
-  (``validate_step``, the ``artifact`` module) run before it. ``Seams.process`` overrides all of
-  steps 6 to 12 (tests). It returns the bytes of
+* ``Seams.derive``: end head and meta derivation (steps 11 and 12), ``meta.derive`` (#21);
+  steps 6 to 10 (``validate_step``, the ``artifact`` module) run before it. ``Seams.process``
+  overrides all of steps 6 to 12 (tests). It returns the bytes of
   ``review.json`` and the run's ``summary``; this module writes ``review.json`` (step 13) and
   runs the terminal transaction (step 14).
 """
@@ -171,7 +171,7 @@ class Seams:
     # An override of the whole of steps 6 to 12 (tests). Unset, steps 6 to 10 are ``validate_step``
     # and steps 11 and 12 are ``derive``.
     process: ProcessFn | None = None
-    derive: DeriveFn | None = None  # TODO(#21): end head, meta derivation, review.json bytes
+    derive: DeriveFn | None = None  # end head, meta derivation, review.json bytes: ``meta.derive``
 
     def processor(self) -> ProcessFn | None:
         if self.process is not None:
@@ -395,7 +395,7 @@ def finalize_session(
     if disposition.kind != "finalize":
         return ender.apply_failure(disposition)
     if not seams.complete:
-        # TODO(#21, #22): until the checks land a done session stays ``running`` in phase
+        # TODO(#22): until the skill check lands a done session stays ``running`` in phase
         # ``session`` (agent stored), exactly as before this issue.
         raise ReviewRunError("internal", "finalize is not complete: artifact checks are pending")
     assert run.agent_id is not None
@@ -549,12 +549,18 @@ def _internal(ender: Ender, result: lc.SpawnResult, verdict: str, extra: dict[st
 # -- the entry point of show, wait and reconcile ---------------------------------------------------
 
 
+def _production_seams() -> Seams:
+    from .meta import production_seams  # meta imports this module
+
+    return production_seams()
+
+
 @dataclass
 class AgentFinalize:
     """What ``finalize_agent`` needs beyond the run: who acts, and with which config."""
 
     finalized_by: str
-    seams: Seams = field(default_factory=Seams)
+    seams: Seams = field(default_factory=lambda: _production_seams())
     cause: str = "finalized"
     hooks_config: Mapping[str, Any] | None = None  # the acting process's config ``hooks``
     shell: Sequence[str] = hooks.SHELL

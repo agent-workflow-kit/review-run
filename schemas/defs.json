@@ -970,7 +970,7 @@
         "normalized_count": {
           "type": "integer",
           "minimum": 0,
-          "description": "The total count of normalization fixes applied."
+          "description": "The sum of the count fields of the normalized entries (a truncated entry counts the entries it omitted)."
         },
         "head_moved": {
           "type": [
