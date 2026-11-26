@@ -18,6 +18,9 @@ One ``SignalGuard`` is installed for the duration of a command, on the main thre
   audit append, the finalize pipeline of a run. Sections nest; the signal is raised when the
   outermost one ends (``raise_on_exit``), or never for the finalize pipeline, whose own outcome
   stands.
+* **Inherited ignores.** A SIGHUP or SIGINT that is ignored when the command starts (``nohup``,
+  a job started in the background) stays ignored: the guard installs nothing for it. SIGTERM is
+  always handled.
 * **Threads.** Handlers exist on the main thread only (``signal.signal`` refuses anything else);
   ``deferred`` is a no-op on any other thread, so the lease keeper's transactions never touch the
   main thread's counters.
@@ -96,6 +99,9 @@ class SignalGuard:
         self.raised = False  # SignalExit was raised: every further signal is ignored
         self.ignoring = False  # the command is past its interruptible part
         self.installed: dict[int, object] = {}
+        # Called with the ``SignalExit`` by a gateway call that is about to end its in-flight child
+        # (``notify``): the runner records the cancellation there, before the child is stopped.
+        self.on_exit: Callable[[SignalExit], None] | None = None
 
     # -- the handler
 
@@ -127,10 +133,6 @@ class SignalGuard:
     def ignore_rest(self) -> None:
         self.ignoring = True
 
-    @property
-    def exit_code(self) -> int | None:
-        return None if self.first is None else EXIT_CODES[signal.Signals(self.first)]
-
 
 _active: SignalGuard | None = None
 
@@ -144,6 +146,33 @@ def deferred(*, raise_on_exit: bool = True) -> _Section | nullcontext[None]:
     """A deferred section of the installed guard; a no-op without one."""
     guard = _active
     return nullcontext() if guard is None else guard.deferred(raise_on_exit=raise_on_exit)
+
+
+def notify(stop: SignalExit) -> None:
+    """Tell the installed guard's ``on_exit`` callback that a signal ends a call, before the
+    call's child is stopped. A callback that fails changes nothing: the unwinding carries on and
+    the owner of the callback records what it needs again afterwards."""
+    guard = _active
+    if guard is None or guard.on_exit is None:
+        return
+    try:
+        guard.on_exit(stop)
+    except Exception:  # noqa: BLE001 - the cleanup of the child must run
+        pass
+
+
+@contextmanager
+def on_exit(callback: Callable[[SignalExit], None]) -> Iterator[None]:
+    """Install ``callback`` as the guard's ``on_exit`` for the block (a no-op without a guard)."""
+    guard = _active
+    if guard is None:
+        yield
+        return
+    previous, guard.on_exit = guard.on_exit, callback
+    try:
+        yield
+    finally:
+        guard.on_exit = previous
 
 
 def checkpoint() -> None:
@@ -160,7 +189,8 @@ def ignore_rest() -> None:
 def install() -> Iterator[SignalGuard]:
     """Install the guard for SIGINT, SIGTERM and SIGHUP (main thread only; elsewhere, or when a
     guard is installed already, the existing or an inert guard is yielded) and restore the
-    previous handlers on the way out."""
+    previous handlers on the way out. SIGHUP and SIGINT are left alone when they are ignored on
+    entry (``nohup``, a background job): that choice of the caller stands."""
     global _active
     if _active is not None or threading.current_thread() is not threading.main_thread():
         yield _active if _active is not None else SignalGuard()
@@ -168,6 +198,8 @@ def install() -> Iterator[SignalGuard]:
     guard = SignalGuard()
     try:
         for signum in EXIT_CODES:
+            if signum != signal.SIGTERM and signal.getsignal(signum) == signal.SIG_IGN:
+                continue
             guard.installed[signum] = signal.signal(signum, guard.handle)
         _active = guard
         yield guard
@@ -206,4 +238,6 @@ __all__ = [
     "guarded",
     "ignore_rest",
     "install",
+    "notify",
+    "on_exit",
 ]

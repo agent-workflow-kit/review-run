@@ -12,14 +12,17 @@ validate counts as absent).
 three attempts, ``teardown_parked`` the ownership-checked teardown of an agent a failed launch left
 parked.
 
-Signals during launch and wait are ``runner._interrupted`` (#27): the launcher gets SIGTERM and
-``LAUNCH_TERM_GRACE``. A waiter that exits 130 or 143 is reported as ``interrupted``.
+Signals during launch and wait are ``runner._interrupted`` (#27): on a signal the launcher gets
+SIGTERM at its exact PID and ``LAUNCH_TERM_GRACE`` (a launcher still alive then is left running and
+the run stays ``running``); the waiter gets SIGKILL at its exact PID. A waiter that exits 130 or
+143 is reported as ``interrupted``.
 """
 
 from __future__ import annotations
 
 import os
 import re
+import signal
 import stat
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -33,7 +36,7 @@ from .errors import ReviewRunError
 from .settings import RunSettings, launch_flags, strict_finite_json
 
 RESULT_MAX_BYTES: Final = 1024 * 1024
-LAUNCH_TERM_GRACE: Final = 60.0  # a signaled or timed-out launcher gets SIGTERM, then this long
+LAUNCH_TERM_GRACE: Final = 60.0  # a signaled launcher gets SIGTERM, then this long (never SIGKILL)
 LAUNCH_TIMEOUT: Final = 900.0  # agent-spawn bounds itself; this is the backstop of the call
 SHOW_TIMEOUT: Final = 60.0
 TEARDOWN_TIMEOUT: Final = 300.0
@@ -569,7 +572,9 @@ def wait_session(
             sleep(retry_seconds)
         result_file.unlink(missing_ok=True)  # a stale file must not stand in for this call
         try:
-            done = gateway.run(argv, timeout=timeout)
+            done = gateway.run(
+                argv, timeout=timeout, signal_stop=gateway.SignalStop(signal.SIGKILL)
+            )
         except (gateway.ToolMissing, gateway.CallTimeout, gateway.OutputTooLarge) as exc:
             raise _lower_failed(exc.lower_code, False) from None
         except gateway.GatewayError as exc:

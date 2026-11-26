@@ -20,12 +20,15 @@ Seams, each with its owner:
 * Signals (#27, ``signals``): ``cli`` installs the handlers for ``run``; a signal raises
   ``SignalExit`` at a safe point (store transactions, the terminal transaction, a process start and
   the finalize pipeline are deferred sections). Before the run record exists the unwinding ends
-  the in-flight child or hook group and nothing is recorded. After it ``_interrupted`` records the
-  cancellation, stops the launcher (the gateway's SIGTERM, then at most ``LAUNCH_TERM_GRACE``) and
-  the waiter, stops and tears down the agent and ends the run ``canceled``; SIGHUP after the
-  launch only stops waiting (``Interrupted``). A run whose cleanup could not finish stays
-  ``running`` with the cancellation recorded for the next finalizer (``show``, ``wait``,
-  ``reconcile`` (TODO(#29)), ``cancel``).
+  the in-flight child or hook group and nothing is recorded. After it the cancellation is recorded
+  first (``_record_cancel``, called by the gateway before it stops the in-flight child), then the
+  launcher gets SIGTERM at its exact PID and at most ``LAUNCH_TERM_GRACE`` (never SIGKILL: one that
+  is still alive then leaves the run ``running``, the next finalizer adopts it from
+  ``launch.json``) and the waiter SIGKILL at its exact PID; ``_interrupted`` then stops and tears
+  down the agent and ends the run ``canceled``. SIGHUP after the launch only stops waiting
+  (``Interrupted``) and records nothing. A run whose cleanup could not finish stays ``running``
+  with the cancellation recorded for the next finalizer (``show``, ``wait``, ``reconcile``
+  (TODO(#29)), ``cancel``).
 * The mapping of an outcome to the printed output and exit code is ``outcome.render_run``, applied
   by ``cli`` to the run this module returns.
 """
@@ -33,6 +36,7 @@ Seams, each with its owner:
 from __future__ import annotations
 
 import datetime as dt
+import signal
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -289,7 +293,7 @@ class _Flow:
 
     def canceled_row(self) -> Run | None:
         """When a cancellation is recorded, end the run ``canceled`` (``cancel`` and the signals
-        and the signals record one; this process only honors it)."""
+        record one; this process only honors it)."""
         run = self.row()
         if run.cancel_requested_at is None:
             return None
@@ -386,7 +390,8 @@ class _Flow:
                 timeout=lc.LAUNCH_TIMEOUT,
                 env=launch_env(s),
                 on_start=started,
-                term_grace=lc.LAUNCH_TERM_GRACE,
+                # a signal: SIGTERM to the launcher's exact PID, then the grace (never SIGKILL)
+                signal_stop=gateway.SignalStop(signal.SIGTERM, lc.LAUNCH_TERM_GRACE),
             )
         except gateway.ToolMissing as exc:
             return self.end_failed(
@@ -485,30 +490,34 @@ def run_review(plan: RunPlan, root: Path, opts: Options) -> Run:
         run_id, decision_ids = pre_run_hooks(plan, store, audit, opts, stored)
         facts, settings = plan.facts, plan.settings
         # The run record, the lease, the keeper and the audit pair come into being together: a
-        # signal waits for the end of this block (``_drive`` raises it first thing).
-        with signals.deferred(raise_on_exit=False):
-            run = store.create_run(
-                NewRun(
-                    run_id=run_id,
-                    pr=facts.pr,
-                    repo=facts.repo,
-                    head_sha=facts.head_sha,
-                    mode=plan.mode,
-                    skill=plan.skill,
-                    labels=plan.request.labels,
-                    previous_run=plan.previous.run_id if plan.previous else None,
-                    hooks=tuple(stored),
-                    actor=opts.caller.actor,
-                    decision_ids=tuple(decision_ids),
-                    config_sha256=settings.config_sha256,
+        # signal waits for the end of this block (``_drive`` raises it first thing). One that
+        # arrives right after the block is an ``except SignalExit`` of this same ``try``.
+        lease: Lease | None = None
+        keeper: LeaseKeeper | None = None
+        flow: _Flow | None = None
+        try:
+            with signals.deferred(raise_on_exit=False):
+                run = store.create_run(
+                    NewRun(
+                        run_id=run_id,
+                        pr=facts.pr,
+                        repo=facts.repo,
+                        head_sha=facts.head_sha,
+                        mode=plan.mode,
+                        skill=plan.skill,
+                        labels=plan.request.labels,
+                        previous_run=plan.previous.run_id if plan.previous else None,
+                        hooks=tuple(stored),
+                        actor=opts.caller.actor,
+                        decision_ids=tuple(decision_ids),
+                        config_sha256=settings.config_sha256,
+                    )
                 )
-            )
-            lease = store.acquire_lease(lease_name(run_id))
-            if lease is None:  # a fresh id: nobody else can hold it
-                raise ReviewRunError("internal", "the new run's lease is taken")
-            keeper = LeaseKeeper(root, lease, opts.lease_interval)
-            keeper.start()
-            try:
+                lease = store.acquire_lease(lease_name(run_id))
+                if lease is None:  # a fresh id: nobody else can hold it
+                    raise ReviewRunError("internal", "the new run's lease is taken")
+                keeper = LeaseKeeper(root, lease, opts.lease_interval)
+                keeper.start()
                 attempt = audit.begin(
                     "run",
                     caller=opts.caller,
@@ -517,52 +526,25 @@ def run_review(plan: RunPlan, root: Path, opts: Options) -> Run:
                     inputs=run_inputs(run, settings, override=plan.request.override_escalation),
                 )
                 flow = _Flow(plan, store, audit, log, opts, run_id, lease, keeper, attempt, root)
-            except BaseException:
-                keeper.stop()
-                store.release_lease(lease)
-                raise
-        try:
             return _drive(flow)
+        except signals.SignalExit as sig:
+            if flow is None:
+                raise
+            return _interrupted(flow, sig)  # the window between the section and ``_drive``
         finally:
             signals.ignore_rest()  # the lease is released whatever arrives now
-            keeper.stop()
-            store.release_lease(lease)
+            if keeper is not None:
+                keeper.stop()
+            if lease is not None:
+                store.release_lease(lease)
 
 
 def _drive(flow: _Flow) -> Run:
     """Steps 4 (the run files) to 7 and the wait; every ending goes through ``flow.end``."""
     try:
         signals.checkpoint()  # a signal that arrived while the run came into being
-        write_run_files(flow.run_dir, flow.plan.settings, flow.plan.profile)
-        # The run reads its own stored files from here on, never the plan in memory.
-        flow.settings = load_run_settings(flow.run_dir)
-        flow.ender.settings = flow.settings
-        ready = flow.prefetch_and_prompt()
-        if isinstance(ready, Run):
-            return ready
-        files, _manifest = ready
-        launched = flow.launch(files)
-        if isinstance(launched, Run):
-            return launched
-        ended = flow.apply(launched)
-        if ended is not None:
-            return ended
-        if flow.opts.no_wait:
-            return flow.row()
-        run = flow.row()
-        if run.agent_id is None:
-            raise ReviewRunError("internal", "the started session has no stored agent")
-        flow.check_lease()
-        disposition = lc.wait_session(
-            run.agent_id,
-            flow.run_dir,
-            timeout=lc.wait_timeout_seconds(flow.settings),
-            sleep=flow.opts.sleep,
-            csession_id=run.csession_id,
-            awaited_run=run.awaited_run,
-        )
-        ended = flow.apply(disposition)
-        return flow.row() if ended is None else ended
+        with signals.on_exit(lambda sig: _record_cancel(flow, sig)):
+            return _run_steps(flow)
     except Interrupted:
         raise
     except signals.SignalExit as sig:
@@ -585,27 +567,82 @@ def _drive(flow: _Flow) -> Run:
         remove_prompt_files(flow.run_dir)
 
 
+def _run_steps(flow: _Flow) -> Run:
+    """The steps of ``_drive`` that a signal unwinds."""
+    write_run_files(flow.run_dir, flow.plan.settings, flow.plan.profile)
+    # The run reads its own stored files from here on, never the plan in memory.
+    flow.settings = load_run_settings(flow.run_dir)
+    flow.ender.settings = flow.settings
+    ready = flow.prefetch_and_prompt()
+    if isinstance(ready, Run):
+        return ready
+    files, _manifest = ready
+    launched = flow.launch(files)
+    if isinstance(launched, Run):
+        return launched
+    ended = flow.apply(launched)
+    if ended is not None:
+        return ended
+    if flow.opts.no_wait:
+        return flow.row()
+    run = flow.row()
+    if run.agent_id is None:
+        raise ReviewRunError("internal", "the started session has no stored agent")
+    flow.check_lease()
+    disposition = lc.wait_session(
+        run.agent_id,
+        flow.run_dir,
+        timeout=lc.wait_timeout_seconds(flow.settings),
+        sleep=flow.opts.sleep,
+        csession_id=run.csession_id,
+        awaited_run=run.awaited_run,
+    )
+    ended = flow.apply(disposition)
+    return flow.row() if ended is None else ended
+
+
+def _record_cancel(flow: _Flow, sig: signals.SignalExit) -> None:
+    """Record the cancellation of a signal (the run's recorded cancellation stands when there is
+    one). Called by the gateway before it stops the in-flight child, and again by ``_interrupted``
+    (idempotent). SIGHUP after the launch records nothing: the session keeps running."""
+    code = int(sig.code) if isinstance(sig.code, int) else 143
+    run = flow.row()
+    if run.state != "running" or run.cancel_requested_at is not None:
+        return
+    if sig.hangup and flow.launched:
+        return
+    flow.store.request_cancel(flow.run_id, run.key, actor=flow.opts.caller.actor, exit_code=code)
+
+
+def _launcher_alive(run: Run) -> bool:
+    """Whether the launcher this run started is still alive (stored PID and start time)."""
+    if run.launcher_pid is None or run.launcher_start is None:
+        return False
+    ident = procid.ProcIdentity(run.launcher_pid, run.launcher_start)
+    return procid.check(ident) is True
+
+
 def _interrupted(flow: _Flow, sig: signals.SignalExit) -> Run:
     """A signal reached ``run`` after the run record exists (interface.md, Signals). Every child
-    the gateway started (the launcher, the waiter, a hook) was ended while the exception
-    unwound; further signals are ignored from here on. Returns the run when it ended, raises
-    ``Interrupted`` (exit 130 or 143, nothing printed) when it stays as it is."""
+    the gateway started (the launcher, the waiter, a hook) was stopped while the exception
+    unwound (the cancellation was recorded first); further signals are ignored from here on.
+    Returns the run when it ended, raises ``Interrupted`` (exit 130 or 143, nothing printed) when
+    it stays as it is: SIGHUP after the launch, a launcher that ignored SIGTERM for the whole
+    grace and is still alive, an agent that is still live."""
     code = int(sig.code) if isinstance(sig.code, int) else 143
     run = flow.row()
     if run.state != "running":
         return run  # the run ended (this signal came late or another process ended it)
     if run.cancel_requested_at is None:
-        if sig.hangup and flow.launched:
-            raise Interrupted(code)  # SIGHUP: stop waiting; the session keeps running
-        recorded = flow.store.request_cancel(
-            flow.run_id, run.key, actor=flow.opts.caller.actor, exit_code=code
-        )
-        if not recorded:
-            run = flow.row()
-            if run.state != "running":
-                return run
-            if run.cancel_requested_at is None:  # finalize began elsewhere: leave the row
-                raise Interrupted(code)
+        _record_cancel(flow, sig)
+        run = flow.row()
+        if run.state != "running":
+            return run
+        if run.cancel_requested_at is None:
+            # SIGHUP after the launch (the session keeps running) or finalize began elsewhere
+            raise Interrupted(code)
+    if flow.launched and _launcher_alive(run):
+        raise Interrupted(code)  # never SIGKILLed: the next finalizer adopts it from launch.json
     return _end_canceled(flow, code)
 
 

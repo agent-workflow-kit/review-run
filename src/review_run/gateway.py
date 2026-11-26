@@ -26,7 +26,11 @@ Rules:
   guard (``signals``, installed by ``cli`` for ``run``, ``resume`` and ``wait``) that fallback is
   not installed: the guard's handler raises ``SignalExit``, the group is ended in the same
   ``BaseException`` path, and ``Popen`` and the group's cleanup are deferred sections (a signal
-  between ``fork`` and the return of ``Popen`` ends the child's group too).
+  between ``fork`` and the return of ``Popen`` ends the child's group too). Before the child is
+  ended the guard's ``on_exit`` callback runs (the runner records the cancellation first). A call
+  with ``signal_stop`` stops the child differently on that path: its sig to the exact PID of the
+  leader, never the group; after SIGTERM at most ``grace`` is waited and a child still alive is
+  left running (no SIGKILL). A timeout or an overflow keeps the group kill and ignores it.
 * Output is decoded explicitly as UTF-8 with ``surrogateescape``, never through the locale;
   ``stdin`` is encoded the same way (unencodable or over ``MAX_OUTPUT`` bytes: ``GatewayError``).
 * A normal exit kills nothing: group members that outlive the leader keep running, and their later
@@ -55,7 +59,7 @@ import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol
 
 from . import signals
 
@@ -168,6 +172,17 @@ def check_call(
     return data
 
 
+@dataclass(frozen=True)
+class SignalStop:
+    """How a call's child is stopped when the command itself is signaled (``signals.SignalExit``
+    unwinds through the call), instead of the group kill of a failure or timeout: ``sig`` goes to
+    the child's exact PID, never its group. For SIGTERM the call waits at most ``grace`` seconds
+    for the child to exit; a child that is still alive after it is left alone (no SIGKILL)."""
+
+    sig: int = signal.SIGKILL
+    grace: float = 0.0
+
+
 class Gateway(Protocol):
     """Everything review-run needs from the operating system."""
 
@@ -215,6 +230,27 @@ class DetachedHandle(Protocol):
         """Wait until the supervisor has exited (the child exited or was ended); ``False`` when
         still running."""
         ...
+
+
+def _stop_pid(proc: subprocess.Popen[bytes], stop: SignalStop) -> None:
+    """The signal path of a call: ``stop.sig`` to the leader's exact PID (unreaped, so the PID
+    cannot be reused). SIGKILL is followed by the reap; SIGTERM by a wait of at most ``stop.grace``
+    for the leader, which is reaped when it exited and left alone (alive, unreaped) otherwise."""
+    if proc.returncode is not None:
+        return
+    try:
+        os.kill(proc.pid, stop.sig)
+    except ProcessLookupError:
+        pass
+    if stop.sig == signal.SIGKILL:
+        proc.wait()
+        return
+    end = time.monotonic() + stop.grace
+    while not _leader_exited(proc):
+        if time.monotonic() >= end:
+            return
+        time.sleep(0.02)
+    proc.wait()
 
 
 def _kill_group(pgid: int) -> None:
@@ -356,12 +392,14 @@ class SystemGateway:
         cwd: str | None = None,
         term_grace: float = 0.0,
         on_start: Callable[[int], None] | None = None,
+        signal_stop: SignalStop | None = None,
     ) -> CompletedRun:
         data = check_call(argv, timeout, stdin=stdin, env=env, cwd=cwd, term_grace=term_grace)
         args = list(argv)
         if cwd is not None and not os.path.isdir(cwd):
             raise GatewayError("working directory missing")
         proc: subprocess.Popen[bytes] | None = None
+        started = False
         # The handlers stay installed from before the start until the group has been ended.
         with _ending_signals() as quiesce:
             try:
@@ -388,10 +426,11 @@ class SystemGateway:
                         f"cannot start {os.path.basename(args[0])!r}: errno {exc.errno}"
                     ) from exc
                 if on_start is not None:
+                    started = True
                     on_start(proc.pid)
                 out, err = _communicate(proc, data, timeout)
                 result = proc
-            except BaseException:
+            except BaseException as exc:
                 # Timeout, overflow, interrupt or any failure: end exactly the group we created,
                 # first, and reap after, so a member alive when the leader exits is still killed.
                 # The leader is unreaped here (the success path never raises after reaping), so
@@ -400,7 +439,20 @@ class SystemGateway:
                 quiesce()
                 if proc is not None:
                     with signals.deferred():  # a signal during the cleanup waits for its end
-                        _end_group(proc, proc.pid, term_grace)
+                        if isinstance(exc, signals.SignalExit):
+                            if on_start is not None and not started:  # the signal came first
+                                try:
+                                    on_start(proc.pid)
+                                except Exception:  # noqa: BLE001 - the child is ended anyway
+                                    pass
+                            # The owner records the cancellation before the child is stopped.
+                            signals.notify(exc)
+                            if signal_stop is not None:
+                                _stop_pid(proc, signal_stop)
+                            else:
+                                _end_group(proc, proc.pid, term_grace)
+                        else:
+                            _end_group(proc, proc.pid, term_grace)
                 raise
             finally:
                 if proc is not None:
@@ -575,21 +627,18 @@ def run(
     cwd: str | None = None,
     term_grace: float = 0.0,
     on_start: Callable[[int], None] | None = None,
+    signal_stop: SignalStop | None = None,
 ) -> CompletedRun:
-    """``get_gateway().run(...)``: the entry point other modules call. ``on_start`` is passed
-    on only when given, so a gateway written before it existed keeps working."""
-    if on_start is None:
-        return get_gateway().run(
-            argv, timeout=timeout, stdin=stdin, env=env, cwd=cwd, term_grace=term_grace
-        )
+    """``get_gateway().run(...)``: the entry point other modules call. ``on_start`` and
+    ``signal_stop`` are passed on only when given, so a gateway written before them keeps
+    working."""
+    extra: dict[str, Any] = {}
+    if on_start is not None:
+        extra["on_start"] = on_start
+    if signal_stop is not None:
+        extra["signal_stop"] = signal_stop
     return get_gateway().run(
-        argv,
-        timeout=timeout,
-        stdin=stdin,
-        env=env,
-        cwd=cwd,
-        term_grace=term_grace,
-        on_start=on_start,
+        argv, timeout=timeout, stdin=stdin, env=env, cwd=cwd, term_grace=term_grace, **extra
     )
 
 

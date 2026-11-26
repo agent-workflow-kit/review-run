@@ -13,17 +13,23 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from review_run import audit as audit_mod
-from review_run import hooks, runner, signals
+from review_run import finalize as fin_mod
+from review_run import gateway as gw
+from review_run import hooks, runner, signals, waiting
+from review_run import launch as lc
 from review_run.runner import Interrupted, run_review
 from review_run.store import Run, Store, lease_name
-from tests.run_helpers import CALLER, World
+from tests.conftest import validate_against
+from tests.helpers import Result, run_cli
+from tests.proc_guard import ProcTracker
+from tests.run_helpers import CALLER, PR_URL, World
 from tests.test_meta import artifact_text
 
 SIGNALS = [
@@ -35,7 +41,87 @@ CANCELING = [(signal.SIGTERM, 143), (signal.SIGINT, 130)]
 
 
 def fire(signum: int) -> None:
-    signal.raise_signal(signum)  # this process; only ever with the guard's handler installed
+    """Raise ``signum`` in this process, only while the command's own guard handles it."""
+    guard = signals.active()
+    assert guard is not None, "no guard is installed: the signal would reach pytest"
+    assert signal.getsignal(signum) == guard.handle, "the guard's handler is not installed"
+    signal.raise_signal(signum)
+
+
+ORIG_KILL, ORIG_KILLPG = os.kill, os.killpg
+
+
+def _pidfd_target(fd: int) -> int | None:
+    try:
+        for line in Path(f"/proc/self/fdinfo/{fd}").read_text().splitlines():
+            if line.startswith("Pid:"):
+                return int(line.split()[1])
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+class KillGuard:
+    """The pids (and group ids) these tests may signal: the children ``review_run`` itself
+    started (recorded when its ``Popen`` is created) and what a test records explicitly."""
+
+    def __init__(self) -> None:
+        self.recorded: set[int] = set()
+
+    def record(self, pid: int) -> None:
+        self.recorded.add(pid)
+
+    def check(self, target: int, sig: int) -> None:
+        if sig != 0 and target not in self.recorded:
+            raise AssertionError(f"signal {sig} to {target}, which no test recorded")
+
+
+@pytest.fixture(autouse=True)
+def kill_guard(monkeypatch: pytest.MonkeyPatch) -> Iterator[KillGuard]:
+    """Refuse any ``os.kill``, ``os.killpg`` or ``pidfd_send_signal`` (whoever calls it) whose
+    target is not a recorded pid or group id; a signal 0 probe is allowed. Undone before the
+    process guard's teardown, which kills what is left of its own children."""
+    guard = KillGuard()
+    real_popen = subprocess.Popen
+    real_pidfd = getattr(signal, "pidfd_send_signal", None)
+
+    class Recording(real_popen):  # type: ignore[misc, valid-type]
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+            if sys._getframe(1).f_globals.get("__name__", "").startswith("review_run"):  # noqa: SLF001
+                guard.record(self.pid)  # a child of the product code (its group id is its pid)
+
+    def kill(pid: int, sig: int) -> None:
+        if pid <= 0 and sig != 0:
+            raise AssertionError("a signal to pid 0 or a group through os.kill")
+        guard.check(pid, sig)
+        ORIG_KILL(pid, sig)
+
+    def killpg(pgid: int, sig: int) -> None:
+        guard.check(pgid, sig)
+        ORIG_KILLPG(pgid, sig)
+
+    def pidfd(fd: int, sig: int, *rest: Any) -> None:
+        target = _pidfd_target(fd)
+        guard.check(-1 if target is None else target, sig)
+        assert real_pidfd is not None
+        real_pidfd(fd, sig, *rest)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(subprocess, "Popen", Recording)
+        patch.setattr(os, "kill", kill)
+        patch.setattr(os, "killpg", killpg)
+        if real_pidfd is not None:
+            patch.setattr(signal, "pidfd_send_signal", pidfd)
+        yield guard
+
+
+def wait_for_file(path: Path) -> None:
+    """The rendezvous with a child: a file it writes once its handlers are armed (bounded)."""
+    deadline = time.monotonic() + 30
+    while not path.exists():
+        assert time.monotonic() < deadline, f"{path.name} never appeared"
+        time.sleep(0.01)
 
 
 def alive(pid: int) -> bool:
@@ -205,7 +291,7 @@ def test_an_audit_append_is_finished_before_the_signal_is_raised(tmp_path: Path)
 
 
 def test_a_signal_right_after_the_fork_still_ends_the_child(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, kill_guard: KillGuard
 ) -> None:
     from review_run import gateway as gw
 
@@ -216,6 +302,7 @@ def test_a_signal_right_after_the_fork_still_ends_the_child(
         def __init__(self, *args: Any, **kwargs: Any) -> None:
             super().__init__(*args, **kwargs)
             started.append(self.pid)
+            kill_guard.record(self.pid)  # the gateway ends this child's group
             fire(signal.SIGTERM)  # the child exists, ``Popen`` has not returned yet
 
     monkeypatch.setattr(gw.subprocess, "Popen", Racing)
@@ -452,7 +539,7 @@ def _env(world: World) -> dict[str, str]:
 
 @pytest.mark.parametrize(("signum", "code"), SIGNALS)
 def test_a_waiting_wait_command_exits_with_the_signal_code_and_prints_nothing(
-    world: World, signum: int, code: int
+    world: World, kill_guard: KillGuard, signum: int, code: int
 ) -> None:
     world.fb.use("agent-spawn", "never_ends")
     world.root = world.tmp / "xdg-state" / "review-run"  # where the command looks for its state
@@ -465,6 +552,7 @@ def test_a_waiting_wait_command_exits_with_the_signal_code_and_prints_nothing(
         stderr=subprocess.PIPE,
         stdin=subprocess.DEVNULL,
     )
+    kill_guard.record(proc.pid)  # the signal goes to this child, started here
     try:
         deadline = time.monotonic() + 60
         while not world.fb.calls("agent-spawn", "show") and time.monotonic() < deadline:
@@ -482,3 +570,343 @@ def test_a_waiting_wait_command_exits_with_the_signal_code_and_prints_nothing(
     assert out == b""
     assert b"Traceback" not in err
     assert world.only_run().state == "running"
+
+
+# -- round 1: the guard, inherited ignores ------------------------------------------------------
+
+
+def _private_env(tmp: Path) -> dict[str, str]:
+    return {
+        "PATH": "/usr/bin:/bin",
+        "HOME": str(tmp),
+        "XDG_CONFIG_HOME": str(tmp),
+        "PYTHONPATH": os.pathsep.join(sys.path),
+    }
+
+
+def test_an_inherited_ignore_of_sighup_and_sigint_is_kept_and_sigterm_is_still_handled(
+    tmp_path: Path,
+) -> None:
+    probe = tmp_path / "probe.py"
+    probe.write_text(
+        "import json, signal\n"
+        "from review_run import signals\n"
+        "ign = signal.SIG_IGN\n"
+        "signal.signal(signal.SIGHUP, ign)\n"
+        "signal.signal(signal.SIGINT, ign)\n"
+        "with signals.install() as guard:\n"
+        "    inside = {\n"
+        "        'hup': signal.getsignal(signal.SIGHUP) == ign,\n"
+        "        'int': signal.getsignal(signal.SIGINT) == ign,\n"
+        "        'term': signal.getsignal(signal.SIGTERM) == guard.handle,\n"
+        "    }\n"
+        "after = {\n"
+        "    'hup': signal.getsignal(signal.SIGHUP) == ign,\n"
+        "    'int': signal.getsignal(signal.SIGINT) == ign,\n"
+        "    'term': signal.getsignal(signal.SIGTERM) == signal.SIG_DFL,\n"
+        "}\n"
+        "print(json.dumps([inside, after]))\n",
+        encoding="utf-8",
+    )
+    done = subprocess.run(  # noqa: S603
+        [sys.executable, "-E", str(probe)],
+        env=_private_env(tmp_path),
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert done.returncode == 0, done.stderr
+    import json
+
+    inside, after = json.loads(done.stdout)
+    assert inside == {"hup": True, "int": True, "term": True}
+    assert after == {"hup": True, "int": True, "term": True}
+
+
+def test_the_kill_guard_refuses_an_unrecorded_target_and_allows_a_recorded_one(
+    kill_guard: KillGuard,
+) -> None:
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])  # noqa: S603
+    try:
+        with pytest.raises(AssertionError, match="no test recorded"):
+            os.kill(child.pid, signal.SIGTERM)
+        with pytest.raises(AssertionError, match="no test recorded"):
+            os.killpg(child.pid, signal.SIGTERM)
+        assert child.poll() is None  # the refused signal was never sent
+        os.kill(child.pid, 0)  # a probe is not a signal
+        kill_guard.record(child.pid)
+    finally:
+        child.kill()  # through the handle, after recording it
+        child.wait(10)
+
+
+# -- round 1: the launcher and the cancellation first --------------------------------------
+
+
+def launcher_scenario(world: World, **extra: Any) -> tuple[Path, Path]:
+    ready, seen = world.tmp / "launcher.ready", world.tmp / "launcher.signals"
+    world.fb.script(
+        "agent-spawn",
+        "launch",
+        {"hang": True, "ready_file": str(ready), "signal_file": str(seen), **extra},
+    )
+    return ready, seen
+
+
+def fire_once_armed(world: World, ready: Path, signum: int, pids: list[int]) -> None:
+    def started(argv: Sequence[str], pid: int) -> None:
+        if argv[0] == "agent-spawn" and argv[1] == "launch":
+            pids.append(pid)
+            wait_for_file(ready)
+            fire(signum)
+
+    world.router.on_started = started
+
+
+def test_the_launcher_gets_sigterm_at_its_exact_pid_with_the_grace_and_the_run_is_canceled(
+    world: World,
+) -> None:
+    ready, seen = launcher_scenario(world)
+    pids: list[int] = []
+    fire_once_armed(world, ready, signal.SIGTERM, pids)
+    run = run_guarded(world)
+    assert_canceled(world, run, 143)
+    assert seen.read_text() == f"{int(signal.SIGTERM)}\n"  # SIGTERM, then it exited: no SIGKILL
+    assert not alive(pids[0])
+    (call,) = [x for x in world.router.stops if x[0][:2] == ("agent-spawn", "launch")]
+    assert call[1] == gw.SignalStop(signal.SIGTERM, lc.LAUNCH_TERM_GRACE)
+    assert call[2] == 0.0  # the timeout path keeps its group kill, with no grace
+
+
+def test_the_launch_term_grace_is_sixty_seconds() -> None:
+    assert lc.LAUNCH_TERM_GRACE == 60.0
+
+
+def test_a_launcher_that_ignores_sigterm_is_left_alive_the_run_stays_running_cancellation_first(
+    world: World, monkeypatch: pytest.MonkeyPatch, proc_tracker: ProcTracker
+) -> None:
+    monkeypatch.setattr(lc, "LAUNCH_TERM_GRACE", 0.4)  # the real value is 60 s
+    ready, seen = launcher_scenario(world, ignore_term=True)
+    pids: list[int] = []
+    fire_once_armed(world, ready, signal.SIGTERM, pids)
+    recorded_at_stop: list[str | None] = []
+    real_stop = gw._stop_pid  # noqa: SLF001
+
+    def spy(proc: Any, stop: gw.SignalStop) -> None:
+        recorded_at_stop.append(world.only_run().cancel_requested_at)  # before the stop
+        real_stop(proc, stop)
+
+    monkeypatch.setattr(gw, "_stop_pid", spy)
+    plan = world.plan()
+    try:
+        with signals.install(), pytest.raises(Interrupted) as stop:
+            run_review(plan, world.root, world.options())
+        (pid,) = pids
+        assert stop.value.exit_code == 143
+        assert alive(pid)  # not SIGKILLed after the grace
+        assert seen.read_text() == f"{int(signal.SIGTERM)}\n"
+        run = world.only_run()
+        assert (run.state, run.phase, run.agent_id) == ("running", "session", None)
+        assert run.cancel_requested_at is not None and run.cancel_exit_code == 143
+        assert recorded_at_stop and recorded_at_stop[0] is not None
+        assert lease_is_free(world, run)
+    finally:
+        for pid in pids:  # the leftover child, by its recorded PID
+            ORIG_KILL(pid, signal.SIGKILL)
+        for child in proc_tracker.children:
+            if child.pid in pids:
+                child.popen.wait(10)
+
+
+def test_the_waiter_is_killed_at_its_exact_pid(world: World) -> None:
+    world.fb.use("agent-spawn", "never_ends")
+    pids: list[int] = []
+    fire_in_wait(world, signal.SIGTERM, pids)
+    run = run_guarded(world)
+    assert_canceled(world, run, 143)
+    (call,) = [x for x in world.router.stops if x[0][:2] == ("agent-spawn", "wait")]
+    assert call[1] == gw.SignalStop(signal.SIGKILL)
+    assert not alive(pids[0])
+
+
+def test_a_launcher_that_exited_with_a_live_agent_is_adopted_stopped_and_torn_down(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    world.fb.use("agent-spawn", "never_ends")
+    original = runner._Flow.adopt  # noqa: SLF001
+
+    def adopt(self: runner._Flow, agent: Any) -> Run:  # noqa: SLF001
+        fire(signal.SIGTERM)  # the launcher exited 0; its agent is not stored yet
+        return original(self, agent)
+
+    monkeypatch.setattr(runner._Flow, "adopt", adopt)  # noqa: SLF001
+    run = run_guarded(world)
+    assert_canceled(world, run, 143)
+    assert run.agent_id is not None and run.teardown == "done"
+    (stop_call,) = world.fb.calls("agent-spawn", "stop")
+    assert stop_call.argv[1] == run.agent_id
+    assert len(world.fb.calls("agent-spawn", "teardown")) == 1
+
+
+def test_a_look_alike_agent_in_launch_json_is_never_stopped_or_torn_down(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    world.fb.use("agent-spawn", "never_ends")
+    original = runner._Flow.adopt  # noqa: SLF001
+
+    def adopt(self: runner._Flow, agent: Any) -> Run:  # noqa: SLF001
+        state = world.fb.state()  # the agent is not this run's: other labels
+        state["agents"][agent.agent_id]["settings"]["labels"] = [
+            "owner=review-run",
+            "run=rr-bbbbbbbb",
+        ]
+        world.fb.seed_state(state)
+        fire(signal.SIGTERM)
+        return original(self, agent)
+
+    monkeypatch.setattr(runner._Flow, "adopt", adopt)  # noqa: SLF001
+    run = run_guarded(world)
+    assert (run.state, run.reason) == ("failed", "canceled")
+    assert run.cancel_requested_at is not None
+    assert run.agent_id is None and "agent_mismatch" in run.warnings
+    assert world.fb.calls("agent-spawn", "stop") == []
+    assert world.fb.calls("agent-spawn", "teardown") == []
+
+
+@pytest.fixture
+def cli(world: World, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]):  # type: ignore[no-untyped-def]
+    monkeypatch.setenv("XDG_STATE_HOME", str(world.tmp / "xdg-state"))
+    world.root = world.tmp / "xdg-state" / "review-run"  # where the command looks for its state
+    world.config()
+
+    def call(*argv: str) -> Result:
+        return run_cli(capsys, "--config", str(world.tmp / "config.yaml"), *argv)
+
+    return call
+
+
+@pytest.mark.parametrize(("signum", "code"), CANCELING)
+def test_an_agent_still_live_after_the_stop_keeps_the_run_running_and_prints_nothing(
+    world: World, cli, signum: int, code: int
+) -> None:  # type: ignore[no-untyped-def]
+    world.fb.use("agent-spawn", "never_ends")
+    world.fb.script("agent-spawn", "stop", {"json": {}, "exit": 0, "schema": None})  # no effect
+    fire_in_wait(world, signum, [])
+    res = cli("--json", "run", PR_URL)
+    assert (res.code, res.out) == (code, "")
+    run = world.only_run()
+    assert (run.state, run.cancel_exit_code) == ("running", code)
+    assert run.cancel_requested_at is not None
+    assert len(world.fb.calls("agent-spawn", "stop")) == 1
+    assert world.fb.calls("agent-spawn", "teardown") == []
+    assert lease_is_free(world, run)
+
+
+def test_a_signal_just_after_the_run_came_into_being_ends_it_canceled_and_frees_the_lease(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real = runner.signals
+    fired: list[bool] = []
+
+    class Firing:
+        """The section of ``run_review`` that raises right after it has ended (the window)."""
+
+        def __init__(self, section: Any) -> None:
+            self.section = section
+
+        def __enter__(self) -> None:
+            self.section.__enter__()
+
+        def __exit__(self, *exc: Any) -> None:
+            self.section.__exit__(*exc)
+            if not fired:
+                fired.append(True)
+                fire(signal.SIGTERM)
+
+    class Proxy:
+        def __getattr__(self, name: str) -> Any:
+            return getattr(real, name)
+
+        def deferred(self, *, raise_on_exit: bool = True) -> Any:
+            section = real.deferred(raise_on_exit=raise_on_exit)
+            return section if raise_on_exit else Firing(section)
+
+    monkeypatch.setattr(runner, "signals", Proxy())
+    run = run_guarded(world)
+    assert fired
+    assert_canceled(world, run, 143)
+    assert world.fb.calls("agent-spawn", "launch") == []
+
+
+# -- round 1: wait -------------------------------------------------------------------------
+
+
+def parked_running(world: World) -> str:
+    """A run left ``running`` whose agent has ended: the next ``wait`` finalizes it."""
+    world.fb.use("agent-spawn", "outcome", outcome="done", artifact_text=artifact_text())
+    run = world.run(no_wait=True)
+    assert (run.state, run.phase) == ("running", "session") and run.agent_id
+    world.fb.run("agent-spawn", "wait", run.agent_id, "--json")
+    return run.run_id
+
+
+@pytest.mark.parametrize(("signum", "code"), SIGNALS)
+def test_a_wait_that_finalizes_the_run_keeps_and_prints_its_outcome(
+    world: World, cli, monkeypatch: pytest.MonkeyPatch, signum: int, code: int
+) -> None:  # type: ignore[no-untyped-def]
+    run_id = parked_running(world)
+    real = fin_mod.finalize_session
+
+    def finalize(*args: Any, **kw: Any) -> Run:
+        fire(signum)  # a signal during the finalization
+        return real(*args, **kw)
+
+    monkeypatch.setattr(fin_mod, "finalize_session", finalize)
+    res = cli("--json", "wait", run_id)
+    assert res.code == 0, res.err
+    doc = res.envelope()
+    validate_against("cli/run.json", doc)
+    assert doc["state"] == "done"
+    assert world.only_run().state == "done"
+
+
+@pytest.mark.parametrize(("signum", "code"), SIGNALS)
+def test_a_signal_while_a_read_only_poll_hangs_ends_wait_at_once_and_changes_nothing(
+    world: World, cli, monkeypatch: pytest.MonkeyPatch, signum: int, code: int
+) -> None:  # type: ignore[no-untyped-def]
+    run_id = parked_running(world)
+    monkeypatch.setattr(lc, "SHOW_TIMEOUT", 30.0)  # the signal must not wait for it
+    world.fb.script("agent-spawn", "show", {"hang": True})
+    pids: list[int] = []
+
+    def started(argv: Sequence[str], pid: int) -> None:
+        if argv[0] == "agent-spawn" and argv[1] == "show":
+            pids.append(pid)
+            fire(signum)
+
+    world.router.on_started = started
+    began = time.monotonic()
+    res = cli("--json", "wait", run_id)
+    assert time.monotonic() - began < 20
+    assert (res.code, res.out) == (code, "")
+    assert pids and not alive(pids[0])  # the tool call's child was ended
+    run = world.only_run()
+    assert (run.state, run.phase, run.cancel_requested_at) == ("running", "session", None)
+    assert lease_is_free(world, run)
+
+
+def test_wait_run_drops_a_signal_of_its_own_finalization(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_id = parked_running(world)
+    real = fin_mod.finalize_session
+
+    def finalize(*args: Any, **kw: Any) -> Run:
+        fire(signal.SIGTERM)
+        return real(*args, **kw)
+
+    monkeypatch.setattr(fin_mod, "finalize_session", finalize)
+    with signals.install() as guard:
+        obj = waiting.wait_run(world.root, run_id, timeout=None)
+    assert obj["state"] == "done" and guard.ignoring

@@ -21,10 +21,6 @@ the readiness facts land (TODO(#41)); the code run itself is TODO(#35).
 from __future__ import annotations
 
 import json
-import signal
-import threading
-from collections.abc import Iterator
-from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -67,24 +63,6 @@ def code_run_plan(plan: RunPlan) -> dict[str, Any]:
     }
 
 
-@contextmanager
-def _sigterm_unwinds() -> Iterator[None]:
-    """A SIGTERM raises ``SystemExit(143)`` for the block (main thread only), so the scratch
-    directory's ``finally`` runs; the previous handler is restored afterwards."""
-    if threading.current_thread() is not threading.main_thread():
-        yield
-        return
-
-    def unwind(signum: int, frame: Any) -> None:
-        raise SystemExit(int(ExitCode.SIGTERM))
-
-    previous = signal.signal(signal.SIGTERM, unwind)
-    try:
-        yield
-    finally:
-        signal.signal(signal.SIGTERM, previous)
-
-
 def _build(
     plan: RunPlan, root: Path, run_dir: Path, store: Store | None
 ) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, int], list[str]]:
@@ -123,12 +101,13 @@ def build_plan(plan: RunPlan, root: Path) -> dict[str, Any]:
     argv: list[str] = []
     would_fail: list[str] = []
     try:
-        with _sigterm_unwinds():
-            if plan.previous is None:
-                built = _build(plan, root, run_dir, None)
-            else:
-                with Store.open(Path(root)) as store:  # a store error is the command's (below)
-                    built = _build(plan, root, run_dir, store)
+        # A signal unwinds through the scratch directory's ``finally`` (``run`` is guarded by
+        # ``signals.guarded``; the guard ignores a second signal during the removal).
+        if plan.previous is None:
+            built = _build(plan, root, run_dir, None)
+        else:
+            with Store.open(Path(root)) as store:  # a store error is the command's (below)
+                built = _build(plan, root, run_dir, store)
         manifest_json, coverage, sizes, argv = built
     except PrefetchFailure as exc:
         would_fail = [exc.reason]

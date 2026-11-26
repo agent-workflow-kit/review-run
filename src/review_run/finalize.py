@@ -45,12 +45,13 @@ import hashlib
 import os
 import secrets
 import stat
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final
 
-from . import artifact, gateway, hooks
+from . import artifact, gateway, hooks, signals
 from . import launch as lc
 from .audit import FINALIZER_ACTOR, AuditWriter, Caller, LogWriter
 from .ending import Ender
@@ -644,6 +645,18 @@ def finalize_agent(root: Path, run_id: str, opts: AgentFinalize) -> Run | None:
             store.release_lease(lease)
 
 
+@contextmanager
+def _finalizing() -> Iterator[None]:
+    """From the point a finalization begins (the transaction that moves the run) a signal does
+    not interrupt it and is dropped afterwards (interface.md, Signals: the finalize row): the
+    reads before it (``agent-spawn show``) stay interruptible."""
+    try:
+        with signals.deferred(raise_on_exit=False):
+            yield
+    finally:
+        signals.ignore_rest()
+
+
 def _finalizable(run: Run, escalated: bool = False) -> bool:
     live = run.state == "running" and run.phase in ("session", "finalize")
     return (
@@ -694,7 +707,8 @@ def _finalize_held(
     if gone:
         if run.state == "escalated":
             return run  # the escalated refresh of ``reconcile`` (TODO(#29)) decides; not here
-        return ender.apply_failure(lc.Disposition("fail", "agent_gone", 12))
+        with _finalizing():
+            return ender.apply_failure(lc.Disposition("fail", "agent_gone", 12))
     if code != 0:
         return run
     verdict = lc.parked_verdict(
@@ -703,18 +717,20 @@ def _finalize_held(
     if run.state == "escalated" and verdict != "owned":
         return run  # live (a human answers it) or not ours: nothing to finalize
     if verdict == "mismatch":
-        return ender.apply_failure(lc.Disposition("fail", "agent_gone", 12), verdict=verdict)
+        with _finalizing():
+            return ender.apply_failure(lc.Disposition("fail", "agent_gone", 12), verdict=verdict)
     result = outcome_from_show(run, doc)
     if result is None:
         return run
-    if run.state == "escalated":
-        # The agent finished a newer run outside review-run (a human answered it): the run
-        # moves back to ``running`` (phase ``session``) for that run, then finalizes as usual.
-        assert result.run_number is not None
-        if not store.begin_resume(run_id, run.key, lease=lease, awaited_run=result.run_number):
-            return store.get_run(run_id)
-        ender.note("state_change", "run resumed outside review-run", state="running")
-    return finalize_session(ender, result, opts.seams, verdict=verdict)
+    with _finalizing():
+        if run.state == "escalated":
+            # The agent finished a newer run outside review-run (a human answered it): the run
+            # moves back to ``running`` (phase ``session``) for that run, then finalizes as usual.
+            assert result.run_number is not None
+            if not store.begin_resume(run_id, run.key, lease=lease, awaited_run=result.run_number):
+                return store.get_run(run_id)
+            ender.note("state_change", "run resumed outside review-run", state="running")
+        return finalize_session(ender, result, opts.seams, verdict=verdict)
 
 
 __all__ = [

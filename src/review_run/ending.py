@@ -234,6 +234,9 @@ class Ender:
             )
         if escalated_run is not None and state == "escalated":
             extra["escalated_run"] = escalated_run
+        # A signal that arrived in this section is raised at its end, after the commit and before
+        # the caller's teardown or hook delivery began: the run is terminal, ``teardown`` stays
+        # ``pending`` and the outbox event waits (todo(#29): ``reconcile`` finishes both).
         with signals.deferred():  # the commit, the prompt files and ``moved`` are one unit
             moved = self.store.end_run(
                 self.run_id,

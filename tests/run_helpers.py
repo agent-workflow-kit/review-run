@@ -43,6 +43,9 @@ class Routed:
         self.fb = fb
         self.calls: list[tuple[str, ...]] = []
         self.envs: list[dict[str, str] | None] = []
+        self.stops: list[
+            tuple[tuple[str, ...], gw.SignalStop | None, float]
+        ] = []  # per call: stop, grace
         self.missing: set[str] = set()
         self.on_run: Callable[[Sequence[str]], None] | None = None  # runs before each spawn
         # runs right after each spawn with the child's PID (a signal raised there ends its group)
@@ -58,8 +61,10 @@ class Routed:
         cwd: str | None = None,
         term_grace: float = 0.0,
         on_start: OnStart | None = None,
+        signal_stop: gw.SignalStop | None = None,
     ) -> CompletedRun:
         self.calls.append(tuple(argv))
+        self.stops.append((tuple(argv), signal_stop, term_grace))
         self.envs.append(None if env is None else dict(env))
         if (
             tuple(argv[1:]) == ("--version",)
@@ -89,6 +94,7 @@ class Routed:
             env=child,
             cwd=str(self.fb.dir),
             term_grace=term_grace,
+            signal_stop=signal_stop,
             on_start=started if (on_start is not None or hook is not None) else None,
         )
 

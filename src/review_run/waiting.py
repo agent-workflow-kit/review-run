@@ -18,7 +18,9 @@ Seams, each with its owner:
   check and recovery work.
 * Signals (#27): ``cli`` runs ``wait`` under ``signals.guarded``; a signal while sleeping or polling
   raises ``SignalExit`` (nothing printed, exit 130 or 143, nothing changed: no lease or process is
-  held while sleeping), and one during a finalization waits for it to end (finalize is deferred).
+  held while sleeping), also while a read-only poll (``agent-spawn show``) runs (its child is
+  ended); once a finalization begins (``finalize_agent``) a signal waits for it and is dropped:
+  the ``wait`` that finalized the run prints its outcome and exits with its own exit code.
 """
 
 from __future__ import annotations
@@ -29,7 +31,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
 
-from . import signals
 from .audit import LogWriter
 from .config import load_config
 from .errors import ReviewRunError
@@ -150,16 +151,16 @@ def refresh_run(
         return run
     run_object(run)  # CorruptRunError for a row that cannot be shown: no sibling call
     try:
-        with signals.deferred():  # a finalization that began is finished; the signal comes after
-            finalize_agent(
-                root,
-                run_id,
-                AgentFinalize(
-                    finalized_by=by,
-                    hooks_config=_LazyHooks(config_path, run.repo, LogWriter(root), run_id),
-                    escalated=escalated,
-                ),
-            )
+        # ``finalize_agent`` defers a finalization once it begins; its reads stay interruptible.
+        finalize_agent(
+            root,
+            run_id,
+            AgentFinalize(
+                finalized_by=by,
+                hooks_config=_LazyHooks(config_path, run.repo, LogWriter(root), run_id),
+                escalated=escalated,
+            ),
+        )
     except ReviewRunError:
         raise
     except Exception:  # a ValueError of a stored value, sqlite3.Error, ...; never a traceback
