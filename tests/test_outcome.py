@@ -503,6 +503,19 @@ def test_an_ended_agent_with_an_invalid_config_is_still_finalized(world: World, 
     (world.tmp / "config.yaml").write_text("hooks: [not, a, mapping]\n")
     res = cli("--json", "show", run_id)
     assert res.code == 0 and res.err == "" and res.envelope()["state"] == "failed"
+    with Store.open(default_state_root()) as store:
+        events = store.pending_events(run_id)
+    assert len(events) == 1 and events[0]["delivered"] == 0 and events[0]["attempts"] == 0
+    records = [
+        json.loads(line)
+        for line in (default_state_root() / "log.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+    deferred = [r for r in records if r.get("code") == "config_invalid" and r["level"] == "warn"]
+    assert len(deferred) == 1 and deferred[0]["run_id"] == run_id
+    cli("--json", "show", run_id)  # the run is ended: no refresh, nothing delivered
+    with Store.open(default_state_root()) as store:
+        assert [e["attempts"] for e in store.pending_events(run_id)] == [0]
 
 
 def write_hook_config(world: World, cmd: str, timeout: str = "30s") -> None:

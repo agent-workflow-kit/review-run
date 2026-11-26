@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
 
+from .audit import LogWriter
 from .config import load_config
 from .errors import ReviewRunError
 from .finalize import AgentFinalize, finalize_agent
@@ -77,15 +78,39 @@ class _LazyHooks(Mapping[str, Any]):
     outbox for ``reconcile``) and the finalization stands.
     """
 
-    def __init__(self, config_path: Path | None, repo: str) -> None:
+    def __init__(
+        self, config_path: Path | None, repo: str, log: LogWriter | None = None, run_id: str = ""
+    ) -> None:
         self._path, self._repo = config_path, repo
+        self._log, self._run_id = log, run_id
         self._values: Mapping[str, Any] | None = None
+        self._warned = False
 
     def _hooks(self) -> Mapping[str, Any]:
         if self._values is None:
-            hooks = load_config(self._path).resolve(self._repo).values.get("hooks")
+            try:
+                hooks = load_config(self._path).resolve(self._repo).values.get("hooks")
+            except ReviewRunError as exc:
+                self._warn(exc.code)
+                raise
             self._values = hooks if isinstance(hooks, Mapping) else {}
         return self._values
+
+    def _warn(self, code: str) -> None:
+        """One warn record, with the closed error code of the failure and a fixed message."""
+        if self._warned or self._log is None:
+            return
+        self._warned = True
+        try:
+            self._log.write(
+                "warning",
+                "hook delivery deferred: config did not load",
+                level="warn",
+                run_id=self._run_id,
+                code=code,
+            )
+        except (OSError, ReviewRunError, ValueError):  # a log line never decides a run
+            pass
 
     def __getitem__(self, key: str) -> Any:
         return self._hooks()[key]
@@ -118,7 +143,10 @@ def refresh_run(root: Path, run_id: str, *, by: str, config_path: Path | None = 
         finalize_agent(
             root,
             run_id,
-            AgentFinalize(finalized_by=by, hooks_config=_LazyHooks(config_path, run.repo)),
+            AgentFinalize(
+                finalized_by=by,
+                hooks_config=_LazyHooks(config_path, run.repo, LogWriter(root), run_id),
+            ),
         )
     except ReviewRunError:
         raise
