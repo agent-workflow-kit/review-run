@@ -723,9 +723,20 @@ def test_resume_started_clears_the_record(store: Store) -> None:
     )
     esc = store.get_run(run_id)
     assert esc is not None and store.begin_resume(run_id, esc.key, lease=lease, awaited_run=4)
-    assert store.resume_started(run_id, lease=lease, previous_awaited=4, awaited_run=5)
+    assert store.resume_started(
+        run_id,
+        lease=lease,
+        previous_awaited=4,
+        awaited_run=5,
+        fields={"actor": "human:bob", "hooks": ["post-run=true"], "decision_ids": ["d-1"]},
+    )
     run = store.get_run(run_id)
     assert run is not None and run.awaited_run == 5 and run.escalation_reason is None
+    assert (run.actor, run.hooks, run.decision_ids) == ("human:bob", ["post-run=true"], ["d-1"])
+    with pytest.raises(ValueError):
+        store.resume_started(
+            run_id, lease=lease, previous_awaited=5, awaited_run=6, fields={"state": "done"}
+        )
     assert not store.resume_revert(run_id, lease=lease, awaited_run=5)  # nothing left to restore
 
 
@@ -1030,3 +1041,42 @@ def test_set_teardown_records_the_state_on_a_terminal_run_under_the_lease(tmp_pa
         assert store.release_lease(lease)
         with pytest.raises(ReviewRunError):
             store.set_teardown(rid, "failed", lease=lease)  # no lease, no write
+
+
+def test_a_second_open_keeps_the_locks_the_first_connection_holds(tmp_path: Path) -> None:
+    """Opening and closing a descriptor on ``state.db`` drops this process's POSIX locks on it
+    (a second ``Store.open`` must therefore never do that)."""
+    import subprocess
+    import sys
+
+    root = tmp_path / "state"
+    probe = (
+        "import fcntl,os,sys\n"
+        "fd=os.open(sys.argv[1],os.O_RDWR)\n"
+        "try:\n"
+        "    fcntl.lockf(fd,fcntl.LOCK_EX|fcntl.LOCK_NB,510,0x40000002)\n"
+        "except OSError:\n"
+        "    print('held')\n"
+        "else:\n"
+        "    print('free')\n"
+    )
+
+    def child() -> str:
+        done = subprocess.run(  # noqa: S603
+            [sys.executable, "-c", probe, str(root / "state.db")],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=True,
+        )
+        return done.stdout.strip()
+
+    with Store.open(root) as first:
+        conn = first._conn  # noqa: SLF001
+        conn.execute("BEGIN")
+        conn.execute("SELECT count(*) FROM sqlite_master").fetchall()
+        assert child() == "held"  # the probe sees the read lock at all
+        with Store.open(root):
+            pass
+        assert child() == "held"
+        conn.execute("ROLLBACK")

@@ -356,8 +356,8 @@ def pending() -> Scenario:
 
 
 @scenario("agent-spawn")
-def resume_outcome(outcome: str = "done") -> Scenario:
-    return {"@sessions": {"resume_plan": {"outcome": outcome}}}
+def resume_outcome(outcome: str = "done", **plan: Any) -> Scenario:
+    return {"@sessions": {"resume_plan": {"outcome": outcome, **plan}}}
 
 
 @scenario("agent-spawn")

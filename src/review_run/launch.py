@@ -33,7 +33,7 @@ from typing import Any, Final, Literal
 from . import gateway
 from .durations import DurationError, parse_duration
 from .errors import ReviewRunError
-from .settings import RunSettings, launch_flags, strict_finite_json
+from .settings import RunSettings, launch_flags, resume_flags, strict_finite_json
 
 RESULT_MAX_BYTES: Final = 1024 * 1024
 LAUNCH_TERM_GRACE: Final = 60.0  # a signaled launcher gets SIGTERM, then this long (never SIGKILL)
@@ -48,6 +48,7 @@ WAIT_MARGIN_SECONDS: Final = 15 * 60
 
 LAUNCH_FILE: Final = "launch.json"
 WAIT_FILE: Final = "wait.json"
+RESUME_FILE: Final = "resume.json"
 PROMPT_FILE: Final = "prompt.md"
 PROFILE_FILE: Final = "permission-profile.json"
 
@@ -125,6 +126,33 @@ def launch_argv(
     for path in input_paths:
         flags += ["--input-file", str(path)]
     return ["agent-spawn", "launch", *flags]
+
+
+def resume_argv(
+    settings: RunSettings,
+    agent_id: str,
+    *,
+    run_dir: Path | str,
+    actor: str | None = None,
+    decision_ids: Sequence[str] = (),
+) -> list[str]:
+    """``agent-spawn resume <agent id>`` with the flags of Resume step 6 and the one prompt file
+    (``<run dir>/prompt.md``: the fenced answer). The agent id is checked against its grammar;
+    no untrusted text can reach argv."""
+    if not _AGENT_ID.match(agent_id):
+        raise ValueError("not an agent id")
+    base = Path(run_dir)
+    if not base.is_absolute():
+        raise ValueError("a resume file path is absolute")
+    flags = resume_flags(
+        settings,
+        profile_path=str(base / PROFILE_FILE),
+        prompt_file=str(base / PROMPT_FILE),
+        result_file=str(base / RESUME_FILE),
+        actor=actor,
+        decision_ids=decision_ids,
+    )
+    return ["agent-spawn", "resume", agent_id, *flags]
 
 
 def wait_argv(agent_id: str, run_dir: Path | str) -> list[str]:

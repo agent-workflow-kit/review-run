@@ -461,6 +461,31 @@ def launch_env(settings: RunSettings) -> dict[str, str] | None:
     return env
 
 
+def _session_flags(settings: RunSettings, profile_path: str) -> list[Any]:
+    """The flags ``launch`` and ``resume`` share, every value from the stored settings: the
+    plugin directories, the permission profile, the sandbox, the setting sources, the
+    environment allowlist, ``--model``, ``--timeout``, ``--max-turns`` and ``--no-promote``."""
+    flags: list[Any] = []
+    for directory in settings.plugin_dirs:
+        flags += ["--plugin-dir", directory]
+    flags += [
+        "--permission-profile", profile_path,
+        "--sandbox", settings.value("sandbox"),
+        "--setting-sources", ",".join(settings.value("setting_sources")),
+    ]  # fmt: skip
+    names = list(settings.value("env_allowlist"))
+    if settings.value("subagents") is True:
+        names.append(DEPTH_VARIABLE)
+    for name in names or [""]:
+        flags += ["--env-allowlist-only", name]
+    for flag, key in (("--model", "model"), ("--timeout", "timeout"), ("--max-turns", "max_turns")):
+        value = settings.value(key)
+        if value is not None:
+            flags += [flag, str(value)]
+    flags += ["--no-promote"]
+    return flags
+
+
 def launch_flags(
     settings: RunSettings,
     *,
@@ -490,23 +515,7 @@ def launch_flags(
         "--repo", repo,
         "--skill", settings.value("skill"),
     ]  # fmt: skip
-    for directory in settings.plugin_dirs:
-        flags += ["--plugin-dir", directory]
-    flags += [
-        "--permission-profile", profile_path,
-        "--sandbox", settings.value("sandbox"),
-        "--setting-sources", ",".join(settings.value("setting_sources")),
-    ]  # fmt: skip
-    names = list(settings.value("env_allowlist"))
-    if settings.value("subagents") is True:
-        names.append(DEPTH_VARIABLE)
-    for name in names or [""]:
-        flags += ["--env-allowlist-only", name]
-    for flag, key in (("--model", "model"), ("--timeout", "timeout"), ("--max-turns", "max_turns")):
-        value = settings.value(key)
-        if value is not None:
-            flags += [flag, str(value)]
-    flags += ["--no-promote"]
+    flags += _session_flags(settings, profile_path)
     for label in ("owner=review-run", f"run={run_id}", f"pr={pr}", f"repo={repo}", *labels):
         flags += ["--label", label]
     flags += ["--result-file", result_file, "--json"]
@@ -514,4 +523,30 @@ def launch_flags(
         flags += ["--actor", actor]
     for decision in decision_ids:
         flags.append(f"--decision-id={decision}")  # one item: an id that starts with "-" is safe
+    return [str(f) for f in flags]
+
+
+def resume_flags(
+    settings: RunSettings,
+    *,
+    profile_path: str,
+    prompt_file: str,
+    result_file: str,
+    actor: str | None = None,
+    decision_ids: Sequence[str] = (),
+) -> list[str]:
+    """The flags of ``agent-spawn resume`` (Resume step 6), every value from the stored settings.
+
+    Never passed: ``--mode`` and ``--placement`` (agent-spawn resumes in the mode of the agent's
+    last run), ``--skill`` (the plugin directories are passed again, so the skill check of the
+    resumed run applies), ``--cwd``, ``--repo``, labels (fixed at creation), ``--allow-tainted``,
+    ``--wait``, ``--prompt`` and any positional argument but the agent id the caller puts first.
+    """
+    flags: list[Any] = ["--kind", "review", "--no-implicit-done"]
+    flags += _session_flags(settings, profile_path)
+    flags += ["--prompt-file", prompt_file, "--result-file", result_file, "--json"]
+    if actor is not None:
+        flags += ["--actor", actor]
+    for decision in decision_ids:
+        flags.append(f"--decision-id={decision}")
     return [str(f) for f in flags]

@@ -310,22 +310,36 @@ def ensure_state_root(root: Path) -> None:
 
 def _prepare_db_file(path: Path) -> None:
     """Create ``state.db`` as 0600 (``O_EXCL``) or verify and tighten an existing one."""
-    flags = os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC
+    # An existing file is never opened here: closing any descriptor on it would drop the POSIX
+    # locks SQLite holds through this process's other connections to the same file.
     try:
+        info = os.lstat(path)
+    except FileNotFoundError:
         try:
-            fd = os.open(path, flags | os.O_CREAT | os.O_EXCL, FILE_MODE)
-        except FileExistsError:
-            fd = os.open(path, flags)
+            fd = os.open(
+                path, os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_CREAT | os.O_EXCL, FILE_MODE
+            )
+        except FileExistsError:  # created meanwhile by another process: verify it below
+            info = None
+        except OSError:
+            raise _unsafe() from None
+        else:
+            os.close(fd)  # a new file: no lock of this process can exist on it yet
+            return
     except OSError:
-        raise _unsafe() from None  # a symlink, a directory or no permission
-    try:
-        info = os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid():
-            raise _unsafe()
-        if stat.S_IMODE(info.st_mode) != FILE_MODE:
-            os.fchmod(fd, FILE_MODE)
-    finally:
-        os.close(fd)
+        raise _unsafe() from None
+    if info is None:
+        try:
+            info = os.lstat(path)
+        except OSError:
+            raise _unsafe() from None
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid():
+        raise _unsafe()  # a symlink, a directory or a foreign file
+    if stat.S_IMODE(info.st_mode) != FILE_MODE:
+        try:
+            os.chmod(path, FILE_MODE)
+        except OSError:
+            raise _unsafe() from None
 
 
 # ---------------------------------------------------------------- the store
@@ -759,18 +773,36 @@ class Store:
             return moved.rowcount == 1
 
     def resume_started(
-        self, run_id: str, *, lease: Lease, previous_awaited: int, awaited_run: int
+        self,
+        run_id: str,
+        *,
+        lease: Lease,
+        previous_awaited: int,
+        awaited_run: int,
+        fields: Mapping[str, Any] | None = None,
     ) -> bool:
-        """The resumed session started: set ``awaited_run`` to its run and clear the record."""
+        """The resumed session started: set ``awaited_run`` to its run and clear the record.
+
+        ``fields`` (``FREE_COLUMNS``: the resume's ``actor``, ``hooks`` and ``decision_ids``)
+        change in the same transaction, so a resume that never started leaves them as they were.
+        """
+        extra = dict(fields or {})
+        _check_columns(extra, FREE_COLUMNS - {"awaited_run"})
+        assignments = "".join(f", {column} = ?" for column in extra)
         with self.transaction() as conn:
             _require_lease(conn, lease, run_id)
             cur = conn.execute(
                 "UPDATE runs SET awaited_run = ?, escalation_reason = NULL,"
                 " escalation_exit_code = NULL, escalation_at = NULL,"
-                " escalation_awaited_run = NULL"
+                f" escalation_awaited_run = NULL{assignments}"
                 " WHERE run_id = ? AND state = 'running' AND phase = 'session'"
                 " AND awaited_run IS ?",
-                (awaited_run, run_id, previous_awaited),
+                (
+                    awaited_run,
+                    *(_encode(c, v) for c, v in extra.items()),
+                    run_id,
+                    previous_awaited,
+                ),
             )
             return cur.rowcount == 1
 

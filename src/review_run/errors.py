@@ -108,6 +108,8 @@ class ReviewRunError(Exception):
             value = getattr(self, key)
             if value is not None:
                 error[key] = value
+        if self.code in ("vetoed", "escalated"):
+            error.setdefault("hook", None)  # required: null when a lower tool vetoed or escalated
         return {"error": error}
 
     def human(self) -> str:
