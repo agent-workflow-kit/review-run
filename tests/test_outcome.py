@@ -530,7 +530,7 @@ def write_hook_config(world: World, cmd: str, timeout: str = "30s") -> None:
 def test_show_finalizing_a_run_fires_the_post_run_hook_once(  # type: ignore[no-untyped-def]
     world: World, cli, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    python_shell(monkeypatch, "review_run.waiting", "AgentFinalize")
+    python_shell(monkeypatch, "review_run.recovery", "AgentFinalize")
     out = world.tmp / "hook.out"
     run_id = started(cli, world)
     write_hook_config(
@@ -547,7 +547,7 @@ def test_show_waits_for_a_slow_hook_at_most_its_timeout(  # type: ignore[no-unty
     world: World, cli, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr("review_run.hooks.TERM_GRACE_S", 0.1)
-    python_shell(monkeypatch, "review_run.waiting", "AgentFinalize")
+    python_shell(monkeypatch, "review_run.recovery", "AgentFinalize")
     run_id = started(cli, world)
     marker = world.tmp / "slow.started"
     write_hook_config(
@@ -561,14 +561,19 @@ def test_show_waits_for_a_slow_hook_at_most_its_timeout(  # type: ignore[no-unty
     assert marker.exists() and time.monotonic() - begin < 10
 
 
-def test_show_never_touches_an_escalated_run(world: World, cli) -> None:  # type: ignore[no-untyped-def]
+def test_show_leaves_a_young_escalated_run_with_a_parked_agent_unchanged(world: World, cli) -> None:  # type: ignore[no-untyped-def]
+    """Issue #29: ``show`` refreshes an escalated run (a read of its agent), and changes it only
+    when its agent finished a newer run, is gone, or the run is older than ``escalation_ttl``;
+    ``--no-refresh`` makes no call at all."""
     world.fb.use("agent-spawn", "outcome", outcome="needs-input")
     run_id = cli("--json", "run", PR_URL, "--actor", "human:alice").envelope()["run_id"]
     before_row, before_calls = stored(run_id), spawn_shows(world)
-    for argv in (("--json", "show", run_id), ("--json", "show", "--no-refresh", run_id)):
-        res = cli(*argv)
-        assert res.code == 0 and res.envelope()["state"] == "escalated"
+    res = cli("--json", "show", "--no-refresh", run_id)
+    assert res.code == 0 and res.envelope()["state"] == "escalated"
     assert stored(run_id) == before_row and spawn_shows(world) == before_calls
+    res = cli("--json", "show", run_id)
+    assert res.code == 0 and res.envelope()["state"] == "escalated"
+    assert stored(run_id) == before_row and spawn_shows(world) > before_calls
 
 
 def test_a_pre_run_escalation_through_the_cli_is_an_envelope_not_a_run_object(  # type: ignore[no-untyped-def]

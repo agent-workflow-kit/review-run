@@ -566,17 +566,32 @@ class AgentFinalize:
     shell: Sequence[str] = hooks.SHELL
     lease_interval: float | None = None
     escalated: bool = False  # also finalize an ``escalated`` run whose agent finished a newer run
+    # set by ``finalize_agent``: whether this call's own terminal transaction moved the run (a run
+    # another process finalized meanwhile is not this call's change)
+    moved: bool = field(default=False, init=False)
 
 
 def _show(agent_id: str) -> tuple[int, dict[str, Any]] | None:
     try:
         done = gateway.run(["agent-spawn", "show", agent_id, "--json"], timeout=lc.SHOW_TIMEOUT)
+    except gateway.ToolMissing:
+        # diagnosed, not retried silently: ``wait`` without ``--timeout`` would poll forever
+        raise ReviewRunError(
+            "failed",
+            "agent-spawn is not installed",
+            reason="tool_missing",
+            tool="agent-spawn",
+            lower_code="tool_missing",
+        ) from None
     except gateway.GatewayError:
         return None
     doc = lc.parse_document(done.stdout)
     if doc is None and done.returncode != 10:
         return None
     return done.returncode, doc or {}
+
+
+show_agent = _show  # the read of ``reconcile``'s planning and escalated checks
 
 
 def outcome_from_show(run: Run, doc: Mapping[str, Any]) -> lc.SpawnResult | None:
@@ -618,7 +633,7 @@ def outcome_from_show(run: Run, doc: Mapping[str, Any]) -> lc.SpawnResult | None
 
 def finalize_agent(root: Path, run_id: str, opts: AgentFinalize) -> Run | None:
     """Finalize a run left ``running`` in phase ``session`` (or ``finalize``) whose agent has
-    ended; the entry point of ``show`` and ``wait`` (``waiting``) and of ``reconcile`` (TODO(#29)).
+    ended; the entry point of ``show``, ``wait`` and ``reconcile`` (through ``recovery``).
 
     Returns the stored row after whatever happened, or ``None`` when the run does not exist. Nothing
     changes (the row is returned as read) when the run is not in a finalizable place, its lease is
@@ -703,6 +718,16 @@ def _finalize_held(
         finalized_by=opts.finalized_by,
         cause="external_resume" if run.state == "escalated" else opts.cause,
     )
+    try:
+        return _finalize_shown(store, run, run_id, lease, ender, opts)
+    finally:
+        opts.moved = ender.moved
+
+
+def _finalize_shown(
+    store: Store, run: Run, run_id: str, lease: Lease, ender: Ender, opts: AgentFinalize
+) -> Run | None:
+    assert run.agent_id is not None
     shown = _show(run.agent_id)
     if shown is None:
         return run
@@ -713,7 +738,7 @@ def _finalize_held(
     )
     if gone:
         if run.state == "escalated":
-            return run  # the escalated refresh of ``reconcile`` (TODO(#29)) decides; not here
+            return run  # the escalated recovery (``recovery``) decides ``agent_gone``; not here
         return _finalizing(lambda: ender.apply_failure(lc.Disposition("fail", "agent_gone", 12)))
     if code != 0:
         return run
@@ -766,4 +791,5 @@ __all__ = [
     "finalize_agent",
     "finalize_session",
     "outcome_from_show",
+    "show_agent",
 ]

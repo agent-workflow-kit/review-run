@@ -30,7 +30,7 @@ The order of one invocation:
 The pair of audit ``cancel`` records is opened for every invocation that is not a dry run; the
 terminal transaction carries the closing record when this invocation ends the run, otherwise the
 invocation writes it itself. Seams: ``resume`` is #28
-and the runner check and label recovery of ``reconcile`` are #29.
+and the runner check of ``reconcile`` is ``recovery`` (#29); label recovery is #30.
 """
 
 from __future__ import annotations
@@ -49,10 +49,11 @@ from .audit import AuditWriter, Caller, LogWriter
 from .ending import FINALIZER_ACTOR, Ender
 from .errors import ReviewRunError
 from .keeper import LeaseKeeper
+from .lazyhooks import LazyHooks as _LazyHooks
 from .runs import SCHEMA_PATTERNS, CorruptRunError, run_object
 from .settings import load_run_settings
 from .store import LEASE_RENEW_SECONDS, Lease, Run, Store, lease_name
-from .waiting import Clock, _LazyHooks, refresh_run, resolve, wait_run
+from .waiting import Clock, refresh_run, resolve, wait_run
 
 LEASE_WAIT_SECONDS: Final = 120.0
 RUNNER_WAIT_SECONDS: Final = 120.0

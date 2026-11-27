@@ -6,16 +6,15 @@ waiting (exactly one finalizer; a live holder means "not now") and changes nothi
 has finished its awaited run. ``show`` refreshes once and never waits; ``wait`` repeats the refresh
 every ``POLL_SECONDS`` until the run is no longer ``running`` or the timeout passes.
 
+Beyond the finalize check, ``refresh_run`` applies the repairs of ``recovery`` to the one run:
+the runner check (``runner_lost``), adoption of an agent from ``launch.json``, and, for ``show``,
+the ``agent_gone`` and ``escalation_ttl`` expiry of an ``escalated`` run. A gateway failure leaves
+the row unchanged, except a missing agent-spawn, which is ``tool_missing`` (so ``wait`` without
+``--timeout`` does not poll forever). Label recovery of a run that died before storing its agent
+is TODO(#30).
+
 Seams, each with its owner:
 
-* TODO(#29): the refresh of an ``escalated`` run (an agent that finished a newer run is finalized;
-  an expired one ends ``expired``) and the runner check of ``reconcile`` (a run whose runner and
-  launcher are gone ends ``runner_lost``; label recovery of a missing agent id). ``refresh_run``
-  is the one place they join; until then a ``wait`` on a run whose runner died before the launch
-  blocks until its timeout. Also TODO(#29): ``wait`` without ``--timeout`` polls forever when
-  ``agent-spawn show`` cannot run (``finalize_agent`` treats a gateway failure as "row
-  unchanged"); the diagnosis of repeated refresh failures (``tool_missing``) belongs to the runner
-  check and recovery work.
 * Signals (#27): ``cli`` runs ``wait`` under ``signals.guarded``; a signal while sleeping or polling
   raises ``SignalExit`` (nothing printed, exit 130 or 143, nothing changed: no lease or process is
   held while sleeping), also while a read-only poll (``agent-spawn show``) runs (its child is
@@ -26,16 +25,14 @@ Seams, each with its owner:
 from __future__ import annotations
 
 import time
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
 
-from .audit import LogWriter
-from .config import load_config
 from .errors import ReviewRunError
-from .finalize import AgentFinalize, finalize_agent
-from .runs import SCHEMA_PATTERNS, CorruptRunError, run_object, show_run
+from .recovery import RecoverOptions, recover_run
+from .runs import CorruptRunError, run_object, show_run
 from .store import Run, Store
 
 POLL_SECONDS: Final = 2.0
@@ -64,69 +61,9 @@ def resolve(root: Path, ref: str) -> str:
 
 def needs_refresh(run: Run, escalated: bool = False) -> bool:
     """Whether a refresh can do anything: a ``running`` run (an ``escalated`` one too with
-    ``escalated``) whose stored agent id is an agent id (the same pattern ``run_object``
-    applies; any other value never reaches a sibling's argv)."""
-    return (
-        (run.state == "running" or (escalated and run.state == "escalated"))
-        and isinstance(run.agent_id, str)
-        and SCHEMA_PATTERNS["agent_id"].fullmatch(run.agent_id) is not None
-    )
-
-
-class _LazyHooks(Mapping[str, Any]):
-    """The ``hooks`` of the acting process's config, loaded on first use.
-
-    ``finalize_agent`` reads it only when it delivers the hooks of a run it just ended, so a poll
-    of a live agent never loads (or fails on) the config. A config that does not load raises
-    ``ReviewRunError`` at that point; delivery treats it as not delivered (the events stay in the
-    outbox for ``reconcile``) and the finalization stands.
-    """
-
-    def __init__(
-        self, config_path: Path | None, repo: str, log: LogWriter | None = None, run_id: str = ""
-    ) -> None:
-        self._path, self._repo = config_path, repo
-        self._log, self._run_id = log, run_id
-        self._values: Mapping[str, Any] | None = None
-        self._warned = False
-
-    def _hooks(self) -> Mapping[str, Any]:
-        if self._values is None:
-            try:
-                hooks = load_config(self._path).resolve(self._repo).values.get("hooks")
-            except ReviewRunError as exc:
-                self._warn(exc.code)
-                raise
-            self._values = hooks if isinstance(hooks, Mapping) else {}
-        return self._values
-
-    def _warn(self, code: str) -> None:
-        """One warn record, with the closed error code of the failure and a fixed message."""
-        if self._warned or self._log is None:
-            return
-        self._warned = True
-        try:
-            self._log.write(
-                "warning",
-                "hook delivery deferred: config did not load",
-                level="warn",
-                run_id=self._run_id,
-                code=code,
-            )
-        except (OSError, ReviewRunError, ValueError):  # a log line never decides a run
-            pass
-
-    def __getitem__(self, key: str) -> Any:
-        return self._hooks()[key]
-
-    def __iter__(self) -> Iterator[str]:
-        return iter(self._hooks())
-
-    def __len__(self) -> int:
-        return len(self._hooks())
-
-    def __bool__(self) -> bool:  # truth must not load the config
-        return True
+    ``escalated``). A ``running`` run with no agent gets the runner check; one whose stored agent
+    id is not an agent id is left alone (it never reaches a sibling's argv)."""
+    return run.state == "running" or (escalated and run.state == "escalated")
 
 
 def refresh_run(
@@ -136,15 +73,19 @@ def refresh_run(
     by: str,
     config_path: Path | None = None,
     escalated: bool = False,
+    judge_escalated: bool = False,
 ) -> Run | None:
-    """The run as stored after finalizing it when its agent has ended; ``None`` when it is gone.
+    """The run as stored after the repairs of ``recovery`` (finalize when its agent has ended, the
+    runner check, adoption of an agent, ``agent_gone`` and ``escalation_ttl`` expiry of an
+    ``escalated`` run); ``None`` when it is gone.
 
     ``by`` is ``show`` or ``wait`` (the audit ``finalized_by``). A row that cannot be shown as a
     run raises ``CorruptRunError`` before any sibling is called. The config is read lazily, only
-    when the finalization ends the run and hooks are delivered. A missing or corrupt
-    ``settings.json`` and any other failure of the refresh (an unreadable stored value, the
-    database) raise ``ReviewRunError`` (``internal`` for the unexpected ones, with a closed
-    message) and leave the run unchanged; it recurs on every call, nothing loops inside.
+    when an ending delivers hooks or an ``escalated`` run is checked against its TTL. A missing or
+    corrupt ``settings.json`` and any other failure of the refresh (an unreadable stored value,
+    the database, a missing agent-spawn) raise ``ReviewRunError`` (``internal`` for the unexpected
+    ones, with a closed message) and leave the run unchanged; it recurs on every call, nothing
+    loops inside.
     """
     run = _read(root, run_id)
     if run is None or not needs_refresh(run, escalated):
@@ -152,14 +93,11 @@ def refresh_run(
     run_object(run)  # CorruptRunError for a row that cannot be shown: no sibling call
     try:
         # ``finalize_agent`` defers a finalization once it begins; its reads stay interruptible.
-        finalize_agent(
+        recover_run(
             root,
             run_id,
-            AgentFinalize(
-                finalized_by=by,
-                hooks_config=_LazyHooks(config_path, run.repo, LogWriter(root), run_id),
-                escalated=escalated,
-            ),
+            RecoverOptions(by=by, config_path=config_path, judge_escalated=judge_escalated),
+            escalated=escalated,
         )
     except ReviewRunError:
         raise
@@ -179,7 +117,14 @@ def refresh_for_show(
     through ``on_refresh_error`` and the run stays as stored; a corrupt row still raises."""
     run_id = resolve(root, ref)
     try:
-        refresh_run(root, run_id, by="show", config_path=config_path)
+        refresh_run(
+            root,
+            run_id,
+            by="show",
+            config_path=config_path,
+            escalated=True,
+            judge_escalated=True,
+        )
     except CorruptRunError:
         raise
     except ReviewRunError as err:

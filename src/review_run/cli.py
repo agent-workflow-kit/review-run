@@ -23,6 +23,8 @@ from .errors import DECISION_ID_RE, MAX_DECISION_IDS, PROG, ExitCode, ReviewRunE
 from .fsmodes import apply_umask
 from .outcome import render_cancel, render_run
 from .preflight import RunRequest, plan_run
+from .reconcile import ReconcileOptions
+from .reconcile import reconcile as reconcile_state
 from .resume import ResumeOptions, resume_run
 from .runner import Interrupted, Options, run_review
 from .store import Store, default_state_root
@@ -455,6 +457,21 @@ def _cancel(args: argparse.Namespace) -> int:
     return shown.code
 
 
+def _reconcile(args: argparse.Namespace) -> int:
+    """``reconcile``: repair state against reality; exits 0 whatever the per-run results."""
+    result = reconcile_state(
+        default_state_root(),
+        ReconcileOptions(
+            config_path=None if args.config is None else Path(args.config), dry_run=args.dry_run
+        ),
+    )
+    if args.json:
+        _write_stdout(runs_mod.dump(result.as_json()))
+    elif not args.quiet:
+        _write_stdout(result.human())
+    return 0
+
+
 # Each command is replaced by its owning issue's implementation.
 _HANDLERS: dict[str, Handler] = {
     # run, resume and wait run under the signal handlers (#27): from the first resolve to the
@@ -464,7 +481,7 @@ _HANDLERS: dict[str, Handler] = {
     "wait": signals.guarded(_wait),
     "list": _list,
     "show": _show,
-    "reconcile": _stub("reconcile"),  # TODO(#29): reconcile
+    "reconcile": _reconcile,
     "prune": _stub("prune"),  # TODO(#37): prune
     "cancel": _cancel,
     "cron": _stub("cron"),  # TODO(#38): cron install and uninstall

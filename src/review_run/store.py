@@ -969,6 +969,99 @@ class Store:
                 "UPDATE events SET attempts = attempts + 1 WHERE event_id = ?", (event_id,)
             )
 
+    def pending_event_run_ids(self, limit: int) -> list[str]:
+        """Run ids with undelivered events or pending audit records, oldest event first."""
+        rows = self._conn.execute(
+            "SELECT run_id FROM events WHERE delivered = 0 OR audit_pending = 1"
+            " GROUP BY run_id ORDER BY MIN(created_at), run_id LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [str(r[0]) for r in rows]
+
+    # -- scans of ``reconcile`` (read-only; ids only, rows are read one by one, tolerantly)
+
+    def live_run_ids(self, limit: int) -> list[str]:
+        """``running`` and ``escalated`` runs, oldest first."""
+        with self._lenient():
+            rows = self._conn.execute(
+                "SELECT run_id FROM runs WHERE state IN ('running', 'escalated')"
+                " ORDER BY created_at, run_id LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [str(r[0]) for r in rows]
+
+    def teardown_run_ids(self, limit: int) -> list[str]:
+        """Terminal runs whose agent teardown is ``pending`` or ``failed``, oldest first; a run
+        with the warning ``agent_mismatch`` (a look-alike agent, never retried) is left out, so it
+        cannot take a place from a newer run."""
+        with self._lenient():
+            rows = self._conn.execute(
+                "SELECT run_id FROM runs WHERE state IN ('done', 'failed')"
+                " AND teardown IN ('pending', 'failed') AND agent_id IS NOT NULL"
+                " AND COALESCE(warnings, '') NOT LIKE '%\"agent_mismatch\"%'"
+                " ORDER BY created_at, run_id LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [str(r[0]) for r in rows]
+
+    def terminal_run_ids(self, limit: int) -> list[str]:
+        """The newest terminal runs."""
+        with self._lenient():
+            rows = self._conn.execute(
+                "SELECT run_id FROM runs WHERE state IN ('done', 'failed')"
+                " ORDER BY created_at DESC, run_id LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [str(r[0]) for r in rows]
+
+    # -- repair counters
+
+    def bump_attempts(self, kind: str, key: str) -> int:
+        """Count one failed repair pass of ``kind`` (``teardown`` or ``audit``) for ``key``."""
+        with self.transaction() as conn:
+            conn.execute(
+                "INSERT INTO repair_attempts (kind, key, attempts) VALUES (?, ?, 1)"
+                " ON CONFLICT (kind, key) DO UPDATE SET attempts = attempts + 1",
+                (kind, key),
+            )
+            row = conn.execute(
+                "SELECT attempts FROM repair_attempts WHERE kind = ? AND key = ?", (kind, key)
+            ).fetchone()
+            return int(row[0])
+
+    def clear_attempts(self, kind: str, key: str) -> None:
+        with self.transaction() as conn:
+            conn.execute("DELETE FROM repair_attempts WHERE kind = ? AND key = ?", (kind, key))
+
+    def sweep_failures(self, prefix: str) -> dict[str, int]:
+        """Failed prompt sweeps per run id (``repair_attempts`` rows of kind ``teardown`` whose
+        key is ``prefix`` + the run id)."""
+        rows = self._conn.execute(
+            "SELECT key, attempts FROM repair_attempts WHERE kind = 'teardown'"
+            " AND substr(key, 1, ?) = ?",
+            (len(prefix), prefix),
+        ).fetchall()
+        return {str(k)[len(prefix) :]: int(n) for k, n in rows}
+
+    def stuck_teardowns(self, minimum: int) -> int:
+        """Runs whose teardown is not done after ``minimum`` or more failed retries."""
+        row = self._conn.execute(
+            "SELECT COUNT(*) FROM repair_attempts a JOIN runs r ON r.run_id = a.key"
+            " WHERE a.kind = 'teardown' AND a.attempts >= ?"
+            " AND (r.teardown IS NULL OR r.teardown != 'done')",
+            (minimum,),
+        ).fetchone()
+        return int(row[0])
+
+    def stuck_audit(self, minimum: int) -> int:
+        """Events whose audit records are still pending after ``minimum`` or more passes."""
+        row = self._conn.execute(
+            "SELECT COUNT(*) FROM repair_attempts a JOIN events e ON e.event_id = a.key"
+            " WHERE a.kind = 'audit' AND a.attempts >= ? AND e.audit_pending = 1",
+            (minimum,),
+        ).fetchone()
+        return int(row[0])
+
     # -- leases
 
     def acquire_lease(
@@ -1029,6 +1122,16 @@ class Store:
                 "DELETE FROM leases WHERE name = ? AND token = ?", (lease.name, lease.token)
             )
             return cur.rowcount == 1
+
+    def lease_available(self, name: str) -> bool:
+        """Whether ``acquire_lease`` would succeed now (a read; nothing is taken)."""
+        row = self._conn.execute(
+            "SELECT holder, expires_at FROM leases WHERE name = ?", (name,)
+        ).fetchone()
+        if row is None or row[1] <= format_time(self._now()):
+            return True
+        owner = procid.ProcIdentity.parse(row[0])
+        return owner is not None and self._is_alive(owner) is False
 
     def lease_info(self, name: str) -> LeaseInfo | None:
         row = self._conn.execute(

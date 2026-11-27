@@ -656,21 +656,36 @@ def live_run_without_agent(world: World) -> str:
     return run_id
 
 
-def test_cancel_of_a_prefetch_run_with_a_dead_runner_ends_it_canceled(
+def test_cancel_of_a_prefetch_run_with_a_dead_runner_is_ended_by_the_refresh(
     world: World, cli, monkeypatch: pytest.MonkeyPatch
 ) -> None:  # type: ignore[no-untyped-def]
+    """Step 2 applies the runner check (issue #29): the run ends ``runner_lost`` and cancel
+    reports it unchanged, as for any run its refresh ended."""
     monkeypatch.setenv("XDG_STATE_HOME", str(world.tmp / "xdg-state"))
     run_id = live_run_without_agent(world)
     (default_state_root() / "runs" / run_id / "prompt.md").write_text("x")
     doc = cli("--json", "cancel", run_id).envelope()
-    assert (doc["changed"], doc["action"]) == (True, "none")
+    assert (doc["changed"], doc["action"]) == (False, "none")
     assert (doc["run"]["state"], doc["run"]["reason"], doc["run"]["teardown"]) == (
         "failed",
-        "canceled",
+        "runner_lost",
         None,
     )
     assert not (default_state_root() / "runs" / run_id / "prompt.md").exists()
     assert calls(world, "stop") == []
+
+
+def test_cancel_of_a_prefetch_run_with_a_dead_runner_and_a_recorded_cancel_ends_canceled(
+    world: World, cli, monkeypatch: pytest.MonkeyPatch
+) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setenv("XDG_STATE_HOME", str(world.tmp / "xdg-state"))
+    run_id = live_run_without_agent(world)
+    with Store.open(default_state_root()) as store:
+        row = store.get_run(run_id)
+        assert row is not None
+        assert store.request_cancel(run_id, row.key, actor="human:alice", exit_code=143)
+    doc = cli("--json", "cancel", run_id).envelope()
+    assert (doc["run"]["state"], doc["run"]["reason"]) == ("failed", "canceled")
 
 
 def test_cancel_signals_a_live_runner_by_its_exact_pid_and_waits_for_it(
@@ -746,6 +761,7 @@ def test_a_run_is_never_signaled_through_a_reused_pid(world: World, cli) -> None
             store.update_fields(
                 run_id, row.key, runner_pid=ident.pid, runner_start=ident.start + "9"
             )
+        record_cancel(run_id)
         sent: list[int] = []
         result = cancel_mod.cancel_run(
             default_state_root(),
@@ -888,6 +904,7 @@ def test_cancel_never_signals_its_own_process(world: World, cli) -> None:  # typ
         assert row is not None
         me = procid.current()
         store.update_fields(run_id, row.key, runner_pid=me.pid, runner_start=me.start)
+    record_cancel(run_id)
     sent: list[int] = []
     result = cancel_mod.cancel_run(
         default_state_root(),
@@ -930,6 +947,15 @@ def _options(world: World, cli, **kw: Any) -> cancel_mod.CancelOptions:  # type:
         config_path=world.tmp / "config.yaml",
         **kw,
     )
+
+
+def record_cancel(run_id: str) -> None:
+    """Record a cancellation first: the refresh of step 2 (the runner check of issue #29) would
+    otherwise end a run with a dead runner ``runner_lost`` before ``cancel`` records anything."""
+    with Store.open(default_state_root()) as store:
+        row = store.get_run(run_id)
+        assert row is not None
+        assert store.request_cancel(run_id, row.key, actor="human:alice", exit_code=143)
 
 
 def orphan_agent_run(cli, world: World) -> tuple[str, str]:  # type: ignore[no-untyped-def]
@@ -984,6 +1010,7 @@ def test_a_look_alike_launch_json_agent_is_never_stored_or_touched(  # F5b
     state = world.fb.state()
     state["agents"][agent]["settings"]["labels"] = ["owner=review-run", "run=rr-bbbbbbbb"]
     world.fb.seed_state(state)
+    record_cancel(run_id)
     result = cancel_mod.cancel_run(default_state_root(), run_id, _options(world, cli))
     assert (result.run.state, result.run.reason) == ("failed", "canceled")
     assert result.run.agent_id is None and "agent_mismatch" in result.run.warnings
@@ -1080,6 +1107,7 @@ def test_a_corrupt_stored_pid_is_taken_as_no_process(world: World, cli) -> None:
             " launcher_start = 'y' WHERE run_id = ?",
             (run_id,),
         )
+    record_cancel(run_id)
     result = cancel_mod.cancel_run(default_state_root(), run_id, _options(world, cli))
     assert (result.run.state, result.run.reason) == ("failed", "canceled")
     assert [r["result"]["status"] for r in cancel_records()] == ["attempted", "failed"]
