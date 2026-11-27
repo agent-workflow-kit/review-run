@@ -25,10 +25,10 @@ The order of one invocation (the step numbers are the interface's):
 
 Seams, each with its owner:
 
-* TODO(#29): a ``resume`` that dies between step 5 and the start of the launcher (or whose launcher
-  was ended by the gateway with no usable ``resume.json`` while the agent's last run is not
-  settled) leaves the run ``running`` in phase ``session`` with ``awaited_run`` one above the
-  agent's last run and the escalation record kept; ``reconcile`` finds the agent still parked on
+* A ``resume`` that dies between step 5 and the start of the launcher (or whose launcher was
+  ended by the gateway with no usable ``resume.json`` while the agent's last run is not settled)
+  leaves the run ``running`` in phase ``session`` with ``awaited_run`` one above the agent's last
+  run and the escalation record kept; ``reconcile`` (``recovery``) finds the agent still parked on
   the older run and calls ``store.resume_revert`` (or adopts the run the agent did start).
 * The audit pair of a ``resume`` that returns ``--no-wait``, or that fails after the session
   started, stays open (as ``run``'s does): a later ``show``, ``wait`` or ``reconcile`` writes the
@@ -54,6 +54,7 @@ from .audit import AuditWriter, LogWriter
 from .ending import Ender, resume_inputs, valid_agent_id
 from .errors import ReviewRunError
 from .keeper import LeaseKeeper
+from .lazyhooks import LazyHooks as _LazyHooks
 from .prompt import (
     AnswerTooLarge,
     PromptError,
@@ -80,7 +81,7 @@ from .settings import (
     verify_plugin_dirs,
 )
 from .store import Expect, Lease, Run, Store, format_time, lease_name
-from .waiting import _LazyHooks, refresh_run, resolve
+from .waiting import refresh_run, resolve
 
 DEFAULT_ANSWER_LIMIT: Final = 65536  # limits.max_answer_bytes' default (the stored value wins)
 LEASE_ATTEMPTS: Final = 30  # a finalizer that holds the lease is waited for this many polls
@@ -484,7 +485,7 @@ def _unsettled(flow: ResumeFlow, row: Run, agent_id: str, exc: gateway.GatewayEr
     """The call was ended by the gateway (a timeout, too much output) and left no usable
     ``resume.json``: a run may have started. When the agent is parked on an older run than
     ``awaited``, none did and the resume is reverted; otherwise the run stays ``running`` (the next
-    finalizer or ``reconcile`` (TODO(#29)) settles it) and ``lower_failed`` is raised."""
+    finalizer or ``reconcile`` settles it) and ``lower_failed`` is raised."""
     err = _lower_failed(exc.lower_code)
     try:
         verdict, last = _show_agent(row, agent_id)

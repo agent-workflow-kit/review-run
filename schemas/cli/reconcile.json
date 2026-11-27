@@ -37,11 +37,14 @@
               "runner_lost",
               "agent_gone",
               "expired",
+              "canceled",
+              "resume_reverted",
               "teardown_retried",
               "throwaway_removed",
               "throwaway_leaked",
               "cleaned",
-              "hook_redelivered"
+              "hook_redelivered",
+              "audit_flushed"
             ]
           },
           "details": {

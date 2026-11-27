@@ -28,7 +28,7 @@ Seams, each with its owner:
   down the agent and ends the run ``canceled``. SIGHUP after the launch only stops waiting
   (``Interrupted``) and records nothing. A run whose cleanup could not finish stays ``running``
   with the cancellation recorded for the next finalizer (``show``, ``wait``, ``reconcile``
-  (TODO(#29)), ``cancel``).
+  (``recovery``), ``cancel``).
 * The mapping of an outcome to the printed output and exit code is ``outcome.render_run``, applied
   by ``cli`` to the run this module returns.
 """
@@ -508,8 +508,9 @@ class _Flow(SessionFlow):
             if found is None:
                 # The launcher was ended by the gateway (a timeout, too much output) and left no
                 # usable launch.json: an agent may exist. The run stays ``running`` so that
-                # ``reconcile`` adopts it by its labels (TODO(#29)). A launch.json that holds an
-                # error envelope or a result is adopted below, like stdout.
+                # ``reconcile`` adopts it by its labels (label recovery: TODO(#30)). A
+                # launch.json that holds an error envelope or a result is adopted below, like
+                # stdout.
                 raise ReviewRunError(
                     "failed",
                     f"agent-spawn failed ({exc.lower_code})",

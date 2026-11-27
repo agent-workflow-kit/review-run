@@ -428,6 +428,7 @@ TEARDOWN_REASONS: Final = frozenset(
         "skill_missing",
         "artifact_invalid",
         "internal",
+        "expired",
     }
 )
 

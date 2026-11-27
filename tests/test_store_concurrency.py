@@ -17,6 +17,7 @@ from typing import Any
 import pytest
 
 from review_run.store import Expect, NewRun, Store, lease_name
+from review_run.store_schema import SCHEMA_VERSION
 
 WORKER = Path(__file__).resolve().parent / "store_worker.py"
 KEY = Expect("running", "prefetch", None)
@@ -67,7 +68,7 @@ def test_concurrent_first_open_migrates_once(tmp_path: Path) -> None:
     root, go = tmp_path / "state", tmp_path / "go"
     procs = [spawn("open", root, go) for _ in range(WORKERS)]
     go.write_text("go")
-    assert [r["version"] for r in collect(procs)] == [1] * WORKERS
+    assert [r["version"] for r in collect(procs)] == [SCHEMA_VERSION] * WORKERS
 
 
 def test_exactly_one_finalizer_wins(tmp_path: Path) -> None:
@@ -153,7 +154,7 @@ def test_killed_in_the_middle_of_a_transaction_leaves_the_old_state(
             lease = store.acquire_lease(lease_name(run_id))
             assert lease is not None
             assert store.begin_finalize(run_id, KEY, lease=lease)
-        assert store.schema_version() == 1
+        assert store.schema_version() == SCHEMA_VERSION
 
 
 def test_a_killed_lease_holder_is_replaced_at_once(tmp_path: Path) -> None:

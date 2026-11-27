@@ -24,8 +24,8 @@ Interface: ``docs/interface.md`` section Hooks (normative). Rules kept here:
 Seams: ``run`` start (#16) calls ``run_pre_run`` and stores ``hooks.add_flag_hooks`` output with
 the run;
 the finalize and escalate paths (#19) build the payloads here into ``NewEvent`` rows and call
-``deliver_pending`` right after the commit; ``reconcile`` (#29) calls it for the redelivery pass and
-reports ``stuck_audit``. An ``async`` entry's timeout is enforced by the gateway's supervisor
+``deliver_pending`` right after the commit; ``reconcile`` calls it for the redelivery pass and
+counts ``stuck_audit``. An ``async`` entry's timeout is enforced by the gateway's supervisor
 process, which outlives this one (a hook that exits leaving background descendants gives those no
 timeout: a documented residual). An invalid stored ``--hook`` entry is never skipped: ``pre-run``
 vetoes and a post hook counts a failed attempt (fail closed).
@@ -33,7 +33,6 @@ TODO(#16): wire ``run`` start to ``run_pre_run`` and store the ``add_flag_hooks`
 the run.
 TODO(#19): wire the finalize and escalate paths to build the payloads into ``NewEvent`` rows and
 call ``deliver_pending`` right after the commit.
-TODO(#29): wire ``reconcile`` to the redelivery pass and report ``stuck_audit``.
 """
 
 from __future__ import annotations

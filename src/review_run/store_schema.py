@@ -114,8 +114,20 @@ _V1: tuple[str, ...] = (
     )""",
 )
 
+# Version 2: the counters of ``reconcile`` (failed teardown retries per run, audit passes per
+# event),
+# so that ``stuck_teardowns`` and ``stuck_audit`` count repeated failures (interface.md, reconcile).
+_V2: tuple[str, ...] = (
+    """CREATE TABLE repair_attempts (
+        kind TEXT NOT NULL CHECK (kind IN ('teardown', 'audit')),
+        key TEXT NOT NULL,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (kind, key)
+    )""",
+)
+
 # Index i holds the statements that take the schema from version i to i + 1.
-MIGRATIONS: tuple[tuple[str, ...], ...] = (_V1,)
+MIGRATIONS: tuple[tuple[str, ...], ...] = (_V1, _V2)
 SCHEMA_VERSION = len(MIGRATIONS)
 
 _ADDITIVE = re.compile(

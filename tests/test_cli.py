@@ -10,14 +10,14 @@ from tests.golden_harness import check_golden
 from tests.helpers import run_cli
 
 COMMANDS: list[list[str]] = [
-    ["reconcile"],
     ["prune"],
     ["cron", "install"],
     ["cron", "uninstall"],
 ]
 # `export` (tests/test_audit.py), `list` and `show` (tests/test_runs.py) are implemented and
 # `run` has its own tests (tests/test_preflight.py: its checks reach sibling tools); the others
-# are stubs of later issues (`resume`: tests/test_resume.py; `cancel`: tests/test_cancel.py;
+# are stubs of later issues (`reconcile`: tests/test_reconcile.py; `resume`: tests/test_resume.py;
+# `cancel`: tests/test_cancel.py;
 # `wait` and the refresh of `show`: tests/test_outcome.py).
 
 
