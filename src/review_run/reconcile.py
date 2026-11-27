@@ -58,6 +58,10 @@ MAX_RUNS: Final = 1000  # runs per scan, oldest first (live runs, pending teardo
 MAX_SWEEP: Final = 500  # terminal runs with leftover prompt files swept per pass, oldest first
 STUCK_AFTER: Final = 5  # failed passes before ``teardown_stuck`` and ``audit_stuck``
 SCRATCH_AGE: Final = dt.timedelta(hours=1)
+# failed-sweep counts live in repair_attempts (whose kind is constrained) as kind "teardown" with
+# the key "sweep:<run id>": it never joins a run row, so stuck_teardowns does not count it
+SWEEP_KIND: Final = "teardown"
+SWEEP_KEY: Final = "sweep:"
 SCRATCH_PREFIX: Final = "dry-"
 SCRATCH_SUFFIX_LEN: Final = 16
 
@@ -149,6 +153,8 @@ class _Pass:
             self.changes.extend(step())
         except Exception as exc:  # per-run isolation: nothing but a closed code is kept
             code = exc.code if isinstance(exc, ReviewRunError) else "internal"
+            if self.dry:
+                return
             try:
                 self.log.write(
                     "reconcile",
@@ -170,6 +176,8 @@ class _Pass:
         return ids[:limit]
 
     def note(self, message: str, code: str, *, count: int | None = None) -> None:
+        if self.dry:  # a dry run writes nothing
+            return
         try:
             self.log.write("reconcile", message, level="warn", code=code, count=count)
         except (OSError, ReviewRunError, ValueError):
@@ -207,14 +215,28 @@ class _Pass:
             row = self.store.get_run(name, tolerant=True)
             if row is not None and row.state in ("done", "failed"):
                 found.append((str(row.created_at), name))
-        return [name for _, name in sorted(found)]
+        # fewest failed sweeps first, then oldest: a leftover that cannot be removed sinks
+        failed = self.store.sweep_failures(SWEEP_KEY)
+        found.sort(key=lambda f: (failed.get(f[1], 0), f[0], f[1]))
+        return [name for _, name in found]
 
     def prompts(self) -> None:
         live = self.store.live_run_ids(MAX_RUNS)  # the cut was logged by ``runs``
         left = self.leftover_ids(set(live))
         left = self.limited("prompt_sweep", left, MAX_SWEEP)
+        left_set = set(left)
         for run_id in dict.fromkeys([*live, *left]):
             self.isolated(run_id, lambda r=run_id: sweep_prompt_files(self.root, r, self.recover))
+            if run_id in left_set and not self.dry and not self.lost():
+                self.count_sweep(run_id)
+
+    def count_sweep(self, run_id: str) -> None:
+        """A terminal run whose prompt files are still there after its sweep counts one failure."""
+        base = self.root / "runs" / run_id
+        if os.path.lexists(base / "prompt.md") or os.path.lexists(base / "inputs"):
+            self.store.bump_attempts(SWEEP_KIND, SWEEP_KEY + run_id)
+        else:
+            self.store.clear_attempts(SWEEP_KIND, SWEEP_KEY + run_id)
 
     def scratch(self) -> None:
         """``tmp/dry-<16 hex>`` directories (of a ``run --dry-run`` that was killed) older than

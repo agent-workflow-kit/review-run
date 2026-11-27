@@ -604,3 +604,45 @@ def test_a_resume_in_flight_holds_the_run_so_reconcile_does_not_revert_it(
         proc.kill()
         proc.wait()
     assert kinds(rec(cli)) == [(run_id, "resume_reverted")]
+
+
+# -- dry run writes no log; the sweep is not starved ----------------------------------------------------
+
+
+def test_a_dry_run_writes_nothing_to_the_log_even_when_a_scan_hits_its_limit(
+    world: World, cli, monkeypatch: pytest.MonkeyPatch
+) -> None:  # type: ignore[no-untyped-def]
+    live(cli)
+    live(cli)
+    log = default_state_root() / "log.jsonl"
+    before = log.read_bytes() if log.exists() else None
+    monkeypatch.setattr(rc, "MAX_RUNS", 1)
+    rec(cli, "--dry-run")
+    assert (log.read_bytes() if log.exists() else None) == before
+    run_id = live(cli)
+    (default_state_root() / "runs" / run_id / "settings.json").unlink()
+    before = log.read_bytes() if log.exists() else None
+    rec(cli, "--dry-run")
+    assert (log.read_bytes() if log.exists() else None) == before
+
+
+def test_undeletable_leftovers_do_not_starve_a_newer_removable_one(
+    world: World, cli, monkeypatch: pytest.MonkeyPatch
+) -> None:  # type: ignore[no-untyped-def]
+    ids = [started(cli, world) for _ in range(4)]
+    rec(cli)  # all finalized
+    stuck, newest = ids[:3], ids[3]
+    for r in ids:
+        (default_state_root() / "runs" / r / "prompt.md").write_text("x")
+    real = rc.sweep_prompt_files
+
+    def sweep(root, run_id, opts):  # type: ignore[no-untyped-def]
+        if run_id in stuck:
+            raise OSError("undeletable")
+        return real(root, run_id, opts)
+
+    monkeypatch.setattr(rc, "sweep_prompt_files", sweep)
+    monkeypatch.setattr(rc, "MAX_SWEEP", 2)
+    for _ in range(3):
+        rec(cli)
+    assert not (default_state_root() / "runs" / newest / "prompt.md").exists()

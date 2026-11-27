@@ -1033,6 +1033,16 @@ class Store:
         with self.transaction() as conn:
             conn.execute("DELETE FROM repair_attempts WHERE kind = ? AND key = ?", (kind, key))
 
+    def sweep_failures(self, prefix: str) -> dict[str, int]:
+        """Failed prompt sweeps per run id (``repair_attempts`` rows of kind ``teardown`` whose
+        key is ``prefix`` + the run id)."""
+        rows = self._conn.execute(
+            "SELECT key, attempts FROM repair_attempts WHERE kind = 'teardown'"
+            " AND substr(key, 1, ?) = ?",
+            (len(prefix), prefix),
+        ).fetchall()
+        return {str(k)[len(prefix) :]: int(n) for k, n in rows}
+
     def stuck_teardowns(self, minimum: int) -> int:
         """Runs whose teardown is not done after ``minimum`` or more failed retries."""
         row = self._conn.execute(
