@@ -53,9 +53,15 @@ from .errors import ReviewRunError
 from .finalize import AgentFinalize, Seams, finalize_agent, outcome_from_show, show_agent
 from .keeper import LeaseKeeper
 from .lazyhooks import LazyHooks
-from .liveness import launcher_in_window, launcher_state, runner_state, stored_agent
+from .liveness import (
+    launcher_in_window,
+    launcher_state,
+    parse_time,
+    runner_state,
+    stored_agent,
+)
 from .prompt import remove_prompt_files
-from .runs import run_object
+from .runs import REASONS, STATES, TEARDOWNS, run_object
 from .settings import RunSettings, load_run_settings
 from .store import LEASE_RENEW_SECONDS, Lease, Run, Store, is_run_id, lease_name
 
@@ -113,8 +119,8 @@ class RecoverOptions:
     judge_escalated: bool = False
 
     def escalation_ttl(self) -> dt.timedelta | None:
-        """``escalation_ttl`` as a duration; ``null`` and ``0`` mean no expiry (the conservative
-        reading of ``0``: a run is never ended on a zero age)."""
+        """``escalation_ttl`` as a duration; only ``null`` means no expiry (``0`` expires an
+        escalated run whose age is above zero, at the first pass after its escalation)."""
         if not isinstance(self.ttl, _Lazy):
             return self.ttl
         value: dt.timedelta | None = None
@@ -123,8 +129,6 @@ class RecoverOptions:
             if isinstance(raw, str):
                 value = parse_duration(raw)
         except (ReviewRunError, DurationError):
-            value = None
-        if value is not None and value <= dt.timedelta(0):
             value = None
         self.ttl = value
         return value
@@ -152,20 +156,25 @@ def _lower_failed(code: str) -> ReviewRunError:
     )
 
 
+def closed(value: object, allowed: Sequence[str] | Mapping[str, Any]) -> str | None:
+    """``value`` when it is one of the closed ``allowed`` words, ``None`` for ``None``, else
+    ``"unknown"``: stored text never reaches the output as it is stored."""
+    if value is None:
+        return None
+    return value if isinstance(value, str) and value in allowed else "unknown"
+
+
 def _ended(row: Run) -> Repair:
     """The change of a run that ended (or escalated) in this pass, from the stored row."""
     kind = _REASON_KIND.get(row.reason or "", "finalized") if row.state == "failed" else "finalized"
-    return Repair(kind, row.run_id, {"state": row.state, "reason": row.reason})
+    return Repair(
+        kind,
+        row.run_id,
+        {"state": closed(row.state, STATES), "reason": closed(row.reason, REASONS)},
+    )
 
 
-def _parse(text: str | None) -> dt.datetime | None:
-    if not isinstance(text, str):
-        return None
-    try:
-        moment = dt.datetime.fromisoformat(text)
-    except ValueError:
-        return None
-    return moment if moment.tzinfo is not None else moment.replace(tzinfo=dt.UTC)
+_parse = parse_time
 
 
 class _Recovery:
@@ -227,6 +236,7 @@ class _Recovery:
             if held is None:
                 return []
             if self.dry:
+                self.dry_ready(plan.repair)
                 return [plan.repair]
             fresh = self.row(run.run_id)
             if fresh is None or fresh.key != run.key:
@@ -235,6 +245,16 @@ class _Recovery:
             if plan is None:
                 return []
             return self.uninterrupted(lambda: act(fresh, plan, held))
+
+    def dry_ready(self, repair: Repair) -> None:
+        """What the real repair needs before it writes, checked in a dry run too, so that a run the
+        real pass skips (a missing run directory or ``settings.json``) is not planned."""
+        if repair.run_id is None:
+            return
+        if repair.kind in ("runner_lost", "agent_gone", "expired", "canceled", "finalized"):
+            load_run_settings(self.need_dir(repair.run_id))
+        elif repair.kind == "teardown_retried":
+            self.need_dir(repair.run_id)
 
     def need_dir(self, run_id: str) -> Path:
         """The run's directory, which must exist (a repair never creates one)."""
@@ -247,7 +267,9 @@ class _Recovery:
     def uninterrupted(work: Callable[[], list[Repair]]) -> list[Repair]:
         """From the first write on a signal does not interrupt a repair (interface.md, Signals:
         a ``wait`` that ends the run itself keeps its outcome); when nothing changed a pending
-        signal is raised now and later ones stay accepted."""
+        signal is raised now and later ones stay accepted. It acts only where a guard is
+        installed (``wait``): ``reconcile`` and ``show`` install none, so a repair they began that
+        is cut short is recovered by the next pass."""
         try:
             with signals.deferred(raise_on_exit=False):
                 repairs = work()
@@ -285,8 +307,10 @@ class _Recovery:
             cause=cause,
         )
 
-    def finish(self, before: Run, after: Run | None) -> list[Repair]:
-        if after is None or after.state == before.state:
+    def finish(self, before: Run, after: Run | None, *, moved: bool) -> list[Repair]:
+        """The change this call made: reported only when ``moved`` (this call's own terminal
+        transition), never for what another process finalized meanwhile."""
+        if not moved or after is None or after.state == "running":
             return []
         return [_ended(after)]
 
@@ -310,7 +334,9 @@ class _Recovery:
             return []
         if self.dry:
             return self._plan_agent(run)
-        return self.finish(run, finalize_agent(self.root, run.run_id, self.agent_finalize(run)))
+        opts = self.agent_finalize(run)
+        after = finalize_agent(self.root, run.run_id, opts)
+        return self.finish(run, after, moved=opts.moved)
 
     def _plan_agent(self, run: Run) -> list[Repair]:
         agent = stored_agent(run)
@@ -340,8 +366,10 @@ class _Recovery:
         with self.held(run.run_id) as held:
             if held is None:
                 return []
-        return [Repair(kind, run.run_id, {"state": None if kind == "finalized" else "failed",
-                                          "reason": reason})]  # fmt: skip
+        planned = Repair(kind, run.run_id, {"state": None if kind == "finalized" else "failed",
+                                          "reason": reason})  # fmt: skip
+        self.dry_ready(planned)
+        return [planned]
 
     # -- a run with no agent
 
@@ -364,8 +392,12 @@ class _Recovery:
     def _decide_no_agent(self, run: Run) -> _Plan | None:
         if run.state != "running" or run.agent_id is not None:
             return None
-        if run.phase not in ("prefetch", "code_run", "session") or not self._gone(run):
+        if not self._gone(run):
             return None
+        if run.cancel_requested_at is not None:
+            # a cancellation recorded after the first read is decided like any recorded one
+            plan = self._decide_canceled(run, no_agent=True)
+            return None if plan is None else _Plan(plan.repair, {**plan.data, "canceled": True})
         found = lc.interpret_file(self.launch_path(run.run_id))
         if found is not None:
             return self._plan_launch_file(run, found)
@@ -406,6 +438,8 @@ class _Recovery:
 
     def _act_no_agent(self, run: Run, plan: _Plan, held: _Held) -> list[Repair]:
         data = plan.data
+        if data.get("canceled"):
+            return self._end_canceled(run, plan, held)
         if "adopt" in data:
             assert held.lease is not None
             stored = self.store.update_fields(
@@ -434,7 +468,7 @@ class _Recovery:
             after = ender.apply_failure(data["disposition"])
         else:
             after = ender.end_failed("runner_lost", 12)
-        return self.finish(run, after)
+        return self.finish(run, after, moved=ender.moved)
 
     # -- a recorded cancellation
 
@@ -443,12 +477,14 @@ class _Recovery:
             return []
         return self.guarded(run, self._decide_canceled, self._end_canceled)
 
-    def _decide_canceled(self, run: Run) -> _Plan | None:
+    def _decide_canceled(self, run: Run, *, no_agent: bool = False) -> _Plan | None:
         """End ``canceled`` once nothing of the run is live: no runner or launcher (checked by
         the caller for a ``running`` run) and an agent that is not live."""
         if run.cancel_requested_at is None:
             return None
-        if run.state == "running" and (run.phase == "finalize" or not self._gone(run)):
+        if run.state == "running" and (
+            (run.phase == "finalize" and not no_agent) or not self._gone(run)
+        ):
             return None
         plan = _Plan(Repair("canceled", run.run_id, {"state": "failed", "reason": "canceled"}))
         agent = stored_agent(run)
@@ -496,7 +532,7 @@ class _Recovery:
             ),
             verdict="mismatch" if look_alike is not None else None,
         )
-        return self.finish(run, after)
+        return self.finish(run, after, moved=ender.moved)
 
     # -- a resume that died
 
@@ -541,7 +577,9 @@ class _Recovery:
         if verdict != "owned":
             return None  # live on an older run: someone else is working on it
         reverted = Repair(
-            "resume_reverted", run.run_id, {"state": "escalated", "reason": run.escalation_reason}
+            "resume_reverted",
+            run.run_id,
+            {"state": "escalated", "reason": closed(run.escalation_reason, REASONS)},
         )
         return _Plan(reverted, {"revert": True})
 
@@ -577,7 +615,7 @@ class _Recovery:
         after = ender.apply_failure(
             lc.Disposition("fail", "agent_gone", 12), verdict="mismatch" if mismatch else None
         )
-        return self.finish(run, after)
+        return self.finish(run, after, moved=ender.moved)
 
     # -- an escalated run
 
@@ -588,8 +626,9 @@ class _Recovery:
             return []
         repairs: list[Repair] = []
         if not self.dry:
-            after = finalize_agent(self.root, run.run_id, self.agent_finalize(run, escalated=True))
-            repairs = self.finish(run, after)
+            opts = self.agent_finalize(run, escalated=True)
+            after = finalize_agent(self.root, run.run_id, opts)
+            repairs = self.finish(run, after, moved=opts.moved)
             if after is None or after.state != "escalated":
                 return repairs
             run = after
@@ -633,7 +672,7 @@ class _Recovery:
             return self._act_gone(run, plan, held)
         ender = self.ender(run, held, "expired")
         after = ender.apply_failure(lc.Disposition("fail", "expired", 12), verdict="owned")
-        return self.finish(run, after)
+        return self.finish(run, after, moved=ender.moved)
 
     # -- the dispatcher
 
@@ -663,7 +702,9 @@ class _Recovery:
             return None
         if stored_agent(run) is None or "agent_mismatch" in run.warnings:
             return None  # a look-alike is never touched, and never retried
-        return _Plan(Repair("teardown_retried", run.run_id, {"teardown": run.teardown}))
+        return _Plan(
+            Repair("teardown_retried", run.run_id, {"teardown": closed(run.teardown, TEARDOWNS)})
+        )
 
     def _act_teardown(self, run: Run, plan: _Plan, held: _Held) -> list[Repair]:
         agent = stored_agent(run)
@@ -684,7 +725,7 @@ class _Recovery:
             self.store.clear_attempts("teardown", run.run_id)
         else:
             self.store.bump_attempts("teardown", run.run_id)
-        return [Repair("teardown_retried", run.run_id, {"teardown": status})]
+        return [Repair("teardown_retried", run.run_id, {"teardown": closed(status, TEARDOWNS)})]
 
     # -- stale prompt files
 

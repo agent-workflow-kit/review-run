@@ -566,6 +566,9 @@ class AgentFinalize:
     shell: Sequence[str] = hooks.SHELL
     lease_interval: float | None = None
     escalated: bool = False  # also finalize an ``escalated`` run whose agent finished a newer run
+    # set by ``finalize_agent``: whether this call's own terminal transaction moved the run (a run
+    # another process finalized meanwhile is not this call's change)
+    moved: bool = field(default=False, init=False)
 
 
 def _show(agent_id: str) -> tuple[int, dict[str, Any]] | None:
@@ -715,6 +718,16 @@ def _finalize_held(
         finalized_by=opts.finalized_by,
         cause="external_resume" if run.state == "escalated" else opts.cause,
     )
+    try:
+        return _finalize_shown(store, run, run_id, lease, ender, opts)
+    finally:
+        opts.moved = ender.moved
+
+
+def _finalize_shown(
+    store: Store, run: Run, run_id: str, lease: Lease, ender: Ender, opts: AgentFinalize
+) -> Run | None:
+    assert run.agent_id is not None
     shown = _show(run.agent_id)
     if shown is None:
         return run

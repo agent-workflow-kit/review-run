@@ -183,7 +183,7 @@
         }
       ],
       "default": "7d",
-      "description": "Age of an escalated run at which reconcile ends it failed (expired); null disables."
+      "description": "Age of an escalated run at which reconcile ends it failed (expired); only null disables; 0 expires an escalated run at the first pass after its escalation."
     },
     "me": {
       "type": "object",

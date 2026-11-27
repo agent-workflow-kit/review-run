@@ -991,11 +991,14 @@ class Store:
         return [str(r[0]) for r in rows]
 
     def teardown_run_ids(self, limit: int) -> list[str]:
-        """Terminal runs whose agent teardown is ``pending`` or ``failed``, oldest first."""
+        """Terminal runs whose agent teardown is ``pending`` or ``failed``, oldest first; a run
+        with the warning ``agent_mismatch`` (a look-alike agent, never retried) is left out, so it
+        cannot take a place from a newer run."""
         with self._lenient():
             rows = self._conn.execute(
                 "SELECT run_id FROM runs WHERE state IN ('done', 'failed')"
                 " AND teardown IN ('pending', 'failed') AND agent_id IS NOT NULL"
+                " AND COALESCE(warnings, '') NOT LIKE '%\"agent_mismatch\"%'"
                 " ORDER BY created_at, run_id LIMIT ?",
                 (limit,),
             ).fetchall()

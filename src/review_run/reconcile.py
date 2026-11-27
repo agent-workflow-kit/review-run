@@ -46,19 +46,25 @@ from .recovery import (
     LAZY,
     RecoverOptions,
     Repair,
+    closed,
     recover_run,
     retry_teardown,
     sweep_prompt_files,
 )
-from .store import LEASE_RENEW_SECONDS, RECONCILE_LEASE, Store
+from .store import LEASE_RENEW_SECONDS, RECONCILE_LEASE, Store, is_run_id
 
 SCHEMA_VERSION: Final = 1
-MAX_RUNS: Final = 1000  # runs per scan, oldest first
-MAX_SWEEP: Final = 500  # the newest terminal runs checked for stale prompt files
+MAX_RUNS: Final = 1000  # runs per scan, oldest first (live runs, pending teardowns, outbox runs)
+MAX_SWEEP: Final = 500  # terminal runs with leftover prompt files swept per pass, oldest first
 STUCK_AFTER: Final = 5  # failed passes before ``teardown_stuck`` and ``audit_stuck``
 SCRATCH_AGE: Final = dt.timedelta(hours=1)
 SCRATCH_PREFIX: Final = "dry-"
 SCRATCH_SUFFIX_LEN: Final = 16
+
+
+def closed_hook(hook: object) -> str:
+    """A stored hook name, or ``unknown`` for text that is not a hook name."""
+    return closed(hook, hooks_mod.HOOK_NAMES) or "unknown"
 
 
 def _utcnow() -> dt.datetime:
@@ -108,8 +114,15 @@ class ReconcileResult:
 
 
 class _Pass:
-    def __init__(self, root: Path, store: Store, opts: ReconcileOptions) -> None:
+    def __init__(
+        self,
+        root: Path,
+        store: Store,
+        opts: ReconcileOptions,
+        lost: Callable[[], bool] = lambda: False,
+    ) -> None:
         self.root, self.store, self.opts = root, store, opts
+        self.lost = lost  # the reconcile lease was taken over: no further repair
         self.dry = opts.dry_run
         self.log = LogWriter(root)
         self.audit = AuditWriter(root)
@@ -130,6 +143,8 @@ class _Pass:
 
     def isolated(self, run_id: str | None, step: Callable[[], list[Repair]]) -> None:
         """One unit of work whose failure never stops the pass: a closed code goes to the log."""
+        if self.lost():
+            return
         try:
             self.changes.extend(step())
         except Exception as exc:  # per-run isolation: nothing but a closed code is kept
@@ -147,8 +162,22 @@ class _Pass:
 
     # -- the scans
 
+    def limited(self, scan: str, ids: list[str], limit: int) -> list[str]:
+        """``ids`` cut to ``limit`` (the scan asked for one more); a cut writes one log record."""
+        if len(ids) <= limit:
+            return ids
+        self.note(f"scan limit reached: {scan}", "scan_limit", count=limit)
+        return ids[:limit]
+
+    def note(self, message: str, code: str, *, count: int | None = None) -> None:
+        try:
+            self.log.write("reconcile", message, level="warn", code=code, count=count)
+        except (OSError, ReviewRunError, ValueError):
+            pass
+
     def runs(self) -> None:
-        for run_id in self.store.live_run_ids(MAX_RUNS):
+        ids = self.limited("live_runs", self.store.live_run_ids(MAX_RUNS + 1), MAX_RUNS)
+        for run_id in ids:
             self.isolated(
                 run_id, lambda r=run_id: recover_run(self.root, r, self.recover, escalated=True)
             )
@@ -157,13 +186,34 @@ class _Pass:
         # TODO(#32): retry the removal of throwaways recorded as leaked (throwaway_removed,
         # throwaway_leaked) and remove those of a run that ended runner_lost in phase prefetch
         # or code_run.
-        for run_id in self.store.teardown_run_ids(MAX_RUNS):
+        ids = self.limited("pending_teardowns", self.store.teardown_run_ids(MAX_RUNS + 1), MAX_RUNS)
+        for run_id in ids:
             self.isolated(run_id, lambda r=run_id: retry_teardown(self.root, r, self.recover))
 
+    def leftover_ids(self, live: set[str]) -> list[str]:
+        """Terminal runs whose directory still holds ``prompt.md`` or ``inputs`` (two ``lstat``
+        per directory of ``runs/``, which ``prune`` bounds), oldest first, not the live runs."""
+        try:
+            names = [e.name for e in os.scandir(self.root / "runs")]
+        except OSError:
+            return []
+        found: list[tuple[str, str]] = []
+        for name in names:
+            if not is_run_id(name) or name in live:
+                continue
+            base = self.root / "runs" / name
+            if not (os.path.lexists(base / "prompt.md") or os.path.lexists(base / "inputs")):
+                continue
+            row = self.store.get_run(name, tolerant=True)
+            if row is not None and row.state in ("done", "failed"):
+                found.append((str(row.created_at), name))
+        return [name for _, name in sorted(found)]
+
     def prompts(self) -> None:
-        ids = list(dict.fromkeys([*self.store.live_run_ids(MAX_RUNS),
-                                  *self.store.terminal_run_ids(MAX_SWEEP)]))  # fmt: skip
-        for run_id in ids:
+        live = self.store.live_run_ids(MAX_RUNS)  # the cut was logged by ``runs``
+        left = self.leftover_ids(set(live))
+        left = self.limited("prompt_sweep", left, MAX_SWEEP)
+        for run_id in dict.fromkeys([*live, *left]):
             self.isolated(run_id, lambda r=run_id: sweep_prompt_files(self.root, r, self.recover))
 
     def scratch(self) -> None:
@@ -194,6 +244,8 @@ class _Pass:
                 continue
             if not self.dry:
                 shutil.rmtree(entry.path, ignore_errors=True)
+                if os.path.lexists(entry.path):
+                    continue  # not removed: nothing changed, tried again at the next pass
             self.changes.append(Repair("cleaned", None, {"what": "dry_run_scratch"}))
 
     # -- the outbox
@@ -204,21 +256,25 @@ class _Pass:
             len(self.hooks)  # loads the config: a config that does not load defers delivery
         except ReviewRunError:
             deliverable = False
-        for run_id in self.store.pending_event_run_ids(MAX_RUNS):
+        ids = self.limited("outbox", self.store.pending_event_run_ids(MAX_RUNS + 1), MAX_RUNS)
+        for run_id in ids:
             self.isolated(run_id, lambda r=run_id: self._outbox_run(r, deliverable))
 
     def _outbox_run(self, run_id: str, deliverable: bool) -> list[Repair]:
         events = self.store.pending_events(run_id)
-        if self.dry:
-            return [
-                Repair(
-                    "hook_redelivered" if not e["delivered"] else "audit_flushed",
-                    run_id,
-                    {"hook": e["hook"]},
-                )
-                for e in events
-            ]
-        hook_of = {str(e["event_id"]): str(e["hook"]) for e in events}
+        if self.dry:  # the same plan as the real pass: the audit records, then the hooks
+            plan: list[Repair] = []
+            for e in events:
+                if e["audit_pending"]:
+                    plan.append(Repair("audit_flushed", run_id, {"hook": closed_hook(e["hook"])}))
+            if deliverable:
+                for e in events:
+                    if not e["delivered"]:
+                        plan.append(
+                            Repair("hook_redelivered", run_id, {"hook": closed_hook(e["hook"])})
+                        )
+            return plan
+        hook_of = {str(e["event_id"]): closed_hook(e["hook"]) for e in events}
         wanted = [str(e["event_id"]) for e in events if e["audit_pending"]]
         repairs: list[Repair] = []
         try:
@@ -258,7 +314,10 @@ class _Pass:
 
 def reconcile(root: Path, opts: ReconcileOptions) -> ReconcileResult:
     """One pass (see the module docstring). Raises ``ReviewRunError`` only for a state directory
-    that cannot be opened (``state_unsafe``, ``schema_newer``, a database error)."""
+    that cannot be opened (``state_unsafe``, ``schema_newer``, a database error). A dry run on a
+    state directory that has no database reports nothing and creates nothing."""
+    if opts.dry_run and not (Path(root) / "state.db").exists():
+        return ReconcileResult(dry_run=True)
     with Store.open(root, now=opts.now) as store:
         lease = None if opts.dry_run else store.acquire_lease(RECONCILE_LEASE)
         if lease is None and not opts.dry_run:
@@ -268,12 +327,13 @@ def reconcile(root: Path, opts: ReconcileOptions) -> ReconcileResult:
             keeper = LeaseKeeper(root, lease, opts.lease_interval)
             keeper.start()
         try:
-            work = _Pass(root, store, opts)
-            work.runs()
-            work.teardowns()
-            work.prompts()
-            work.scratch()
-            work.outbox()
+            lost = keeper.lost.is_set if keeper is not None else (lambda: False)
+            work = _Pass(root, store, opts, lost)
+            for step in (work.runs, work.teardowns, work.prompts, work.scratch, work.outbox):
+                if lost():
+                    work.note("reconcile lease lost: pass stopped", "lease_lost")
+                    break
+                step()
             teardowns = store.stuck_teardowns(STUCK_AFTER)
             audit = store.stuck_audit(STUCK_AFTER)
         finally:

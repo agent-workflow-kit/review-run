@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import datetime as dt
 import os
+import re
 from typing import Final, Literal
 
 from . import procid
@@ -21,6 +22,38 @@ MAX_PID: Final = 2**31
 LAUNCHER_WINDOW_SECONDS: Final = 120.0
 
 Proc = Literal["alive", "gone", "unknown"]
+_START = re.compile(r"[A-Za-z0-9._-]{1,64}:[0-9]{1,20}")
+
+
+def parse_time(text: object) -> dt.datetime | None:
+    """A stored timestamp as an aware UTC-based time (a naive one is read as UTC), or ``None``."""
+    if not isinstance(text, str):
+        return None
+    try:
+        moment = dt.datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    return moment if moment.tzinfo is not None else moment.replace(tzinfo=dt.UTC)
+
+
+def _plausible(pid: object, start: object) -> bool:
+    return (
+        type(pid) is int
+        and 0 < pid < MAX_PID
+        and isinstance(start, str)
+        and _START.fullmatch(start) is not None
+    )
+
+
+def stored_state(pid: object, start: object) -> Proc:
+    """The state of a stored PID and start: ``gone`` when either is NULL (nothing was stored) or
+    the process verifiably is not there; ``unknown`` when something is stored that is not a
+    plausible identity (never a reason to end a run) or ``/proc`` cannot tell."""
+    if pid is None or start is None:
+        return "gone"
+    if not _plausible(pid, start):
+        return "unknown"
+    return state_of(identity(pid, start))
 
 
 def identity(pid: object, start: object) -> procid.ProcIdentity | None:
@@ -52,11 +85,11 @@ def state_of(ident: procid.ProcIdentity | None) -> Proc:
 
 
 def runner_state(run: Run) -> Proc:
-    return state_of(identity(run.runner_pid, run.runner_start))
+    return stored_state(run.runner_pid, run.runner_start)
 
 
 def launcher_state(run: Run) -> Proc:
-    return state_of(identity(run.launcher_pid, run.launcher_start))
+    return stored_state(run.launcher_pid, run.launcher_start)
 
 
 def launcher_in_window(run: Run, now: dt.datetime, *, launch_file_usable: bool) -> bool:
@@ -66,12 +99,13 @@ def launcher_in_window(run: Run, now: dt.datetime, *, launch_file_usable: bool) 
         return False
     if run.launch_started_at is None:
         return False
-    try:
-        started = dt.datetime.fromisoformat(run.launch_started_at)
-    except ValueError:
-        return False
+    started = parse_time(run.launch_started_at)
+    if started is None:
+        return not launch_file_usable  # unreadable: never "gone"
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=dt.UTC)
     age = (now - started).total_seconds()
-    return 0 <= age < LAUNCHER_WINDOW_SECONDS and not launch_file_usable
+    return age < LAUNCHER_WINDOW_SECONDS and not launch_file_usable  # a negative age is inside
 
 
 __all__ = [
@@ -81,7 +115,9 @@ __all__ = [
     "identity",
     "launcher_in_window",
     "launcher_state",
+    "parse_time",
     "runner_state",
     "state_of",
+    "stored_state",
     "stored_agent",
 ]

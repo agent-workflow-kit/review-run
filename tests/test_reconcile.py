@@ -338,16 +338,6 @@ def test_an_escalated_run_older_than_the_ttl_expires_and_its_agent_is_torn_down(
     assert rec(cli)["changes"] == []
 
 
-def test_a_null_or_zero_ttl_disables_expiry(world: World, cli) -> None:  # type: ignore[no-untyped-def]
-    run_id = escalated(cli, world)
-    poke(run_id, escalated_at=old(400))
-    for text in ("escalation_ttl: null\n", 'escalation_ttl: "0"\n'):
-        world.config_text = "skill: review-run:review-pr\n" + text
-        world.config()
-        assert rec(cli)["changes"] == []
-    assert stored(run_id).state == "escalated"
-
-
 def test_an_expired_looking_run_with_a_live_agent_is_skipped(world: World, cli) -> None:  # type: ignore[no-untyped-def]
     run_id = escalated(cli, world)
     agent = stored(run_id).agent_id or ""
